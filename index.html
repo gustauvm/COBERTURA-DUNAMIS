@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerenciamento de Efetivos - Grupo Dunamis</title>
+    <link rel="stylesheet" href="main.css">
+</head>
+<body>
+
+    <!-- HEADER -->
+    <header>
+        <div class="header-content">
+            <h1 id="app-title">Gerenciamento de Efetivos</h1>
+            <button class="theme-toggle-btn" onclick="toggleDarkMode()">
+                🌙 Modo Noturno
+            </button>
+        </div>
+    </header>
+
+    <!-- GATEWAY (Seleção de Grupo) -->
+    <section id="gateway">
+        <!-- Injetado via JS -->
+    </section>
+
+    <!-- APLICAÇÃO PRINCIPAL -->
+    <main id="app-container">
+        <button class="btn btn-secondary" onclick="resetToGateway()">
+            &larr; Voltar para Seleção
+        </button>
+        
+        <div id="content-area">
+            <!-- Dashboard (Abas) será injetado aqui -->
+        </div>
+    </main>
+
+    <!-- Container de Notificações (Toast) -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Botão Scroll Top -->
+    <button id="scroll-top-btn" onclick="scrollToTop()" title="Voltar ao topo">↑</button>
+
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
