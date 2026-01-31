@@ -11,6 +11,15 @@ let lastUpdatedAt = null; // Timestamp da última carga de dados
 const NEXTI_AVAILABLE = false; // Nesta fase, a API Nexti NÃO deve ser chamada
 let unitAddressDb = { entries: [], address_map: {}, address_map_norm: {} };
 let unitGeoCache = {};
+let shadowReady = false;
+let shadowSyncTimer = null;
+let shadowStatus = {
+    available: false,
+    lastPull: null,
+    lastPush: null,
+    pending: false,
+    error: null
+};
 
 // ==========================================================================
 // 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
@@ -39,6 +48,7 @@ function saveLocalState() {
     localStorage.setItem('collaboratorEdits', JSON.stringify(collaboratorEdits));
     localStorage.setItem('unitMetadata', JSON.stringify(unitMetadata));
     localStorage.setItem('changeHistory', JSON.stringify(changeHistory));
+    scheduleShadowSync('local-save');
 }
 
 function clearLocalState() {
@@ -48,6 +58,212 @@ function clearLocalState() {
     localStorage.removeItem('collaboratorEdits');
     localStorage.removeItem('unitMetadata');
     localStorage.removeItem('changeHistory');
+}
+
+function shadowEnabled() {
+    return !!(CONFIG?.shadow?.webAppUrl);
+}
+
+async function shadowRequest(action, payload = {}) {
+    if (!shadowEnabled()) return null;
+    const url = CONFIG.shadow.webAppUrl;
+    const body = {
+        action,
+        token: CONFIG.shadow.token || '',
+        payload
+    };
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    const text = await response.text();
+    try {
+        return JSON.parse(text);
+    } catch {
+        return null;
+    }
+}
+
+function buildShadowState() {
+    return {
+        collaboratorEdits,
+        unitMetadata,
+        changeHistory,
+        localCollaborators: getLocalCollaborators(),
+        updatedAt: new Date().toISOString()
+    };
+}
+
+function applyShadowState(state) {
+    if (!state) return;
+    collaboratorEdits = state.collaboratorEdits || {};
+    unitMetadata = state.unitMetadata || {};
+    changeHistory = Array.isArray(state.changeHistory) ? state.changeHistory : [];
+    if (Array.isArray(state.localCollaborators)) {
+        saveLocalCollaborators(state.localCollaborators);
+    }
+    saveLocalState();
+    renderAuditList();
+}
+
+function scheduleShadowSync(reason) {
+    if (!shadowEnabled()) return;
+    if (shadowSyncTimer) clearTimeout(shadowSyncTimer);
+    shadowSyncTimer = setTimeout(() => {
+        shadowPushAll(reason);
+    }, 700);
+}
+
+async function shadowPullState(showToastOnFail = false) {
+    if (!shadowEnabled()) return false;
+    try {
+        const result = await shadowRequest('pull');
+        if (!result || !result.ok) throw new Error('Shadow pull failed');
+        applyShadowState(result.state || {});
+        shadowStatus.available = true;
+        shadowStatus.lastPull = new Date();
+        shadowStatus.error = null;
+        shadowReady = true;
+        updateShadowStatusUI();
+        return true;
+    } catch (err) {
+        shadowStatus.error = 'Falha ao carregar shadow';
+        updateShadowStatusUI();
+        if (showToastOnFail) showToast("Falha ao carregar o banco shadow.", "error");
+        return false;
+    }
+}
+
+async function shadowPushAll(reason = '') {
+    if (!shadowEnabled()) return false;
+    try {
+        const state = buildShadowState();
+        const result = await shadowRequest('push_all', { state, reason });
+        if (!result || !result.ok) throw new Error('Shadow push failed');
+        shadowStatus.available = true;
+        shadowStatus.lastPush = new Date();
+        shadowStatus.pending = false;
+        shadowStatus.error = null;
+        updateShadowStatusUI();
+        return true;
+    } catch {
+        shadowStatus.pending = true;
+        shadowStatus.error = 'Falha ao salvar no shadow';
+        updateShadowStatusUI();
+        return false;
+    }
+}
+
+async function shadowPushHistory(reason = '') {
+    if (!shadowEnabled()) {
+        showToast("Shadow não configurado.", "error");
+        return false;
+    }
+    try {
+        const result = await shadowRequest('push_history', { history: changeHistory, reason });
+        if (!result || !result.ok) throw new Error('Shadow history push failed');
+        shadowStatus.available = true;
+        shadowStatus.lastPush = new Date();
+        shadowStatus.pending = false;
+        shadowStatus.error = null;
+        updateShadowStatusUI();
+        return true;
+    } catch {
+        shadowStatus.pending = true;
+        shadowStatus.error = 'Falha ao salvar histórico no shadow';
+        updateShadowStatusUI();
+        return false;
+    }
+}
+
+async function shadowPushSnapshot(reason = '') {
+    if (!shadowEnabled()) {
+        showToast("Shadow não configurado.", "error");
+        return false;
+    }
+    if (!currentData || currentData.length === 0) {
+        showToast("Carregue uma base antes de importar snapshot.", "error");
+        return false;
+    }
+    try {
+        const result = await shadowRequest('push_snapshot', {
+            snapshot: currentData,
+            group: currentGroup,
+            reason
+        });
+        if (!result || !result.ok) throw new Error('Shadow snapshot push failed');
+        shadowStatus.available = true;
+        shadowStatus.lastPush = new Date();
+        shadowStatus.pending = false;
+        shadowStatus.error = null;
+        updateShadowStatusUI();
+        showToast("Snapshot da base enviado para o shadow.", "success");
+        return true;
+    } catch {
+        shadowStatus.pending = true;
+        shadowStatus.error = 'Falha ao enviar snapshot para o shadow';
+        updateShadowStatusUI();
+        showToast("Falha ao enviar snapshot para o shadow.", "error");
+        return false;
+    }
+}
+
+async function shadowResetAll() {
+    if (!shadowEnabled()) {
+        showToast("Shadow não configurado.", "error");
+        return;
+    }
+    const confirmReset = confirm("Tem certeza que deseja zerar o banco shadow? Isso apagará alterações e histórico globais.");
+    if (!confirmReset) return;
+    try {
+        const result = await shadowRequest('reset');
+        if (!result || !result.ok) throw new Error('Shadow reset failed');
+        clearLocalState();
+        saveLocalCollaborators([]);
+        shadowStatus.available = true;
+        shadowStatus.lastPush = new Date();
+        shadowStatus.pending = false;
+        shadowStatus.error = null;
+        updateShadowStatusUI();
+        showToast("Banco shadow zerado.", "success");
+        if (currentGroup) loadGroup(currentGroup);
+    } catch {
+        shadowStatus.error = 'Falha ao zerar o shadow';
+        updateShadowStatusUI();
+        showToast("Falha ao zerar o banco shadow.", "error");
+    }
+}
+
+function updateShadowStatusUI() {
+    const el = document.getElementById('shadowStatus');
+    if (!el) return;
+    if (!shadowEnabled()) {
+        el.innerHTML = `<div class="shadow-status off">Shadow não configurado.</div>`;
+        return;
+    }
+    const pull = shadowStatus.lastPull ? shadowStatus.lastPull.toLocaleString() : 'nunca';
+    const push = shadowStatus.lastPush ? shadowStatus.lastPush.toLocaleString() : 'nunca';
+    const pending = shadowStatus.pending ? 'Sim' : 'Não';
+    const err = shadowStatus.error ? `<div class="shadow-status error">${shadowStatus.error}</div>` : '';
+    el.innerHTML = `
+        <div class="shadow-status ok">Shadow: ${shadowStatus.available ? 'Ativo' : 'Indisponível'}</div>
+        <div class="shadow-meta">Último pull: ${pull}</div>
+        <div class="shadow-meta">Último push: ${push}</div>
+        <div class="shadow-meta">Pendências: ${pending}</div>
+        ${err}
+    `;
+}
+
+async function shadowPullAndReload() {
+    if (!shadowEnabled()) {
+        showToast("Shadow não configurado.", "error");
+        return;
+    }
+    const ok = await shadowPullState(true);
+    if (ok && currentGroup) {
+        loadGroup(currentGroup);
+    }
 }
 
 function loadAuthFromStorage() {
@@ -193,6 +409,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadLocalState();
     loadAuthFromStorage();
     loadUnitAddressDb();
+    shadowPullState();
     renderGateway();
     updateMenuStatus();
     updateLastUpdatedDisplay();
@@ -276,13 +493,23 @@ async function loadGroup(groupKey) {
     gateway.classList.add('hidden');
     appContainer.style.display = 'block';
     contentArea.innerHTML = '<div class="loading">Carregando dados do Google Sheets...</div>';
+
+    if (shadowEnabled() && !shadowReady) {
+        await shadowPullState(true);
+    }
     
     // Verificar se existem edições locais
     let keepChanges = false;
-    if (Object.keys(collaboratorEdits).length > 0 || Object.keys(unitMetadata).length > 0) {
+    const hasLocalChanges = Object.keys(collaboratorEdits).length > 0
+        || Object.keys(unitMetadata).length > 0
+        || getLocalCollaborators().length > 0;
+    if (shadowEnabled()) {
+        keepChanges = hasLocalChanges;
+    } else if (hasLocalChanges) {
         keepChanges = confirm("Existem alterações locais salvas (edições de colaboradores ou unidades). Deseja mantê-las sobre os dados da planilha?");
         if (!keepChanges) {
             clearLocalState();
+            saveLocalCollaborators([]);
         }
     }
 
@@ -938,6 +1165,21 @@ function renderDashboard() {
                             <div id="sourceStatus" class="source-status"></div>
                             <div id="dataSourceList" class="source-list"></div>
                         </div>
+
+                        <div class="config-card">
+                            <div class="card-title">Sincronização (Shadow)</div>
+                            <div id="shadowStatus" class="shadow-status-block"></div>
+                            <div class="config-note">Manter alterações (padrão): carrega a base original e aplica as alterações do shadow por cima. Nada é apagado.</div>
+                            <div class="config-note">Importar base atual para o shadow: grava a base atual do site no banco shadow. Útil para criar um snapshot global. Pode sobrescrever versões anteriores.</div>
+                            <div class="config-note">Zerar banco shadow: apaga todas as alterações e histórico global. O site volta a usar apenas a base original.</div>
+                            <div class="config-note">Sincronizar histórico: força a regravação do histórico do site no banco shadow. Não altera a base original.</div>
+                            <div class="actions" id="shadowActions">
+                                <button class="btn" onclick="shadowPullAndReload()">Aplicar alterações do shadow agora</button>
+                                <button class="btn btn-secondary" onclick="shadowPushSnapshot()">Importar base atual para o shadow</button>
+                                <button class="btn btn-danger" onclick="shadowResetAll()">Resetar banco de dados (shadow)</button>
+                                <button class="btn btn-secondary" onclick="shadowPushHistory()">Sincronizar histórico</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1111,14 +1353,24 @@ function renderDashboard() {
                         <button class="btn btn-secondary" onclick="exportarCSVAtualizado()">Baixar CSV Atualizado</button>
                         <button class="btn btn-secondary" onclick="exportarGraficos()">Baixar Dados p/ Gráficos (XLSX)</button>
                         <button class="btn btn-secondary" onclick="exportarRelatorioIA()">Baixar Relatório IA (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarResumoGerencial()">Baixar Resumo Gerencial (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarHistoricoDetalhado()">Baixar Histórico Detalhado (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarRelatorioTexto()">Baixar Relatório Texto (TXT)</button>
+                        <h4 style="margin-top:16px;">PDFs</h4>
+                        <button class="btn btn-secondary" onclick="exportarPDFResumoExecutivo()">Gerar PDF - Resumo Executivo</button>
+                        <button class="btn btn-secondary" onclick="exportarPDFHistorico()">Gerar PDF - Histórico</button>
                     </div>
                     <div class="export-col">
                         <h4>Conteúdo</h4>
-                        <p class="export-note">Base Atualizada contém o banco original com as alterações locais aplicadas.</p>
+                        <p class="export-note">Base Atualizada contém o banco original com as alterações do shadow aplicadas.</p>
                         <p class="export-note">Resumo inclui totais por unidade, status e rótulos.</p>
                         <p class="export-note">Completo inclui todas as abas: Base, Resumo, Unidades, Rótulos e Histórico.</p>
                         <p class="export-note">Dados p/ Gráficos traz séries prontas para gráfico de plantão x folga e top unidades.</p>
-                        <p class="export-note">Relatório IA gera observações automáticas sobre cobertura e rótulos (local).</p>
+                        <p class="export-note">Relatório IA gera observações automáticas sobre cobertura e rótulos (shadow).</p>
+                        <p class="export-note">Resumo Gerencial traz visão executiva, por grupo/unidade/status/rótulo e indicadores.</p>
+                        <p class="export-note">Histórico Detalhado organiza ações por responsável, data e tipo de alteração.</p>
+                        <p class="export-note">Relatório Texto gera um resumo pronto para envio à gerência.</p>
+                        <p class="export-note">PDFs geram versões prontas para apresentação (resumo e histórico).</p>
                     </div>
                 </div>
             </div>
@@ -1153,7 +1405,7 @@ function renderDashboard() {
                         <ul>
                             <li>“Atualizado em” mostra quando os dados foram carregados.</li>
                             <li>“Imprimir visão atual” gera uma saída simples para impressão.</li>
-                            <li>As alterações locais ficam apenas neste navegador.</li>
+                            <li>As alterações são sincronizadas no banco shadow quando configurado.</li>
                         </ul>
                     </div>
                 </div>
@@ -2687,6 +2939,7 @@ function removerColaborador() {
             acao: "Exclusão",
             detalhe: `Removeu ${item ? item.nome : 'Colaborador'} do sistema`
         });
+        saveLocalState();
     }
 }
 
@@ -2770,6 +3023,10 @@ function toggleDarkMode() {
 
 function scrollToTop() {
     window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function toggleUtilityButtons() {
+    document.body.classList.toggle('utility-open');
 }
 
 
@@ -3033,6 +3290,71 @@ function buildResumoRows() {
     return { unitRows, rotuloRows };
 }
 
+function isPlantaoStatus(item) {
+    const text = getStatusInfo(item).text || '';
+    return text.includes('PLANTÃO') || text.includes('FT');
+}
+
+function buildStatusRows(items) {
+    const plantao = items.filter(i => isPlantaoStatus(i)).length;
+    const folga = items.length - plantao;
+    return [
+        { "Status": "PLANTÃO", "Quantidade": plantao },
+        { "Status": "FOLGA", "Quantidade": folga }
+    ];
+}
+
+function buildGroupRows(items) {
+    const byGroup = {};
+    items.forEach(item => {
+        const group = (item.grupo || 'N/I').toUpperCase();
+        if (!byGroup[group]) byGroup[group] = { Grupo: group, Total: 0, Plantao: 0, Folga: 0 };
+        byGroup[group].Total += 1;
+        if (isPlantaoStatus(item)) byGroup[group].Plantao += 1;
+        else byGroup[group].Folga += 1;
+    });
+    return Object.values(byGroup);
+}
+
+function buildResponsavelRows(history) {
+    const byUser = {};
+    (history || []).forEach(h => {
+        const name = (h.responsavel || 'N/I').toUpperCase();
+        byUser[name] = (byUser[name] || 0) + 1;
+    });
+    return Object.keys(byUser).map(k => ({ "Responsável": k, "Quantidade": byUser[k] }))
+        .sort((a,b) => b.Quantidade - a.Quantidade);
+}
+
+function buildAcaoRows(history) {
+    const byAction = {};
+    (history || []).forEach(h => {
+        const action = (h.acao || 'N/I').toUpperCase();
+        byAction[action] = (byAction[action] || 0) + 1;
+    });
+    return Object.keys(byAction).map(k => ({ "Ação": k, "Quantidade": byAction[k] }))
+        .sort((a,b) => b.Quantidade - a.Quantidade);
+}
+
+function buildHistoryRows(history) {
+    return (history || []).map(h => ({
+        "Data": h.data || '',
+        "Responsável": h.responsavel || '',
+        "Ação": h.acao || '',
+        "Detalhe": h.detalhe || ''
+    }));
+}
+
+function buildHistoryByDayRows(history) {
+    const byDay = {};
+    (history || []).forEach(h => {
+        const day = (h.data || '').split(',')[0].trim() || 'N/I';
+        byDay[day] = (byDay[day] || 0) + 1;
+    });
+    return Object.keys(byDay).map(d => ({ "Data": d, "Quantidade": byDay[d] }))
+        .sort((a,b) => (a.Data || '').localeCompare(b.Data || ''));
+}
+
 function exportarBaseAtualizada() {
     if (currentData.length === 0) {
         showToast("Não há dados para exportar.", "error");
@@ -3070,7 +3392,7 @@ function exportarTudo() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Base Atualizada");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unitRows), "Resumo por Unidade");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rotuloRows), "Resumo por Rótulo");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(changeHistory), "Historico Local");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(changeHistory), "Historico Global");
     XLSX.writeFile(wb, `exportacao_completa_${new Date().toISOString().slice(0,10)}.xlsx`);
     showToast("Exportação completa gerada.", "success");
 }
@@ -3136,6 +3458,201 @@ function exportarRelatorioIA() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(report), "Relatorio IA");
     XLSX.writeFile(wb, `relatorio_ia_${new Date().toISOString().slice(0,10)}.xlsx`);
     showToast("Relatório IA gerado.", "success");
+}
+
+function exportarResumoGerencial() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const { unitRows, rotuloRows } = buildResumoRows();
+    const groupRows = buildGroupRows(currentData);
+    const statusRows = buildStatusRows(currentData);
+    const responsavelRows = buildResponsavelRows(changeHistory);
+    const acaoRows = buildAcaoRows(changeHistory);
+
+    const resumoGeral = [
+        { "Indicador": "Data do relatório", "Valor": new Date().toLocaleString() },
+        { "Indicador": "Total de colaboradores", "Valor": currentData.length },
+        { "Indicador": "Total de unidades", "Valor": unitRows.length },
+        { "Indicador": "Total de alterações (histórico)", "Valor": changeHistory.length }
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumoGeral), "Resumo Geral");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statusRows), "Por Status");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(groupRows), "Por Grupo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unitRows), "Por Unidade");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rotuloRows), "Por Rótulo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(responsavelRows), "Responsáveis");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(acaoRows), "Ações");
+    XLSX.writeFile(wb, `resumo_gerencial_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Resumo gerencial gerado.", "success");
+}
+
+function exportarHistoricoDetalhado() {
+    if (changeHistory.length === 0) {
+        showToast("Não há histórico para exportar.", "error");
+        return;
+    }
+    const historyRows = buildHistoryRows(changeHistory);
+    const responsavelRows = buildResponsavelRows(changeHistory);
+    const acaoRows = buildAcaoRows(changeHistory);
+    const byDayRows = buildHistoryByDayRows(changeHistory);
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(historyRows), "Historico");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(responsavelRows), "Por Responsavel");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(acaoRows), "Por Acao");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(byDayRows), "Por Dia");
+    XLSX.writeFile(wb, `historico_detalhado_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Histórico detalhado gerado.", "success");
+}
+
+function exportarRelatorioTexto() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const { unitRows, rotuloRows } = buildResumoRows();
+    const groupRows = buildGroupRows(currentData);
+    const statusRows = buildStatusRows(currentData);
+    const responsavelRows = buildResponsavelRows(changeHistory).slice(0, 10);
+    const topUnits = unitRows.sort((a,b) => b.total - a.total).slice(0, 10);
+    const topRotulos = rotuloRows.sort((a,b) => b.Quantidade - a.Quantidade).slice(0, 10);
+
+    const lines = [];
+    lines.push("RELATÓRIO EXECUTIVO - GERENCIAMENTO DE EFETIVOS");
+    lines.push(`Gerado em: ${new Date().toLocaleString()}`);
+    lines.push("");
+    lines.push(`Total de colaboradores: ${currentData.length}`);
+    lines.push(`Total de unidades: ${unitRows.length}`);
+    lines.push(`Total de alterações (histórico): ${changeHistory.length}`);
+    lines.push("");
+    lines.push("Status:");
+    statusRows.forEach(r => lines.push(`- ${r.Status}: ${r.Quantidade}`));
+    lines.push("");
+    lines.push("Por Grupo:");
+    groupRows.forEach(r => lines.push(`- ${r.Grupo}: ${r.Total} (Plantão ${r.Plantao} / Folga ${r.Folga})`));
+    lines.push("");
+    lines.push("Top 10 Unidades por efetivo:");
+    topUnits.forEach(u => lines.push(`- ${u.unidade}: ${u.total}`));
+    lines.push("");
+    lines.push("Top 10 Rótulos:");
+    topRotulos.forEach(r => lines.push(`- ${r["Rótulo"]}: ${r.Quantidade}`));
+    lines.push("");
+    lines.push("Top Responsáveis (Histórico):");
+    responsavelRows.forEach(r => lines.push(`- ${r["Responsável"]}: ${r.Quantidade}`));
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `relatorio_executivo_${new Date().toISOString().slice(0,10)}.txt`;
+    link.click();
+    showToast("Relatório texto gerado.", "success");
+}
+
+function exportarPDFResumoExecutivo() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+        showToast("Biblioteca de PDF não carregada.", "error");
+        return;
+    }
+    const { unitRows, rotuloRows } = buildResumoRows();
+    const groupRows = buildGroupRows(currentData);
+    const statusRows = buildStatusRows(currentData);
+    const topUnits = unitRows.sort((a,b) => b.total - a.total).slice(0, 8);
+    const topRotulos = rotuloRows.sort((a,b) => b.Quantidade - a.Quantidade).slice(0, 8);
+
+    const doc = new window.jspdf.jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    let y = 14;
+    doc.setFontSize(14);
+    doc.text("Resumo Executivo - Gerenciamento de Efetivos", 14, y);
+    y += 8;
+    doc.setFontSize(10);
+    doc.text(`Gerado em: ${new Date().toLocaleString()}`, 14, y);
+    y += 8;
+    doc.text(`Total de colaboradores: ${currentData.length}`, 14, y);
+    y += 6;
+    doc.text(`Total de unidades: ${unitRows.length}`, 14, y);
+    y += 8;
+
+    doc.setFontSize(11);
+    doc.text("Status", 14, y);
+    y += 6;
+    doc.setFontSize(10);
+    statusRows.forEach(r => {
+        doc.text(`- ${r.Status}: ${r.Quantidade}`, 16, y);
+        y += 5;
+    });
+
+    y += 4;
+    doc.setFontSize(11);
+    doc.text("Por Grupo", 14, y);
+    y += 6;
+    doc.setFontSize(10);
+    groupRows.forEach(r => {
+        doc.text(`- ${r.Grupo}: ${r.Total} (Plantão ${r.Plantao} / Folga ${r.Folga})`, 16, y);
+        y += 5;
+        if (y > 270) { doc.addPage(); y = 14; }
+    });
+
+    y += 4;
+    doc.setFontSize(11);
+    doc.text("Top Unidades", 14, y);
+    y += 6;
+    doc.setFontSize(10);
+    topUnits.forEach(u => {
+        doc.text(`- ${u.unidade}: ${u.total}`, 16, y);
+        y += 5;
+        if (y > 270) { doc.addPage(); y = 14; }
+    });
+
+    y += 4;
+    doc.setFontSize(11);
+    doc.text("Top Rótulos", 14, y);
+    y += 6;
+    doc.setFontSize(10);
+    topRotulos.forEach(r => {
+        doc.text(`- ${r["Rótulo"]}: ${r.Quantidade}`, 16, y);
+        y += 5;
+        if (y > 270) { doc.addPage(); y = 14; }
+    });
+
+    doc.save(`resumo_executivo_${new Date().toISOString().slice(0,10)}.pdf`);
+    showToast("PDF gerado.", "success");
+}
+
+function exportarPDFHistorico() {
+    if (changeHistory.length === 0) {
+        showToast("Não há histórico para exportar.", "error");
+        return;
+    }
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+        showToast("Biblioteca de PDF não carregada.", "error");
+        return;
+    }
+    const doc = new window.jspdf.jsPDF();
+    let y = 14;
+    doc.setFontSize(14);
+    doc.text("Histórico de Alterações (Resumo)", 14, y);
+    y += 8;
+    doc.setFontSize(10);
+    doc.text(`Gerado em: ${new Date().toLocaleString()}`, 14, y);
+    y += 8;
+    const entries = changeHistory.slice(0, 40);
+    entries.forEach(h => {
+        const line = `${h.data || ''} - ${h.responsavel || ''} - ${h.acao || ''}`;
+        doc.text(line, 14, y);
+        y += 5;
+        if (y > 275) { doc.addPage(); y = 14; }
+    });
+    doc.save(`historico_${new Date().toISOString().slice(0,10)}.pdf`);
+    showToast("PDF gerado.", "success");
 }
 
 function openExportModal() {
@@ -3266,6 +3783,7 @@ function updateMenuStatus() {
     const sourceStatusEl = document.getElementById('sourceStatus');
     const nextiActive = CONFIG.useApiNexti && NEXTI_AVAILABLE;
     const adminToolsEl = document.getElementById('adminTools');
+    const shadowActionsEl = document.getElementById('shadowActions');
     
     if (userReEl) {
         userReEl.innerHTML = SiteAuth.logged
@@ -3295,6 +3813,9 @@ function updateMenuStatus() {
     if (adminToolsEl) {
         adminToolsEl.classList.toggle('hidden', !(SiteAuth.logged && SiteAuth.mode === 'edit'));
     }
+    if (shadowActionsEl) {
+        shadowActionsEl.classList.toggle('hidden', !(SiteAuth.logged && SiteAuth.mode === 'edit'));
+    }
 
     if (document.getElementById('useNextiToggle')) {
         document.getElementById('useNextiToggle').checked = nextiActive;
@@ -3305,6 +3826,7 @@ function updateMenuStatus() {
         (document.getElementById('disableCsvToggle').checked = CONFIG.disableCsvFallback);
 
     renderDataSourceList();
+    updateShadowStatusUI();
 }
 
 // Toggle de Fonte de Dados (Apenas altera flags)
@@ -3325,7 +3847,7 @@ function renderAuditList() {
     if (changeHistory.length > 0) {
         list.innerHTML = changeHistory.slice(0, 20).map(h => `
             <div style="padding:5px;border-bottom:1px solid #333;font-size:0.8rem">
-                🟢 Apenas no site<br>
+                🟢 Shadow (global)<br>
                 <strong>${h.responsavel}</strong> — ${h.acao}<br>
                 <span style="color:#999">${h.detalhe}</span>
             </div>
@@ -3337,7 +3859,7 @@ function renderAuditList() {
     const units = Object.keys(unitMetadata || {});
     
     if (edits.length === 0 && units.length === 0) {
-        list.innerHTML = '<div style="color:#777;font-style:italic">Nenhuma alteração local.</div>';
+        list.innerHTML = '<div style="color:#777;font-style:italic">Nenhuma alteração registrada.</div>';
         return;
     }
 
@@ -3372,6 +3894,7 @@ function getLocalCollaborators() {
 
 function saveLocalCollaborators(list) {
     localStorage.setItem('localCollaborators', JSON.stringify(list));
+    scheduleShadowSync('local-collaborators');
 }
 
 function mergeLocalCollaborators(items, groupKey) {

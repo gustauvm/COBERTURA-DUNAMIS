@@ -11,7 +11,7 @@
     <!-- HEADER -->
     <header>
         <div class="header-content">
-            <h1 id="app-title">Gerenciamento de Efetivos</h1>
+            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.2</span></h1>
             <button class="theme-toggle-btn" onclick="toggleDarkMode()">
                 🌙 Modo Noturno
             </button>
@@ -37,8 +37,13 @@
     <!-- Container de Notificações (Toast) -->
     <div id="toast-container" class="toast-container"></div>
 
+    <!-- Botão Toggle Ações -->
+    <button id="utility-toggle-btn" onclick="toggleUtilityButtons()" title="Ações rápidas" aria-label="Ações rápidas">
+        <span class="utility-arrow">›</span>
+    </button>
+
     <!-- Botão Imprimir -->
-    <button id="print-view-btn" onclick="printCurrentView()" title="Imprimir visão atual" aria-label="Imprimir visão atual">
+    <button id="print-view-btn" class="utility-btn" onclick="printCurrentView()" title="Imprimir visão atual" aria-label="Imprimir visão atual">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polyline points="6 9 6 2 18 2 18 9"></polyline>
             <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
@@ -47,7 +52,7 @@
     </button>
 
     <!-- Botão Ajuda -->
-    <button id="help-btn" onclick="openHelpModal()" title="Ajuda rápida" aria-label="Ajuda rápida">
+    <button id="help-btn" class="utility-btn" onclick="openHelpModal()" title="Ajuda rápida" aria-label="Ajuda rápida">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="10"></circle>
             <path d="M9.09 9a3 3 0 0 1 5.82 1c0 2-3 2-3 4"></path>
@@ -56,7 +61,7 @@
     </button>
 
     <!-- Botão Prompts -->
-    <button id="prompts-btn" onclick="openPromptsModal()" title="Dicas de prompts" aria-label="Dicas de prompts">
+    <button id="prompts-btn" class="utility-btn" onclick="openPromptsModal()" title="Dicas de prompts" aria-label="Dicas de prompts">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M4 4h16v14H7l-3 3z"></path>
             <line x1="8" y1="8" x2="16" y2="8"></line>
@@ -70,6 +75,7 @@
     <footer id="site-footer"></footer>
 
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="config.js"></script>
     <script src="app.js"></script>
 </body>

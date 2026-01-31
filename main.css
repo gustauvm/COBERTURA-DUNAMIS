@@ -60,6 +60,13 @@ header h1 {
     margin: 0;
 }
 
+.app-version {
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-left: 6px;
+    opacity: 0.85;
+}
+
 .theme-toggle-btn {
     background: none;
     border: 1px solid rgba(255,255,255,0.3);
@@ -1050,10 +1057,42 @@ body.dark-mode select {
     transform: translateY(-3px);
 }
 
+/* BOTÃO TOGGLE AÇÕES */
+#utility-toggle-btn {
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    z-index: 99;
+    border: none;
+    outline: none;
+    background-color: var(--dunamis-blue);
+    color: white;
+    cursor: pointer;
+    padding: 10px 14px;
+    border-radius: 999px;
+    font-size: 18px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    transition: transform 0.3s, background-color 0.3s;
+}
+
+#utility-toggle-btn:hover {
+    background-color: #001f52;
+    transform: translateY(-3px);
+}
+
+.utility-arrow {
+    display: inline-block;
+    transition: transform 0.2s ease;
+}
+
+body.utility-open .utility-arrow {
+    transform: rotate(90deg);
+}
+
 /* BOTÃO IMPRIMIR */
 #print-view-btn {
     position: fixed;
-    bottom: 20px;
+    bottom: 76px;
     left: 20px;
     z-index: 99;
     border: none;
@@ -1076,7 +1115,7 @@ body.dark-mode select {
 /* BOTÃO AJUDA */
 #help-btn {
     position: fixed;
-    bottom: 80px;
+    bottom: 136px;
     left: 20px;
     z-index: 99;
     border: none;
@@ -1099,7 +1138,7 @@ body.dark-mode select {
 /* BOTÃO PROMPTS */
 #prompts-btn {
     position: fixed;
-    bottom: 140px;
+    bottom: 196px;
     left: 20px;
     z-index: 99;
     border: none;
@@ -1117,6 +1156,19 @@ body.dark-mode select {
 #prompts-btn:hover {
     background-color: #001f52;
     transform: translateY(-3px);
+}
+
+.utility-btn {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(6px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+body.utility-open .utility-btn {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
 }
 
 /* RODAPÉ */
@@ -1142,15 +1194,21 @@ body.dark-mode select {
     }
 
     #print-view-btn {
-        bottom: 12px;
-    }
-
-    #help-btn {
         bottom: 66px;
     }
 
-    #prompts-btn {
+    #help-btn {
         bottom: 120px;
+    }
+
+    #prompts-btn {
+        bottom: 174px;
+    }
+
+    #utility-toggle-btn {
+        left: 12px;
+        bottom: 12px;
+        padding: 8px 12px;
     }
 
     #site-footer {
@@ -1697,6 +1755,35 @@ body.dark-mode select {
     margin-top: 8px;
 }
 
+.config-note {
+    font-size: 0.8rem;
+    color: #555;
+    margin: 6px 0;
+}
+
+.shadow-status-block {
+    background: #f8f9fb;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.shadow-status {
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.shadow-status.ok { color: #1d7f3c; }
+.shadow-status.off { color: #777; }
+.shadow-status.error { color: #b3261e; }
+
+.shadow-meta {
+    font-size: 0.8rem;
+    color: #666;
+    margin-top: 4px;
+}
+
 .status-block {
     background: #f9f9f9;
     border: 1px solid #eee;
@@ -1841,6 +1928,16 @@ body.dark-mode .config-shell {
 body.dark-mode .config-card {
     background: #2a2a2a;
     border-color: #444;
+}
+
+body.dark-mode .shadow-status-block {
+    background: #252525;
+    border-color: #3a3a3a;
+}
+
+body.dark-mode .shadow-meta,
+body.dark-mode .config-note {
+    color: #bdbdbd;
 }
 
 body.dark-mode .config-card .card-title {

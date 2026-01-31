@@ -1,6 +1,12 @@
 const CONFIG = {
     useApiNexti: false, // CSV é a fonte oficial nesta fase (Nexti inativo)
     disableCsvFallback: true, // CSV desabilitado por padrão (ativar apenas manualmente)
+    shadow: {
+        // Web App do Google Apps Script (público)
+        webAppUrl: 'https://script.google.com/macros/s/AKfycbzt8wcayeu5igh7jrIFIWL6-2_m_-23G_r6xjImsbkevGEf3VrYzjNGGU8-P1_Aoldd/exec',
+        // Token opcional (deixe vazio se o Web App for público)
+        token: ''
+    },
     api: {
         baseUrl: 'https://api.nexti.com.br/api/v1', // URL Base da API (Verificar URL correta do ambiente)
         token: 'SEU_TOKEN_AQUI' // Token de acesso Bearer
