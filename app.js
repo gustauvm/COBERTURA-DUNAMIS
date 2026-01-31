@@ -13,6 +13,8 @@ let unitAddressDb = { entries: [], address_map: {}, address_map_norm: {} };
 let unitGeoCache = {};
 let shadowReady = false;
 let shadowSyncTimer = null;
+let shadowAutoPullTimer = null;
+let shadowAutoPullBound = false;
 let shadowStatus = {
     available: false,
     lastPull: null,
@@ -113,6 +115,22 @@ function scheduleShadowSync(reason) {
     shadowSyncTimer = setTimeout(() => {
         shadowPushAll(reason);
     }, 700);
+}
+
+function startShadowAutoPull() {
+    if (!shadowEnabled()) return;
+    if (shadowAutoPullTimer) clearInterval(shadowAutoPullTimer);
+    shadowAutoPullTimer = setInterval(() => {
+        shadowPullState(false);
+    }, 90000);
+
+    if (shadowAutoPullBound) return;
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            shadowPullState(false);
+        }
+    });
+    shadowAutoPullBound = true;
 }
 
 async function shadowPullState(showToastOnFail = false) {
@@ -283,10 +301,20 @@ function loadAuthFromStorage() {
     document.body.classList.add('mode-edit');
 }
 
-function saveAuthToStorage() {
+function saveAuthToStorage(authHash = null) {
     const keep = document.getElementById('keepLogged')?.checked;
-    localStorage.setItem('keepLogged', keep ? '1' : '0');
-    localStorage.setItem('authHash', keep ? (SiteAuth.admins.find(a => a.name === SiteAuth.user)?.hash || '') : '');
+    if (!keep) {
+        localStorage.setItem('keepLogged', '0');
+        localStorage.removeItem('authHash');
+        localStorage.removeItem('authUser');
+        localStorage.removeItem('authRe');
+        return;
+    }
+    const hash = authHash || (SiteAuth.admins.find(a => a.name === SiteAuth.user)?.hash || '');
+    localStorage.setItem('keepLogged', '1');
+    localStorage.setItem('authHash', hash);
+    localStorage.setItem('authUser', SiteAuth.user || '');
+    localStorage.setItem('authRe', SiteAuth.re || '');
 }
 
 // Inicializa admins (Hardcoded na primeira carga, depois localStorage)
@@ -409,7 +437,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadLocalState();
     loadAuthFromStorage();
     loadUnitAddressDb();
-    shadowPullState();
+    shadowPullState(false);
+    startShadowAutoPull();
     renderGateway();
     updateMenuStatus();
     updateLastUpdatedDisplay();
@@ -494,9 +523,7 @@ async function loadGroup(groupKey) {
     appContainer.style.display = 'block';
     contentArea.innerHTML = '<div class="loading">Carregando dados do Google Sheets...</div>';
 
-    if (shadowEnabled() && !shadowReady) {
-        await shadowPullState(true);
-    }
+    await shadowPullState(false);
     
     // Verificar se existem edições locais
     let keepChanges = false;
@@ -3694,7 +3721,7 @@ function loginSite() {
     updateMenuStatus();
     renderAdminList();
     renderAuditList();
-    saveAuthToStorage();
+    saveAuthToStorage(hash);
 
     showToast("Login efetuado com sucesso, agora você está no modo editor.", "success");
 }
@@ -3713,6 +3740,8 @@ function logoutSite() {
     updateMenuStatus();
     localStorage.setItem('keepLogged', '0');
     localStorage.removeItem('authHash');
+    localStorage.removeItem('authUser');
+    localStorage.removeItem('authRe');
 }
 
 function toggleEditMode() {
@@ -3980,6 +4009,11 @@ function changeLocalAdminPassword() {
 
     admin.hash = btoa(`${SiteAuth.re}:${newPass}`);
     saveAdmins();
+    if (localStorage.getItem('keepLogged') === '1') {
+        localStorage.setItem('authHash', admin.hash);
+        localStorage.setItem('authUser', SiteAuth.user || '');
+        localStorage.setItem('authRe', SiteAuth.re || '');
+    }
     document.getElementById('cfg-new-pass').value = '';
     document.getElementById('cfg-new-pass-confirm').value = '';
     showToast("Senha local alterada com sucesso.", "success");

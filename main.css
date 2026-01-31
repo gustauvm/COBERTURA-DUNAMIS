@@ -1364,6 +1364,41 @@ body.utility-open .utility-btn {
     }
 }
 
+@media (max-width: 600px) {
+    .result-card {
+        padding: 12px;
+        border-radius: 10px;
+    }
+    .card-header {
+        margin-bottom: 10px;
+    }
+    .colaborador-nome {
+        font-size: 1rem;
+    }
+    .status-badge {
+        font-size: 0.75rem;
+        padding: 3px 6px;
+    }
+    .card-details-grid {
+        gap: 6px;
+        font-size: 0.85rem;
+    }
+    .edit-btn-icon {
+        width: 36px;
+        height: 36px;
+    }
+    .edit-btn-icon svg {
+        width: 18px;
+        height: 18px;
+    }
+    .field-row input,
+    .field-row select,
+    .access-card input[type="text"],
+    .access-card input[type="password"] {
+        font-size: 16px;
+    }
+}
+
 /* ==========================================================================
    NOVO FLUXO DE ACESSO (DO ZERO)
    ========================================================================== */
