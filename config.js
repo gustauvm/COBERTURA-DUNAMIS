@@ -1,4 +1,10 @@
 const CONFIG = {
+    useApiNexti: false, // CSV é a fonte oficial nesta fase (Nexti inativo)
+    disableCsvFallback: true, // CSV desabilitado por padrão (ativar apenas manualmente)
+    api: {
+        baseUrl: 'https://api.nexti.com.br/api/v1', // URL Base da API (Verificar URL correta do ambiente)
+        token: 'SEU_TOKEN_AQUI' // Token de acesso Bearer
+    },
     sheets: {
         bombeiros: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS29f9zGs72Lf557GYyR3H601ZXF94CHAejfp_mUnIbqESE7NFTvzxNQF9eyvMDROC4HZDEtWnSHRbx/pub?output=csv',
         servicos: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS8zA3MOPL8DQBSl99o72Zv0WuzkBb3SJqv0cfhxzbwA5a3ngr7rTLIJ-ZNvreQwLiV_jiE88D2VwHX/pub?output=csv',
@@ -11,7 +17,8 @@ const CONFIG = {
         servicos: 'images/logo-dunamis-servicos.png',
         seguranca: 'images/logo-dunamis-seguranca.png',
         rb: 'images/logo-rb.png'
-    }
+    },
+    sheetUpdatedAt: '31/01/2026, 00:24:43'
 };
 
 // Função auxiliar para ler CSV

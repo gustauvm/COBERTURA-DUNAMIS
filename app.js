@@ -7,6 +7,92 @@ let unitMetadata = {}; // Armazena rótulos das unidades
 let collaboratorEdits = {}; // Armazena edições locais de colaboradores (Chave: RE)
 let changeHistory = []; // Log de alterações
 let minimizedUnits = new Set(); // Armazena unidades minimizadas
+let lastUpdatedAt = null; // Timestamp da última carga de dados
+const NEXTI_AVAILABLE = false; // Nesta fase, a API Nexti NÃO deve ser chamada
+let unitAddressDb = { entries: [], address_map: {}, address_map_norm: {} };
+let unitGeoCache = {};
+
+// ==========================================================================
+// 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
+// ==========================================================================
+
+const SiteAuth = {
+    logged: false,
+    mode: 'view', // 'view' | 'edit'
+    user: null,
+    re: null,
+    admins: []
+};
+
+function loadLocalState() {
+    try {
+        const edits = localStorage.getItem('collaboratorEdits');
+        const units = localStorage.getItem('unitMetadata');
+        const history = localStorage.getItem('changeHistory');
+        if (edits) collaboratorEdits = JSON.parse(edits) || {};
+        if (units) unitMetadata = JSON.parse(units) || {};
+        if (history) changeHistory = JSON.parse(history) || [];
+    } catch {}
+}
+
+function saveLocalState() {
+    localStorage.setItem('collaboratorEdits', JSON.stringify(collaboratorEdits));
+    localStorage.setItem('unitMetadata', JSON.stringify(unitMetadata));
+    localStorage.setItem('changeHistory', JSON.stringify(changeHistory));
+}
+
+function clearLocalState() {
+    collaboratorEdits = {};
+    unitMetadata = {};
+    changeHistory = [];
+    localStorage.removeItem('collaboratorEdits');
+    localStorage.removeItem('unitMetadata');
+    localStorage.removeItem('changeHistory');
+}
+
+function loadAuthFromStorage() {
+    const keep = localStorage.getItem('keepLogged') === '1';
+    const hash = localStorage.getItem('authHash');
+    if (!keep || !hash) return;
+    const admin = SiteAuth.admins.find(a => a.hash === hash);
+    if (!admin) return;
+    SiteAuth.logged = true;
+    SiteAuth.user = admin.name;
+    SiteAuth.mode = 'edit';
+    try {
+        const decoded = atob(hash);
+        const parts = decoded.split(':');
+        SiteAuth.re = parts[0] || null;
+    } catch {}
+    document.body.classList.add('mode-edit');
+}
+
+function saveAuthToStorage() {
+    const keep = document.getElementById('keepLogged')?.checked;
+    localStorage.setItem('keepLogged', keep ? '1' : '0');
+    localStorage.setItem('authHash', keep ? (SiteAuth.admins.find(a => a.name === SiteAuth.user)?.hash || '') : '');
+}
+
+// Inicializa admins (Hardcoded na primeira carga, depois localStorage)
+function initAdmins() {
+    const stored = localStorage.getItem('adminUsers');
+    if (stored) {
+        SiteAuth.admins = JSON.parse(stored);
+        return;
+    }
+
+    SiteAuth.admins = [
+        { hash: btoa('7164:0547'), name: 'GUSTAVO CORTES BRAGA' },
+        { hash: btoa('4648:4643'), name: 'MOISÉS PEREIRA FERNANDES' },
+        { hash: btoa('3935:1288'), name: 'WAGNER MONTEIRO' }
+    ];
+
+    saveAdmins();
+}
+
+function saveAdmins() {
+    localStorage.setItem('adminUsers', JSON.stringify(SiteAuth.admins));
+}
 
 // Ícones SVG para substituir emojis
 const ICONS = {
@@ -28,6 +114,72 @@ const ICONS = {
     phone: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`
 };
 
+const PROMPT_TEMPLATES = [
+    {
+        title: 'Cobertura por proximidade',
+        text: 'Quem pode cobrir a falta do RE (RE) hoje, que trabalha mais perto?'
+    },
+    {
+        title: 'Cobertura por nome',
+        text: 'Quem pode cobrir a falta de (NOME) hoje, que trabalha mais perto?'
+    },
+    {
+        title: 'Cobertura por unidade',
+        text: 'Preciso de alguém para cobrir o posto (UNIDADE) hoje. Quem está de folga?'
+    },
+    {
+        title: 'Contato rápido',
+        text: 'Qual o contato/WhatsApp do RE (RE)?'
+    },
+    {
+        title: 'Contato por nome',
+        text: 'Qual o contato/WhatsApp de (NOME)?'
+    },
+    {
+        title: 'Horário e escala',
+        text: 'Qual o horário e escala do RE (RE)?'
+    },
+    {
+        title: 'Horário por nome',
+        text: 'Qual o horário e escala de (NOME)?'
+    },
+    {
+        title: 'Busca por unidade',
+        text: 'Listar colaboradores da unidade (UNIDADE).'
+    },
+    {
+        title: 'Plantão hoje',
+        text: 'Quem está em plantão hoje na unidade (UNIDADE)?'
+    },
+    {
+        title: 'Folga hoje',
+        text: 'Quem está de folga hoje na unidade (UNIDADE)?'
+    },
+    {
+        title: 'Afastamentos',
+        text: 'Quem está afastado ou de férias na unidade (UNIDADE)?'
+    },
+    {
+        title: 'Contagem geral',
+        text: 'Quantos colaboradores estão em plantão hoje na unidade (UNIDADE)?'
+    },
+    {
+        title: 'Endereço da unidade',
+        text: 'Qual é o endereço do posto (UNIDADE)?'
+    },
+    {
+        title: 'Sugestão rápida',
+        text: 'Sugira um colaborador disponível para cobertura no posto (UNIDADE) hoje.'
+    }
+];
+
+const SEARCH_TOKENS = [
+    { key: 'RE', label: 'RE' },
+    { key: 'UNIDADE', label: 'Unidade/Posto' },
+    { key: 'NOME', label: 'Nome do colaborador' },
+    { key: 'GRUPO', label: 'Grupo (BOMBEIROS/SERVIÇOS/SEGURANÇA/RB)' }
+];
+
 // Elementos DOM
 const gateway = document.getElementById('gateway');
 const appContainer = document.getElementById('app-container');
@@ -36,7 +188,14 @@ const contentArea = document.getElementById('content-area');
 
 // Inicialização
 document.addEventListener('DOMContentLoaded', () => {
+    localStorage.setItem('aiSearchEnabled', '0'); // Modo IA sempre inicia desativado
+    initAdmins();
+    loadLocalState();
+    loadAuthFromStorage();
+    loadUnitAddressDb();
     renderGateway();
+    updateMenuStatus();
+    updateLastUpdatedDisplay();
 });
 
 // Botão de Scroll Top
@@ -63,6 +222,9 @@ function renderGateway() {
                 <p>Todas as unidades</p>
             </div>
         </div>
+        <div class="gateway-links">
+            <button class="btn" onclick="openDunamisProjects()">Clique aqui para conferir os outros sites Dunamis IA</button>
+        </div>
     `;
 }
 
@@ -73,6 +235,37 @@ function createCard(title, imgPath, key) {
             <h3>${title}</h3>
         </div>
     `;
+}
+
+function openDunamisProjects() {
+    const page = `
+        <html>
+            <head>
+                <title>Dunamis IA - Projetos</title>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body { font-family: Arial, sans-serif; background:#f6f7fb; margin:0; padding:30px; }
+                    h1 { color:#002d72; margin-bottom:10px; }
+                    .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+                    a { color:#0b4fb3; text-decoration:none; font-weight:bold; }
+                    a:hover { text-decoration:underline; }
+                </style>
+            </head>
+            <body>
+                <h1>Dunamis IA - Projetos</h1>
+                <div class="card"><a href="https://gustauvm.github.io/PORTAL-DE-TROCA/gateway.html" target="_blank">Portal de Trocas</a></div>
+                <div class="card"><a href="https://gustauvm.pythonanywhere.com/" target="_blank">Organizador de Relatório Nexti por RE</a></div>
+                <div class="card"><a href="https://dunamis.squareweb.app/" target="_blank">Conversor de Planilhas - Movimentação Diária</a></div>
+                <div class="card"><a href="https://gustauvm.github.io/ENDERECOS-DUNAMIS/" target="_blank">Endereços das Unidades</a></div>
+            </body>
+        </html>
+    `;
+    const w = window.open('', '_blank');
+    if (w) {
+        w.document.write(page);
+        w.document.close();
+    }
 }
 
 // 2. Carregar Dados (Integração Google Sheets)
@@ -89,11 +282,55 @@ async function loadGroup(groupKey) {
     if (Object.keys(collaboratorEdits).length > 0 || Object.keys(unitMetadata).length > 0) {
         keepChanges = confirm("Existem alterações locais salvas (edições de colaboradores ou unidades). Deseja mantê-las sobre os dados da planilha?");
         if (!keepChanges) {
-            collaboratorEdits = {};
-            unitMetadata = {};
+            clearLocalState();
         }
     }
 
+    // ----------------------------------------------------------------------
+    // 🔄 MODO API NEXTI
+    // ----------------------------------------------------------------------
+    if (CONFIG.useApiNexti && NEXTI_AVAILABLE) {
+        try {
+            const nextiData = await fetchAllNextiPersons();
+            
+            // Filtra os dados se um grupo específico for selecionado (Lógica de filtro pode precisar de ajuste conforme dados reais)
+            let filteredData = nextiData;
+            if (groupKey !== 'todos') {
+                // Exemplo: Filtrar por Unidade de Negócio se o nome contiver a chave do grupo
+                filteredData = nextiData.filter(p => p.businessUnitName && p.businessUnitName.toLowerCase().includes(groupKey));
+            }
+
+            let items = mapNextiToAppFormat(filteredData, groupKey, keepChanges);
+
+            // 🔄 Status real do dia via eventos
+            const eventsMap = await fetchNextiEventsForDate(new Date());
+            if (eventsMap) {
+                applyNextiEventsToItems(items, eventsMap);
+            }
+            
+            // 🔄 Sincronização de Afastamentos (Camada Nova)
+            items = await enrichWithNextiAbsences(items);
+            
+            currentData = items.map((item, idx) => ({ ...item, id: idx }));
+            lastUpdatedAt = new Date();
+            
+            appTitle.innerText = `Gerenciamento de Efetivos - ${groupKey === 'todos' ? 'Geral' : groupKey.toUpperCase()} (API)`;
+            renderDashboard();
+            updateLastUpdatedDisplay();
+            return;
+        } catch (error) {
+            console.error("Erro na API Nexti:", error);
+            showToast("Erro ao carregar dados da API. Verifique o console.", "error");
+            if (CONFIG.disableCsvFallback) {
+                resetToGateway();
+                return;
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // 📄 MODO PLANILHA CSV (LEGADO)
+    // ----------------------------------------------------------------------
     // Carregar dados de telefones
     const phoneCsv = await fetchSheetData(CONFIG.sheets.phones);
     const phoneMap = processPhoneData(phoneCsv);
@@ -101,7 +338,7 @@ async function loadGroup(groupKey) {
     currentData = [];
     
     if (groupKey === 'todos') {
-        const keys = Object.keys(CONFIG.sheets);
+        const keys = Object.keys(CONFIG.sheets).filter(k => k !== 'phones');
         const promises = keys.map(async (key) => {
             const csv = await fetchSheetData(CONFIG.sheets[key]);
             if (csv) {
@@ -116,8 +353,11 @@ async function loadGroup(groupKey) {
         const results = await Promise.all(promises);
         let allItems = [];
         results.forEach(items => allItems = allItems.concat(items));
+
+        allItems = mergeLocalCollaborators(allItems, 'todos');
         
         currentData = allItems.map((item, idx) => ({ ...item, id: idx }));
+        lastUpdatedAt = new Date();
         appTitle.innerText = 'Gerenciamento de Efetivos - Geral';
     } else {
         const csv = await fetchSheetData(CONFIG.sheets[groupKey]);
@@ -125,13 +365,16 @@ async function loadGroup(groupKey) {
             const rows = parseCSV(csv);
             if (rows.length > 0) rows.shift();
             // Vincula telefones automáticos para todos os grupos
-            const items = mapRowsToObjects(rows, groupKey, keepChanges, phoneMap);
+            let items = mapRowsToObjects(rows, groupKey, keepChanges, phoneMap);
+            items = mergeLocalCollaborators(items, groupKey);
             currentData = items.map((item, idx) => ({ ...item, id: idx }));
+            lastUpdatedAt = new Date();
         }
         appTitle.innerText = `Gerenciamento de Efetivos - ${groupKey.toUpperCase()}`;
     }
 
     renderDashboard();
+    updateLastUpdatedDisplay();
 }
 
 // 3. Voltar ao Gateway
@@ -149,33 +392,99 @@ function resetToGateway() {
 // 📌 LÓGICA DE PROCESSAMENTO DE DADOS
 // ==========================================================================
 
+// Função para buscar todos os colaboradores da API Nexti (Paginação)
+async function fetchAllNextiPersons() {
+    let allPersons = [];
+    let page = 0;
+    let last = false;
+    const size = 100; // Busca em lotes de 100
+
+    while (!last) {
+        const response = await fetch(`${CONFIG.api.baseUrl}/persons/all?page=${page}&size=${size}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${CONFIG.api.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) throw new Error(`Erro API: ${response.status}`);
+
+        const data = await response.json();
+        if (data.content) {
+            allPersons = allPersons.concat(data.content);
+        }
+        
+        last = data.last;
+        page++;
+    }
+    return allPersons;
+}
+
+// Adaptador: Transforma JSON da Nexti no formato interno do App
+function mapNextiToAppFormat(nextiPersons, groupTag, keepChanges) {
+    return nextiPersons.map(p => {
+        const re = (p.enrolment || '').trim();
+
+        // Se optou por manter alterações e existe edição para este RE, usa a edição
+        if (keepChanges && collaboratorEdits[re]) {
+            return { ...collaboratorEdits[re], grupo: groupTag };
+        }
+
+        // Extração de Tipo de Escala (Lógica mantida do original)
+        let rawEscala = p.nameSchedule || '';
+        let tipoEscala = extrairTipoEscala(rawEscala);
+
+        // Mapeamento de campos API -> App
+        return {
+            nome: (p.name || '').trim().toUpperCase(),
+            re: re,
+            posto: (p.workplaceName || '').trim().toUpperCase() || 'N/I',
+            grupoLabel: (groupTag || '').trim().toUpperCase(),
+            escala: rawEscala.replace("PRE-ASSINALADO", "").replace("12x36", "").replace("5x2", "").replace("6x1", "").trim(),
+            tipoEscala: tipoEscala,
+            // Tenta usar rotationCode da API, senão fallback para 1
+            turma: p.rotationCode ? parseInt(p.rotationCode) : 1, 
+            rotulo: '', 
+            rotuloInicio: '',
+            rotuloFim: '',
+            rotuloDetalhe: '',
+            grupo: groupTag,
+            // API já fornece telefone, não precisa de map externo
+            telefone: (p.phone || p.phone2 || '').replace(/\D/g, ''),
+            _nextiId: p.id // ID interno para busca de afastamentos
+        };
+    }).filter(item => item && item.nome && item.re);
+}
+
 function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap) {
     return rows.map((cols) => {
         if (cols.length < 6) return null; // Garante mínimo de colunas
 
         const re = (cols[5] || '').trim();
+        const nome = (cols[4] || '').trim().toUpperCase();
+        const posto = (cols[7] || '').trim().toUpperCase();
+        const reNorm = re.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        if (nome === 'COLABORADOR' && reNorm === 'MATRICULA' && posto === 'POSTO') return null;
         
         // Se optou por manter alterações e existe edição para este RE, usa a edição
         if (keepChanges && collaboratorEdits[re]) {
             return { ...collaboratorEdits[re], grupo: groupTag }; // Mantém grupo atual
         }
 
-        const nome = (cols[4] || '').trim().toUpperCase();
         const telefone = findPhone(re, nome, phoneMap);
+        const grupoLabel = (cols[0] || '').trim().toUpperCase();
 
         // Extração de Tipo de Escala (12x36, 5x2, etc)
         let rawEscala = cols[2] || '';
-        let tipoEscala = '';
-        const matchEscala = rawEscala.match(/(12[xX]36|5[xX]2|6[xX]1)/i);
-        if (matchEscala) {
-            tipoEscala = matchEscala[0].toUpperCase();
-        }
+        let tipoEscala = extrairTipoEscala(rawEscala);
 
         const obj = {
             // ID será atribuído depois
-            nome: (cols[4] || '').trim().toUpperCase(),
+            nome: nome,
             re: (cols[5] || '').trim(),
-            posto: (cols[7] || '').trim().toUpperCase() || 'N/I',
+            posto: posto || 'N/I',
+            grupoLabel: grupoLabel,
             escala: rawEscala.replace("PRE-ASSINALADO", "").replace("12x36", "").replace("5x2", "").replace("6x1", "").trim(),
             tipoEscala: tipoEscala,
             turma: parseInt(cols[3]) || 1, // Padrão 1 se falhar, igual ao original
@@ -189,6 +498,235 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap) {
 
         return obj;
     }).filter(item => item && item.nome && item.re); // Filtra linhas inválidas
+}
+
+// ==========================================================================
+// 🔌 ADAPTER API NEXTI
+// ==========================================================================
+
+// Busca todos os colaboradores (com paginação automática)
+async function fetchNextiPeople() {
+    let allPersons = [];
+    let page = 0;
+    let hasMore = true;
+    const size = 100;
+
+    while (hasMore) {
+        const response = await fetch(`${CONFIG.api.baseUrl}/persons/all?page=${page}&size=${size}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${CONFIG.api.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) throw new Error(`Erro API: ${response.status}`);
+
+        const data = await response.json();
+        if (data.content && Array.isArray(data.content)) {
+            allPersons = allPersons.concat(data.content);
+            hasMore = !data.last;
+            page++;
+        } else {
+            hasMore = false;
+        }
+    }
+    return allPersons;
+}
+
+function extrairTipoEscala(rawEscala) {
+    if (!rawEscala) return '';
+    const matchEscala = rawEscala.match(/(12[xX]36|5[xX]2|6[xX]1)/i);
+    return matchEscala ? matchEscala[0].toUpperCase() : '';
+}
+
+
+// ==========================================================================
+// ⏱️ STATUS REAL DO DIA (NEXTI)
+// ==========================================================================
+
+async function fetchNextiEventsForDate(date) {
+    try {
+        const ref = formatNextiDate(date);
+        const response = await fetch(`${CONFIG.api.baseUrl}/timetrackings/eventsperday/${ref}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${CONFIG.api.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        const events = Array.isArray(data.value) ? data.value : [];
+        const map = {};
+
+        events.forEach(ev => {
+            if (ev && ev.personId != null) {
+                map[String(ev.personId)] = ev;
+            }
+        });
+
+        return map;
+    } catch (e) {
+        console.error("Erro ao buscar eventos do dia (Nexti)", e);
+        return null;
+    }
+}
+
+function applyNextiEventsToItems(items, eventsMap) {
+    if (!items || !eventsMap) return items;
+    items.forEach(item => {
+        if (!item || item._nextiId == null) return;
+        const key = String(item._nextiId);
+        if (eventsMap[key]) {
+            item._nextiHasEvent = true;
+            item._nextiEventType = (eventsMap[key].timeTrackingTypeName || '').toUpperCase();
+        }
+    });
+    return items;
+}
+
+// ==========================================================================
+// 🏥 GESTÃO DE AFASTAMENTOS (NEXTI)
+// ==========================================================================
+
+let absenceSituationsCache = null;
+
+async function fetchAbsenceSituations() {
+    if (absenceSituationsCache) return absenceSituationsCache;
+    try {
+        const response = await fetch(`${CONFIG.api.baseUrl}/absencesituations/all?size=1000`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${CONFIG.api.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        if (!response.ok) return {};
+        const data = await response.json();
+        const map = {};
+        if (data.content) {
+            data.content.forEach(s => {
+                map[s.id] = s.name.toUpperCase();
+                map[s.externalId] = s.name.toUpperCase();
+            });
+        }
+        absenceSituationsCache = map;
+        return map;
+    } catch (e) {
+        console.error("Erro ao buscar situações de ausência", e);
+        return {};
+    }
+}
+
+async function enrichWithNextiAbsences(items) {
+    if (!items || items.length === 0) return items;
+    
+    const situationsMap = await fetchAbsenceSituations();
+    const now = new Date();
+    // Janela de busca: Hoje +/- 45 dias para garantir cobertura
+    const startWindow = new Date(now); startWindow.setDate(now.getDate() - 45);
+    const endWindow = new Date(now); endWindow.setDate(now.getDate() + 45);
+    
+    const startStr = formatNextiDate(startWindow);
+    const finishStr = formatNextiDate(endWindow);
+    
+    // Processamento em lotes para não sobrecarregar o browser
+    const chunkSize = 20;
+    for (let i = 0; i < items.length; i += chunkSize) {
+        const chunk = items.slice(i, i + chunkSize);
+        await Promise.all(chunk.map(async (item) => {
+            if (!item._nextiId) return;
+            try {
+                const url = `${CONFIG.api.baseUrl}/absences/person/${item._nextiId}/start/${startStr}/finish/${finishStr}`;
+                const res = await fetch(url, {
+                    headers: { 'Authorization': `Bearer ${CONFIG.api.token}` }
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    const absences = data.content || [];
+                    const activeAbsence = absences.find(a => isAbsenceActiveToday(a));
+                    
+                    if (activeAbsence) {
+                        const name = situationsMap[activeAbsence.absenceSituationId] || 'AFASTADO';
+                        applyAbsenceLabel(item, activeAbsence, name);
+                    }
+                }
+            } catch (err) { /* Ignora erro individual */ }
+        }));
+    }
+    return items;
+}
+
+function isAbsenceActiveToday(absence) {
+    const start = parseNextiDate(absence.startDateTime);
+    const end = parseNextiDate(absence.finishDateTime);
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    const todayEnd = new Date(today); todayEnd.setHours(23,59,59,999);
+    return start <= todayEnd && end >= today;
+}
+
+function applyAbsenceLabel(item, absence, name) {
+    let rotulo = 'AFASTADO';
+    const upperName = name.toUpperCase();
+    if (upperName.includes('FÉRIAS') || upperName.includes('FERIAS')) rotulo = 'FÉRIAS';
+    else if (upperName.includes('ATESTADO')) rotulo = 'ATESTADO';
+    else if (upperName.includes('FOLGA') && upperName.includes('TRABALHADA')) rotulo = 'FT';
+    
+    item.rotulo = rotulo;
+    item.rotuloInicio = parseNextiDate(absence.startDateTime).toISOString().slice(0,10);
+    item.rotuloFim = parseNextiDate(absence.finishDateTime).toISOString().slice(0,10);
+    item.rotuloDetalhe = upperName;
+    item._nextiAbsence = true;
+}
+
+function formatNextiDate(date) {
+    const dd = String(date.getDate()).padStart(2, '0');
+    const MM = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = date.getFullYear();
+    return `${dd}${MM}${yyyy}000000`;
+}
+
+function parseNextiDate(str) {
+    if (!str || str.length < 8) return new Date();
+    const d = str.substring(0, 2);
+    const m = str.substring(2, 4);
+    const y = str.substring(4, 8);
+    return new Date(`${y}-${m}-${d}T00:00:00`);
+}
+
+// Transforma o JSON da API no formato exato usado pelo App (Adapter)
+function mapNextiData(persons, groupTag, keepChanges) {
+    return persons.map(p => {
+        const re = (p.enrolment || '').trim();
+
+        // Mantém edições locais se existirem
+        if (keepChanges && collaboratorEdits[re]) {
+            return { ...collaboratorEdits[re], grupo: groupTag };
+        }
+
+        // Lógica de extração de escala (idêntica ao CSV)
+        let rawEscala = p.nameSchedule || '';
+        let tipoEscala = extrairTipoEscala(rawEscala);
+
+        return {
+            nome: (p.name || '').trim().toUpperCase(),
+            re: re,
+            posto: (p.workplaceName || '').trim().toUpperCase() || 'N/I',
+            escala: rawEscala.replace("PRE-ASSINALADO", "").replace("12x36", "").replace("5x2", "").replace("6x1", "").trim(),
+            tipoEscala: tipoEscala,
+            turma: p.rotationCode ? parseInt(p.rotationCode) : 1, // Fallback para 1 se nulo
+            rotulo: '', // API /persons/all não traz afastamentos por padrão, manter vazio para edição manual ou futuro endpoint
+            rotuloInicio: '',
+            rotuloFim: '',
+            rotuloDetalhe: '',
+            grupo: groupTag, // Atribui o grupo selecionado
+            telefone: (p.phone || p.phone2 || '').replace(/\D/g, '') // Usa telefone da API
+        };
+    }).filter(item => item && item.nome && item.re);
 }
 
 function processPhoneData(csvText) {
@@ -264,19 +802,19 @@ function renderDashboard() {
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('busca')">${ICONS.search} Busca Rápida</button>
             <button class="tab-btn" onclick="switchTab('unidades')">${ICONS.building} Unidades</button>
+            <button class="tab-btn" onclick="switchTab('config')">${ICONS.settings} Configuração</button>
         </div>
 
         <!-- Conteúdo das Abas -->
         <div id="tab-content-busca" class="tab-content">
             <div class="search-container">
-                <input type="text" id="search-input" class="search-input" 
-                       placeholder="Digite nome, RE ou unidade..." autocomplete="off">
-                <div class="search-filters">
-                    <label class="filter-option"><input type="radio" name="filterStatus" value="all" checked> Todos</label>
-                    <label class="filter-option"><input type="radio" name="filterStatus" value="plantao"> Em Plantão</label>
-                    <label class="filter-option"><input type="radio" name="filterStatus" value="folga"> De Folga</label>
-                    <label class="filter-option"><input type="checkbox" id="filter-no-absence" onchange="realizarBusca()"> Ocultar Afastamentos</label>
+                <div class="search-bar">
+                    <button id="ai-search-btn" class="ai-toggle" onclick="toggleAiSearchButton()">IA: OFF</button>
+                    <input type="text" id="search-input" class="search-input" 
+                           placeholder="Digite nome, RE ou unidade..." autocomplete="off">
                 </div>
+                <div id="search-suggestions" class="search-suggestions hidden"></div>
+                <div class="search-filters"></div>
             </div>
             <div id="search-results" class="results-grid"></div>
         </div>
@@ -284,7 +822,6 @@ function renderDashboard() {
         <div id="tab-content-unidades" class="tab-content hidden">
             <!-- Barra de Estatísticas -->
             <div id="stats-bar" class="stats-bar"></div>
-
             <!-- Controles -->
             <div class="unit-controls">
                 <div class="unit-search-container">
@@ -306,11 +843,8 @@ function renderDashboard() {
                         <option value="plantao">Em Plantão</option>
                         <option value="folga">De Folga</option>
                     </select>
-                    <button class="btn btn-secondary" style="width: auto; margin-bottom: 0;" onclick="exportarDadosExcel()">
-                        ${ICONS.download} Excel
-                    </button>
-                    <button class="btn btn-secondary" style="width: auto; margin-bottom: 0;" onclick="exportarDadosCSV()">
-                        ${ICONS.download} CSV
+                    <button class="btn btn-secondary" style="width: auto; margin-bottom: 0;" onclick="openExportModal()">
+                        ${ICONS.download} Exportar
                     </button>
                     <button class="btn btn-secondary" style="width: auto; margin-bottom: 0;" onclick="openHistoryModal()">
                         ${ICONS.history} Histórico
@@ -318,6 +852,95 @@ function renderDashboard() {
                 </div>
             </div>
             <div id="units-list"></div>
+        </div>
+
+        <div id="tab-content-config" class="tab-content hidden">
+            <div class="config-shell">
+                <div id="config-login" class="config-gate">
+                    <div class="config-card">
+                        <div class="card-title">Acesso Administrativo</div>
+                        <div class="field-row">
+                            <label>RE (últimos 4)</label>
+                            <input type="text" id="loginRe" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <div class="field-row">
+                            <label>CPF (primeiros 4)</label>
+                            <input type="password" id="loginCpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <label style="font-size:0.8rem; color:#666; display:block; margin-bottom:10px;">
+                            <input type="checkbox" id="keepLogged"> Manter-me conectado neste dispositivo
+                        </label>
+                        <button class="btn" onclick="loginSite()">Entrar</button>
+                        <div class="hint">Somente administradores podem acessar as configurações.</div>
+                    </div>
+                </div>
+
+                <div id="config-content" class="hidden">
+                    <div class="config-tabs">
+                        <button class="config-tab active" onclick="switchConfigTab('access')">Acesso</button>
+                        <button class="config-tab" onclick="switchConfigTab('datasource')">Fonte de Banco de Dados</button>
+                    </div>
+
+                    <div id="config-pane-access" class="config-pane">
+                        <div class="config-card">
+                            <div class="card-title">Login</div>
+                            <div id="statusSection">
+                                <div class="status-block">
+                                    <div class="status-row"><span>Usuário</span><span id="userRe"></span></div>
+                                    <div class="status-row"><span>Modo</span><span id="siteMode"></span></div>
+                                </div>
+                                <div class="actions">
+                                    <button class="btn" onclick="toggleEditMode()">Alternar Modo Edição</button>
+                                    <button class="btn btn-secondary" onclick="logoutSite()">Sair</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="config-card hidden" id="adminTools">
+                            <div class="card-title">Admin</div>
+                        <div class="sub-title">Adicionar colaborador (local)</div>
+                        <div class="field-row">
+                            <label>RE</label>
+                            <input type="text" id="cfg-re" placeholder="0000">
+                        </div>
+                        <button class="btn" onclick="addLocalCollaboratorFromConfig()">Adicionar Colaborador</button>
+                        <div class="hint">Senha padrão do colaborador: 4 primeiros dígitos do CPF (sem pontuação).</div>
+
+                        <div class="divider"></div>
+
+                        <div class="sub-title">Alterar senha (local)</div>
+                        <div class="field-row">
+                            <label>Nova senha (4 dígitos)</label>
+                            <input type="password" id="cfg-new-pass" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <div class="field-row">
+                            <label>Confirmar nova senha</label>
+                            <input type="password" id="cfg-new-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <button class="btn" onclick="changeLocalAdminPassword()">Alterar Senha</button>
+                        <div class="hint">Senha local é usada apenas no site.</div>
+                    </div>
+                </div>
+
+                    <div id="config-pane-datasource" class="config-pane hidden">
+                        <div class="config-card">
+                            <div class="card-title">Modo de Banco de Dados</div>
+                            <div class="field-row">
+                                <label><input type="checkbox" id="useNextiToggle" onchange="toggleSource('nexti')"> Fonte principal: Nexti</label>
+                            </div>
+                            <div class="field-row">
+                                <label><input type="checkbox" id="disableCsvToggle" onchange="toggleSource('csv')"> Fallback: usar Planilhas (CSV) se Nexti falhar</label>
+                            </div>
+                        </div>
+
+                        <div class="config-card">
+                            <div class="card-title">Status das Fontes</div>
+                            <div id="sourceStatus" class="source-status"></div>
+                            <div id="dataSourceList" class="source-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Modal de Edição -->
@@ -391,11 +1014,6 @@ function renderDashboard() {
                 </div>
                 <input type="hidden" id="edit-unit-old-name">
                 
-                <div class="form-group" style="background: #f8f9fa; padding: 10px; border-radius: 4px; border: 1px solid #e9ecef;">
-                    <label style="color: var(--dunamis-blue);">Nome do Responsável (Obrigatório)</label>
-                    <input type="text" id="edit-unit-responsavel" placeholder="Quem está realizando a alteração?">
-                </div>
-
                 <div class="form-group">
                     <label>Nome da Unidade</label>
                     <input type="text" id="edit-unit-new-name">
@@ -419,6 +1037,9 @@ function renderDashboard() {
                     <div class="form-grid">
                         <div class="form-group"><input type="text" id="new-colab-nome" placeholder="Nome Completo"></div>
                         <div class="form-group"><input type="text" id="new-colab-re" placeholder="RE"></div>
+                        <div class="form-group"><input type="text" id="new-colab-telefone" placeholder="Celular"></div>
+                        <div class="form-group"><input type="text" id="new-colab-horario" placeholder="Horário"></div>
+                        <div class="form-group"><input type="text" id="new-colab-unidade" placeholder="Unidade (opcional)"></div>
                     </div>
                     <button class="btn btn-small" onclick="adicionarColaboradorNaUnidade()">Adicionar</button>
                 </div>
@@ -472,11 +1093,112 @@ function renderDashboard() {
                 </div>
             </div>
         </div>
+
+        <!-- Modal de Exportação -->
+        <div id="export-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>${ICONS.download} Exportação</h3>
+                    <button class="close-modal" onclick="closeExportModal()">${ICONS.close}</button>
+                </div>
+
+                <div class="export-grid">
+                    <div class="export-col">
+                        <h4>Planilhas</h4>
+                        <button class="btn" onclick="exportarBaseAtualizada()">Baixar Base Atualizada (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarResumo()">Baixar Resumo (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarTudo()">Baixar Completo (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarCSVAtualizado()">Baixar CSV Atualizado</button>
+                        <button class="btn btn-secondary" onclick="exportarGraficos()">Baixar Dados p/ Gráficos (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarRelatorioIA()">Baixar Relatório IA (XLSX)</button>
+                    </div>
+                    <div class="export-col">
+                        <h4>Conteúdo</h4>
+                        <p class="export-note">Base Atualizada contém o banco original com as alterações locais aplicadas.</p>
+                        <p class="export-note">Resumo inclui totais por unidade, status e rótulos.</p>
+                        <p class="export-note">Completo inclui todas as abas: Base, Resumo, Unidades, Rótulos e Histórico.</p>
+                        <p class="export-note">Dados p/ Gráficos traz séries prontas para gráfico de plantão x folga e top unidades.</p>
+                        <p class="export-note">Relatório IA gera observações automáticas sobre cobertura e rótulos (local).</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal de Ajuda Rápida -->
+        <div id="help-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 700px;">
+                <div class="modal-header">
+                    <h3>Ajuda rápida</h3>
+                    <button class="close-modal" onclick="closeHelpModal()">${ICONS.close}</button>
+                </div>
+                <div class="help-content">
+                    <div class="help-section">
+                        <h4>Busca rápida</h4>
+                        <ul>
+                            <li>Digite nome, RE ou unidade para localizar colaboradores.</li>
+                            <li>Os resultados aparecem instantaneamente conforme você digita.</li>
+                            <li>Use o botão de WhatsApp para contato rápido quando disponível.</li>
+                        </ul>
+                    </div>
+                    <div class="help-section">
+                        <h4>Unidades</h4>
+                        <ul>
+                            <li>Filtre por grupo e por status (Plantão/Folga) quando necessário.</li>
+                            <li>Clique no nome da unidade para expandir ou recolher a lista.</li>
+                            <li>Use “Histórico” para revisar alterações locais feitas no site.</li>
+                        </ul>
+                    </div>
+                    <div class="help-section">
+                        <h4>Dicas úteis</h4>
+                        <ul>
+                            <li>“Atualizado em” mostra quando os dados foram carregados.</li>
+                            <li>“Imprimir visão atual” gera uma saída simples para impressão.</li>
+                            <li>As alterações locais ficam apenas neste navegador.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal de Prompts -->
+        <div id="prompts-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 800px;">
+                <div class="modal-header sticky-modal-header">
+                    <h3>Dicas de prompts (copiar e colar)</h3>
+                    <button class="close-modal" onclick="closePromptsModal()">${ICONS.close}</button>
+                </div>
+                <div class="help-content">
+                    <div class="help-section">
+                        <p>Modelos prontos. Substitua (RE) e (UNIDADE). A busca IA atualiza em tempo real.</p>
+                    </div>
+                    <div id="prompt-templates" class="prompt-list"></div>
+                </div>
+            </div>
+        </div>
     `;
+
+    if (SiteAuth.logged) {
+        document.getElementById('config-login')?.classList.add('hidden');
+        document.getElementById('config-content')?.classList.remove('hidden');
+    } else {
+        document.getElementById('config-login')?.classList.remove('hidden');
+        document.getElementById('config-content')?.classList.add('hidden');
+    }
+
+    updateMenuStatus();
+    updateAiSearchButton();
+    renderPromptTemplates();
 
     // Configurar evento de busca
     const searchInput = document.getElementById('search-input');
-    searchInput.addEventListener('input', () => realizarBusca());
+    const triggerSearch = () => realizarBusca();
+    searchInput.addEventListener('input', triggerSearch);
+    searchInput.addEventListener('change', triggerSearch);
+    searchInput.addEventListener('keyup', triggerSearch);
+    searchInput.addEventListener('compositionend', triggerSearch);
+    searchInput.addEventListener('input', () => handleSearchTokenSuggest());
+    searchInput.addEventListener('click', () => handleSearchTokenSuggest());
+    searchInput.addEventListener('keyup', () => handleSearchTokenSuggest());
     
     // Configurar eventos dos filtros
     document.querySelectorAll('input[name="filterStatus"]').forEach(radio => {
@@ -486,6 +1208,7 @@ function renderDashboard() {
     // Configurar busca de unidades
     const unitSearchInput = document.getElementById('unit-search-input');
     unitSearchInput.addEventListener('input', () => renderizarUnidades());
+
     
     const bulkSelect = document.getElementById('bulk-action-select');
     if(bulkSelect) {
@@ -530,19 +1253,33 @@ function switchTab(tabName) {
     // Atualiza conteúdo
     document.getElementById('tab-content-busca').classList.add('hidden');
     document.getElementById('tab-content-unidades').classList.add('hidden');
+    document.getElementById('tab-content-config').classList.add('hidden');
     
     document.getElementById(`tab-content-${tabName}`).classList.remove('hidden');
+
+    if (tabName === 'config' && !SiteAuth.logged) {
+        document.getElementById('config-login')?.classList.remove('hidden');
+        document.getElementById('config-content')?.classList.add('hidden');
+    }
 
     if (tabName === 'busca') {
         document.getElementById('search-input').focus();
     }
 }
 
+function switchConfigTab(tabName) {
+    document.querySelectorAll('.config-tab').forEach(btn => btn.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById('config-pane-access').classList.add('hidden');
+    document.getElementById('config-pane-datasource').classList.add('hidden');
+    document.getElementById(`config-pane-${tabName}`).classList.remove('hidden');
+}
+
 // 5. Lógica da Busca Rápida
 function realizarBusca() {
     const termo = document.getElementById('search-input').value;
-    const filterStatus = document.querySelector('input[name="filterStatus"]:checked').value;
-    const hideAbsence = document.getElementById('filter-no-absence').checked;
+    const filterStatus = 'all';
+    const hideAbsence = false;
     const resultsContainer = document.getElementById('search-results');
     
     if (!termo && filterStatus === 'all') {
@@ -550,9 +1287,23 @@ function realizarBusca() {
         return;
     }
 
+    if (isAiSearchEnabled()) {
+        const handled = aiAssistSearch(termo, resultsContainer, filterStatus, hideAbsence);
+        if (handled) return;
+        aiRemoteSearch(termo, resultsContainer, filterStatus, hideAbsence)
+            .then(remoteHandled => {
+                if (!remoteHandled) runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence);
+            });
+        return;
+    }
+
+    runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence);
+}
+
+function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
     const termoLimpo = termo.toUpperCase();
     
-    const resultados = currentData.filter(item => {
+    let resultados = currentData.filter(item => {
         // Verifica se o posto está oculto
         if (hiddenUnits.has(item.posto)) return false;
 
@@ -620,6 +1371,7 @@ function realizarBusca() {
                 <div class="card-details-grid">
                     <div><strong>RE:</strong> ${item.re}</div>
                     <div><strong>Posto:</strong> <span class="unit-link" onclick="navigateToUnit('${item.posto}')">${item.posto}</span></div>
+                    <div><strong>Grupo:</strong> ${item.grupoLabel || 'N/I'}</div>
                     <div><strong>Escala:</strong> ${item.tipoEscala ? `<span class="scale-badge">${item.tipoEscala}</span>` : ''}</div>
                     <div>   
                         <strong>Horário:</strong> ${item.escala || 'N/I'} 
@@ -755,6 +1507,128 @@ function atualizarEstatisticas(dados, groupFilter) {
             <div class="stat-value">${folga}</div>
         </div>
     `;
+}
+
+
+function updateLastUpdatedDisplay() {
+    return;
+}
+
+function printCurrentView() {
+    window.print();
+}
+
+function openHelpModal() {
+    document.getElementById('help-modal')?.classList.remove('hidden');
+}
+
+function closeHelpModal() {
+    document.getElementById('help-modal')?.classList.add('hidden');
+}
+
+function openPromptsModal() {
+    document.getElementById('prompts-modal')?.classList.remove('hidden');
+}
+
+function closePromptsModal() {
+    document.getElementById('prompts-modal')?.classList.add('hidden');
+}
+
+function renderPromptTemplates() {
+    const container = document.getElementById('prompt-templates');
+    if (!container) return;
+    container.innerHTML = PROMPT_TEMPLATES.map((p, idx) => `
+        <div class="prompt-card">
+            <div class="prompt-title">${p.title}</div>
+            <div class="prompt-text" id="prompt-text-${idx}">${p.text}</div>
+            <button class="btn btn-secondary btn-small" onclick="copyPrompt(${idx})">Copiar</button>
+        </div>
+    `).join('');
+}
+
+function copyPrompt(index) {
+    const text = PROMPT_TEMPLATES[index]?.text || '';
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast("Prompt copiado.", "success");
+    }).catch(() => {
+        showToast("Não foi possível copiar.", "error");
+    });
+}
+
+function handleSearchTokenSuggest() {
+    const input = document.getElementById('search-input');
+    const list = document.getElementById('search-suggestions');
+    if (!input || !list) return;
+    const value = input.value;
+    const cursor = input.selectionStart ?? value.length;
+    const left = value.slice(0, cursor);
+    const openIdx = left.lastIndexOf('(');
+    const closeIdx = left.lastIndexOf(')');
+    if (openIdx < 0 || openIdx < closeIdx) {
+        list.classList.add('hidden');
+        return;
+    }
+    const fragment = left.slice(openIdx + 1).trim().toUpperCase();
+    const unitMatches = getUnitSuggestions(fragment);
+    const nameMatches = getNameSuggestions(fragment);
+    const tokenMatches = SEARCH_TOKENS.filter(t => t.key.startsWith(fragment));
+    const matches = unitMatches.length
+        ? unitMatches
+        : (nameMatches.length ? nameMatches : tokenMatches.map(t => ({ value: t.key, label: t.label })));
+    if (!matches.length) {
+        list.classList.add('hidden');
+        return;
+    }
+    list.innerHTML = matches.map(m => `
+        <button type="button" class="suggest-item" onclick="applySearchToken('${m.value}')">
+            <strong>${m.value}</strong> <span>${m.label || 'Unidade'}</span>
+        </button>
+    `).join('');
+    list.classList.remove('hidden');
+}
+
+function applySearchToken(token) {
+    const input = document.getElementById('search-input');
+    const list = document.getElementById('search-suggestions');
+    if (!input) return;
+    const value = input.value;
+    const cursor = input.selectionStart ?? value.length;
+    const left = value.slice(0, cursor);
+    const right = value.slice(cursor);
+    const openIdx = left.lastIndexOf('(');
+    if (openIdx < 0) return;
+    const before = value.slice(0, openIdx + 1);
+    const after = right.startsWith(')') ? right.slice(1) : right;
+    const newValue = `${before}${token})${after}`;
+    const newCursor = (before + token + ')').length;
+    input.value = newValue;
+    input.setSelectionRange(newCursor, newCursor);
+    if (list) list.classList.add('hidden');
+    input.focus();
+    realizarBusca();
+}
+
+function getUnitSuggestions(fragment) {
+    const term = (fragment || '').trim().toUpperCase();
+    if (!term) return [];
+    const units = [...new Set(currentData.map(d => d.posto).filter(Boolean))];
+    return units
+        .filter(u => u.toUpperCase().includes(term))
+        .sort((a, b) => a.localeCompare(b, 'pt-BR'))
+        .slice(0, 8)
+        .map(u => ({ value: u, label: 'Unidade' }));
+}
+
+function getNameSuggestions(fragment) {
+    const term = (fragment || '').trim().toUpperCase();
+    if (!term || term.length < 2) return [];
+    const names = [...new Set(currentData.map(d => d.nome).filter(Boolean))];
+    return names
+        .filter(n => n.toUpperCase().includes(term))
+        .sort((a, b) => a.localeCompare(b, 'pt-BR'))
+        .slice(0, 8)
+        .map(n => ({ value: n, label: 'Nome' }));
 }
 
 function toggleUnitVisibility(posto) {
@@ -912,13 +1786,646 @@ function getStatusInfo(item) {
         }
     }
 
+    // 2. Status real do dia (quando houver evento na API)
+    if (item._nextiHasEvent) {
+        return { text: 'PLANTÃO', color: '#dc3545' }; // Vermelho
+    }
+
     // 2. Verifica Escala Padrão
     const trabalha = verificarEscala(item.turma);
     if (trabalha) return { text: 'PLANTÃO', color: '#dc3545' }; // Vermelho
     return { text: 'FOLGA', color: '#28a745' }; // Verde
 }
 
+function toggleAiSearchButton() {
+    const enabled = !isAiSearchEnabled();
+    localStorage.setItem('aiSearchEnabled', enabled ? '1' : '0');
+    updateAiSearchButton();
+}
+
+function isAiSearchEnabled() {
+    return localStorage.getItem('aiSearchEnabled') === '1';
+}
+
+function updateAiSearchButton() {
+    const btn = document.getElementById('ai-search-btn');
+    if (!btn) return;
+    const enabled = isAiSearchEnabled();
+    btn.textContent = enabled ? 'IA: ON' : 'IA: OFF';
+    btn.classList.toggle('active', enabled);
+}
+
+function aiAssistSearch(query, container, filterStatus, hideAbsence) {
+    const intent = interpretAiQuery(query);
+    const q = intent.normalized;
+    if (!q) return false;
+
+    const isQuestion = intent.isQuestion;
+    const mentionsLeader = intent.mentionsLeader;
+    const mentionsUnit = intent.mentionsUnit;
+    const mentionsCover = intent.mentionsCover;
+    const mentionsProximity = intent.mentionsProximity;
+    const mentionsOnDuty = intent.mentionsOnDuty;
+    const mentionsOff = intent.mentionsOff;
+    const mentionsAbsence = intent.mentionsAbsence;
+    const mentionsPhone = intent.mentionsPhone;
+    const mentionsSchedule = intent.mentionsSchedule;
+    const mentionsCount = intent.mentionsCount;
+    const targetRe = intent.targetRe;
+    const targetName = intent.targetName;
+
+    if (isQuestion && mentionsLeader && mentionsUnit) {
+        const unitName = extractUnitName(q);
+        if (!unitName) return false;
+
+        const matchedUnit = findUnitByName(unitName);
+        if (!matchedUnit) {
+            container.innerHTML = `<p class="empty-state">Não encontrei a unidade "${unitName}".</p>`;
+            return true;
+        }
+
+        const meta = unitMetadata[matchedUnit] || {};
+        if (!meta.responsavel) {
+            container.innerHTML = `<p class="empty-state">Unidade "${matchedUnit}" sem responsável definido.</p>`;
+            return true;
+        }
+
+        container.innerHTML = `
+            <div class="result-card">
+                <h4>${matchedUnit}</h4>
+                <div class="meta">Líder/Responsável</div>
+                <div class="member-name">${meta.responsavel}</div>
+                <div class="member-re">Resposta gerada pelo assistente de busca</div>
+            </div>
+        `;
+        return true;
+    }
+
+    if (isQuestion && mentionsCover) {
+        if (!targetRe && !targetName) return false;
+
+        const target = targetRe
+            ? currentData.find(d => d.re === targetRe || d.re?.endsWith(targetRe))
+            : findPersonByName(targetName || '');
+        if (!target) {
+            container.innerHTML = `<p class="empty-state">Não encontrei o colaborador informado.</p>`;
+            return true;
+        }
+
+        if (mentionsProximity) {
+            handleCoverageProximityAsync(target, container);
+            return true;
+        }
+
+        const sameUnit = currentData.filter(d => d.posto === target.posto);
+        const available = sameUnit.filter(d => isDisponivelParaCobrir(d));
+        const list = (available.length ? available : sameUnit).slice(0, 8);
+        const title = `Sugestões de cobertura`;
+
+        container.innerHTML = `
+            <div class="result-card">
+                <h4>${title}</h4>
+                <div class="meta">Colaborador alvo (RE ${target.re}): ${target.nome} — Unidade: ${target.posto}</div>
+            </div>
+            ${list.map(p => renderAiResultCard(p, target)).join('')}
+        `;
+        return true;
+    }
+
+    // Intenção: informações por RE ou nome
+    const re = targetRe || extractRe(q);
+    const byName = !re ? findPersonByName(q) : null;
+    const target = re ? currentData.find(d => d.re === re || d.re?.endsWith(re)) : byName;
+    if (target && (mentionsPhone || mentionsSchedule || q.startsWith('quem') || q.startsWith('qual'))) {
+        const results = applyAiFilters([target], filterStatus, hideAbsence);
+        if (!results.length) {
+            container.innerHTML = `<p class="empty-state">Nenhum resultado com os filtros atuais.</p>`;
+            return true;
+        }
+        container.innerHTML = results.map(p => renderAiResultCard(p, target)).join('');
+        return true;
+    }
+
+    // Intenção: listar por unidade
+    if (isQuestion && mentionsUnit) {
+        const unitName = extractUnitName(q);
+        if (!unitName) return false;
+        const matchedUnit = findUnitByName(unitName);
+        if (!matchedUnit) {
+            container.innerHTML = `<p class="empty-state">Não encontrei a unidade "${unitName}".</p>`;
+            return true;
+        }
+        let list = currentData.filter(d => d.posto === matchedUnit);
+        if (mentionsOnDuty) list = list.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT'));
+        if (mentionsOff) list = list.filter(d => getStatusInfo(d).text.includes('FOLGA'));
+        if (mentionsAbsence) list = list.filter(d => d.rotulo);
+        list = applyAiFilters(list, filterStatus, hideAbsence);
+        if (!list.length) {
+            container.innerHTML = `<p class="empty-state">Nenhum resultado com os filtros atuais.</p>`;
+            return true;
+        }
+        container.innerHTML = `
+            <div class="result-card">
+                <h4>Unidade: ${matchedUnit}</h4>
+                <div class="meta">Resultado gerado pelo assistente para a unidade informada.</div>
+            </div>
+            ${list.slice(0, 20).map(p => renderAiResultCard(p, p)).join('')}
+        `;
+        return true;
+    }
+
+    // Intenção: listas gerais
+    if (isQuestion && (mentionsOnDuty || mentionsOff || mentionsAbsence)) {
+        let list = [...currentData];
+        if (mentionsOnDuty) list = list.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT'));
+        if (mentionsOff) list = list.filter(d => getStatusInfo(d).text.includes('FOLGA'));
+        if (mentionsAbsence) list = list.filter(d => d.rotulo);
+        list = applyAiFilters(list, filterStatus, hideAbsence);
+        if (!list.length) {
+            container.innerHTML = `<p class="empty-state">Nenhum resultado com os filtros atuais.</p>`;
+            return true;
+        }
+        container.innerHTML = list.slice(0, 20).map(p => renderAiResultCard(p, p)).join('');
+        return true;
+    }
+
+    // Intenção: contagem
+    if (isQuestion && mentionsCount) {
+        const unitName = extractUnitName(q);
+        let list = [...currentData];
+        if (unitName) {
+            const matchedUnit = findUnitByName(unitName);
+            if (matchedUnit) list = list.filter(d => d.posto === matchedUnit);
+        }
+        if (mentionsOnDuty) list = list.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT'));
+        if (mentionsOff) list = list.filter(d => getStatusInfo(d).text.includes('FOLGA'));
+        if (mentionsAbsence) list = list.filter(d => d.rotulo);
+        list = applyAiFilters(list, filterStatus, hideAbsence);
+        container.innerHTML = `<p class="empty-state">Total encontrado: ${list.length} (unidade/status conforme solicitado)</p>`;
+        return true;
+    }
+
+    return false;
+}
+
+const AI_STUDIO_ENDPOINT = 'https://apigooglestudio.gustavo-dac.workers.dev/';
+
+function buildAiDataSummary(list, limit = 300) {
+    const rows = list.slice(0, limit).map(item => {
+        const re = item.re || '';
+        const nome = item.nome || '';
+        const posto = item.posto || '';
+        const grupo = item.grupoLabel || '';
+        return `${re} | ${nome} | ${posto} | ${grupo}`;
+    });
+    return rows.join('\n');
+}
+
+function extractJsonFromText(text) {
+    if (!text) return null;
+    const firstArray = text.indexOf('[');
+    const firstObj = text.indexOf('{');
+    const start = firstArray >= 0 ? firstArray : firstObj;
+    if (start < 0) return null;
+    const end = Math.max(text.lastIndexOf(']'), text.lastIndexOf('}'));
+    if (end < 0) return null;
+    const slice = text.slice(start, end + 1);
+    try { return JSON.parse(slice); } catch { return null; }
+}
+
+function normalizeReValue(value) {
+    if (value == null) return null;
+    const str = String(value).replace(/\D/g, '');
+    return str || null;
+}
+
+function parseAiReList(text) {
+    const json = extractJsonFromText(text);
+    if (Array.isArray(json)) return json.map(normalizeReValue).filter(Boolean);
+    if (json && Array.isArray(json.res)) return json.res.map(normalizeReValue).filter(Boolean);
+    if (json && Array.isArray(json.re_list)) return json.re_list.map(normalizeReValue).filter(Boolean);
+    const fallback = [];
+    const regex = /(?:re\s*)?([0-9]{3,6})/gi;
+    let m;
+    while ((m = regex.exec(text || '')) !== null) {
+        const val = normalizeReValue(m[1]);
+        if (val) fallback.push(val);
+    }
+    return fallback;
+}
+
+async function aiRemoteSearch(query, container, filterStatus, hideAbsence) {
+    const prompt = [
+        'RETORNE APENAS JSON.',
+        'Formato esperado: {"res":["RE1","RE2","RE3"]}.',
+        'Use apenas REs presentes na lista.',
+        'Se não encontrar, retorne {"res":[]}.'
+    ].join(' ');
+    const data = `${prompt}\n\n${buildAiDataSummary(currentData)}`;
+
+    try {
+        container.innerHTML = '<p class="empty-state">Buscando com IA...</p>';
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const resp = await fetch(AI_STUDIO_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, data }),
+            signal: controller.signal
+        });
+        clearTimeout(timeout);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+        const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const reList = parseAiReList(text);
+        if (!reList.length) {
+            renderAiFallbackResponse(query, container, 'Não encontrei resultados diretos com os dados atuais.');
+            return true;
+        }
+
+        let results = currentData.filter(item => reList.includes(item.re) || reList.some(r => item.re?.endsWith(r)));
+        results = applyAiFilters(results, filterStatus, hideAbsence);
+        if (!results.length) return false;
+        container.innerHTML = results.slice(0, 20).map(p => renderAiResultCard(p, p)).join('');
+        return true;
+    } catch (e) {
+        console.error('Erro IA remota:', e);
+        renderAiFallbackResponse(query, container, 'Não consegui conectar com a IA agora.');
+        return true;
+    }
+}
+
+function renderAiFallbackResponse(query, container, note) {
+    container.innerHTML = `
+        <div class="result-card">
+            <h4>Resposta IA</h4>
+            <p>Não consegui interpretar completamente: “${query}”.</p>
+            <p>${note}</p>
+            <p>Dica: informe RE, nome ou unidade para respostas mais precisas.</p>
+        </div>
+    `;
+}
+
+function extractUnitName(text) {
+    const patterns = [
+        /unidade\s+do\s+(.+)/,
+        /unidade\s+da\s+(.+)/,
+        /unidade\s+de\s+(.+)/,
+        /posto\s+(.+)/
+    ];
+    for (const p of patterns) {
+        const m = text.match(p);
+        if (m && m[1]) {
+            const raw = m[1]
+                .replace(/[(){}[\]]/g, ' ')
+                .replace(/[^a-z0-9\s]/gi, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return raw.toUpperCase();
+        }
+    }
+    return null;
+}
+
+function extractRe(text) {
+    const m = text.match(/re\s*([0-9]{3,6})/i);
+    return m ? m[1] : null;
+}
+
+function normalizeText(text) {
+    return (text || '')
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+}
+
+function extractNameInParens(text) {
+    const raw = (text || '');
+    const match = raw.match(/\(([^)]+)\)/);
+    if (!match || !match[1]) return null;
+    const value = match[1].replace(/[^a-z0-9\s]/gi, ' ').replace(/\s+/g, ' ').trim();
+    return value ? value.toUpperCase() : null;
+}
+
+function extractNameFromQuery(text) {
+    const raw = (text || '').toLowerCase();
+    if (!raw) return null;
+    const cleaned = raw
+        .replace(/\bre\b\s*[0-9]{3,6}/gi, ' ')
+        .replace(/\bmatricula\b\s*[0-9]{3,6}/gi, ' ')
+        .replace(/\b(unidade|posto|cobrir|cobertura|falta|faltou|substituir|substituicao|troca|remanejar|remanejamento|plantao|folga|hoje|perto|proximo|mais)\b/gi, ' ')
+        .replace(/[^a-z0-9\s]/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleaned) return null;
+    return cleaned.toUpperCase();
+}
+
+function extractReAdvanced(text) {
+    const raw = normalizeText(text);
+    const direct = raw.match(/re\s*([0-9]{3,6})/i);
+    if (direct) return direct[1];
+    const matricula = raw.match(/matricula\s*([0-9]{3,6})/i);
+    if (matricula) return matricula[1];
+    const maybe = raw.match(/\b([0-9]{3,6})\b/);
+    return maybe ? maybe[1] : null;
+}
+
+function interpretAiQuery(query) {
+    const normalized = normalizeText((query || '').trim());
+    const isQuestion = normalized.includes('?') ||
+        normalized.startsWith('quem') ||
+        normalized.startsWith('qual') ||
+        normalized.startsWith('listar') ||
+        normalized.startsWith('mostre') ||
+        normalized.startsWith('mostrar') ||
+        normalized.startsWith('preciso') ||
+        normalized.startsWith('precisamos');
+
+    const mentionsLeader = /(lider|responsavel|chefe)/.test(normalized);
+    const mentionsUnit = /(unidade|posto)/.test(normalized);
+    const mentionsCover = /(cobrir|cobertura|substituir|substituicao|troca|remanejar|remanejamento|cobertura|falta)/.test(normalized);
+    const mentionsProximity = /(proximidade|perto|prox|proximo|mais perto|mais proximo|distancia)/.test(normalized);
+    const mentionsOnDuty = /(plantao|em plantao|trabalhando|em serviço|em servico)/.test(normalized);
+    const mentionsOff = /(folga|disponivel|disponiveis|liberado|livre)/.test(normalized);
+    const mentionsAbsence = /(afastado|afastamento|ferias|atestado|licenca)/.test(normalized);
+    const mentionsPhone = /(telefone|whatsapp|contato)/.test(normalized);
+    const mentionsSchedule = /(escala|horario|turno)/.test(normalized);
+    const mentionsCount = /(quantos|total|quantidade)/.test(normalized);
+    const targetRe = extractReAdvanced(query);
+    const targetName = extractNameInParens(query) || extractNameFromQuery(query);
+
+    return {
+        normalized,
+        isQuestion,
+        mentionsLeader,
+        mentionsUnit,
+        mentionsCover,
+        mentionsProximity,
+        mentionsOnDuty,
+        mentionsOff,
+        mentionsAbsence,
+        mentionsPhone,
+        mentionsSchedule,
+        mentionsCount,
+        targetRe,
+        targetName
+    };
+}
+
+function normalizeUnitKey(text) {
+    return (text || '')
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9\\s]/g, ' ')
+        .replace(/\\s+/g, ' ')
+        .trim();
+}
+
+function buildUnitKeyVariants(name) {
+    const base = normalizeUnitKey(name);
+    const variants = new Set([base]);
+    if (base.startsWith('RB ')) variants.add(base.replace(/^RB\\s+/, '').trim());
+    if (base.startsWith('DUNAMIS ')) variants.add(base.replace(/^DUNAMIS\\s+/, '').trim());
+    if (base.startsWith('HOSPITAL ')) variants.add(base.replace(/^HOSPITAL\\s+/, '').trim());
+    return Array.from(variants).filter(Boolean);
+}
+
+async function loadUnitAddressDb() {
+    try {
+        const resp = await fetch('unit_addresses.json', { cache: 'no-store' });
+        if (!resp.ok) return;
+        unitAddressDb = await resp.json();
+        const normMap = {};
+        (unitAddressDb.entries || []).forEach(e => {
+            const key = normalizeUnitKey(e.nome);
+            if (key && e.endereco) normMap[key] = e.endereco;
+        });
+        unitAddressDb.address_map_norm = normMap;
+    } catch {}
+
+    try {
+        unitGeoCache = JSON.parse(localStorage.getItem('unitGeoCache') || '{}') || {};
+    } catch {
+        unitGeoCache = {};
+    }
+
+    try {
+        const geoResp = await fetch('unit_geo_cache.json', { cache: 'no-store' });
+        if (geoResp.ok) {
+            const pre = await geoResp.json();
+            unitGeoCache = { ...pre, ...unitGeoCache };
+        }
+    } catch {}
+}
+
+function getAddressForUnit(unitName) {
+    const map = unitAddressDb?.address_map_norm || {};
+    const variants = buildUnitKeyVariants(unitName);
+    for (const key of variants) {
+        if (map[key]) return map[key];
+    }
+    const entries = unitAddressDb?.entries || [];
+    const base = normalizeUnitKey(unitName);
+    if (base.length >= 5) {
+        const direct = entries.find(e => normalizeUnitKey(e.nome) === base && e.endereco);
+        if (direct) return direct.endereco;
+        const contains = entries.find(e => normalizeUnitKey(e.nome).includes(base) && e.endereco);
+        if (contains) return contains.endereco;
+    }
+    return null;
+}
+
+async function getCoordsForAddress(address) {
+    if (!address) return null;
+    if (unitGeoCache[address]) return unitGeoCache[address];
+    try {
+        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
+        const resp = await fetch(url, { headers: { 'Accept-Language': 'pt-BR' } });
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        if (!data || !data.length) return null;
+        const coords = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+        if (!Number.isFinite(coords.lat) || !Number.isFinite(coords.lon)) return null;
+        unitGeoCache[address] = coords;
+        localStorage.setItem('unitGeoCache', JSON.stringify(unitGeoCache));
+        return coords;
+    } catch {
+        return null;
+    }
+}
+
+function calcDistanceKm(a, b) {
+    const toRad = (d) => (d * Math.PI) / 180;
+    const R = 6371;
+    const dLat = toRad(b.lat - a.lat);
+    const dLon = toRad(b.lon - a.lon);
+    const lat1 = toRad(a.lat);
+    const lat2 = toRad(b.lat);
+    const sinLat = Math.sin(dLat / 2);
+    const sinLon = Math.sin(dLon / 2);
+    const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+async function handleCoverageProximityAsync(target, container) {
+    container.innerHTML = '<p class="empty-state">Calculando proximidade por endereços...</p>';
+
+    const targetAddress = getAddressForUnit(target.posto);
+    const targetCoords = await getCoordsForAddress(targetAddress);
+
+    let candidates = currentData.filter(d => d.re !== target.re && isDisponivelParaCobrir(d));
+    if (!candidates.length) {
+        container.innerHTML = `<div class="result-card"><h4>Resposta IA</h4><p>Não encontrei colaboradores de folga no momento para cobrir o RE ${target.re}.</p></div>`;
+        return;
+    }
+
+    if (!targetAddress || !targetCoords) {
+        const sameUnit = candidates.filter(d => d.posto === target.posto).slice(0, 6);
+        const list = sameUnit.length ? sameUnit : candidates.slice(0, 6);
+        container.innerHTML = `
+            <div class="result-card">
+                <h4>Sugestões de cobertura</h4>
+                <div class="meta">Colaborador alvo (RE ${target.re}): ${target.nome}. Endereço da unidade (${target.posto}) indisponível; usando disponibilidade e unidade.</div>
+            </div>
+            ${list.map(p => renderAiResultCard(p, target)).join('')}
+        `;
+        return;
+    }
+
+    const enriched = [];
+    for (const cand of candidates) {
+        const addr = getAddressForUnit(cand.posto);
+        const coords = await getCoordsForAddress(addr);
+        if (!coords) continue;
+        const dist = calcDistanceKm(targetCoords, coords);
+        enriched.push({ ...cand, _distanceKm: dist });
+    }
+
+    if (!enriched.length) {
+        container.innerHTML = `
+            <div class="result-card">
+                <h4>Sugestões de cobertura</h4>
+                <div class="meta">Colaborador alvo (RE ${target.re}): ${target.nome}. Não consegui geocodificar endereços suficientes; mostrando colaboradores de folga.</div>
+            </div>
+            ${candidates.slice(0, 6).map(p => renderAiResultCard(p, target)).join('')}
+        `;
+        return;
+    }
+
+    enriched.sort((a, b) => a._distanceKm - b._distanceKm);
+    const list = enriched.slice(0, 6).map(p => {
+        p._distanceKm = Math.round(p._distanceKm * 10) / 10;
+        return p;
+    });
+
+    container.innerHTML = `
+        <div class="result-card">
+            <h4>Sugestões de cobertura por proximidade</h4>
+            <div class="meta">Colaborador alvo (RE ${target.re}): ${target.nome} — Unidade: ${target.posto}. Distância estimada entre postos.</div>
+        </div>
+        ${list.map(p => renderAiResultCard(p, target)).join('')}
+    `;
+}
+
+function findPersonByName(query) {
+    const cleaned = normalizeText(query).replace(/[^a-z0-9\s]/g, ' ').trim();
+    if (!cleaned) return null;
+    const parts = cleaned.split(/\s+/).filter(Boolean);
+    if (!parts.length) return null;
+    return currentData.find(p => {
+        const name = normalizeText(p.nome);
+        return parts.every(part => name.includes(part));
+    }) || null;
+}
+
+function applyAiFilters(list, filterStatus, hideAbsence) {
+    let filtered = list;
+    if (filterStatus === 'plantao') {
+        filtered = filtered.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT'));
+    } else if (filterStatus === 'folga') {
+        filtered = filtered.filter(d => getStatusInfo(d).text.includes('FOLGA'));
+    }
+    if (hideAbsence) {
+        filtered = filtered.filter(d => !d.rotulo);
+    }
+    return filtered;
+}
+
+function isDisponivelParaCobrir(item) {
+    const status = getStatusInfo(item).text;
+    if (status.includes('FOLGA')) return true;
+    return false;
+}
+
+function buildAiReason(candidate, target) {
+    const status = getStatusInfo(candidate).text;
+    const parts = [];
+    if (status.includes('FOLGA')) parts.push('está de folga hoje');
+    if (candidate.posto === target.posto) parts.push(`atua na mesma unidade (${candidate.posto})`);
+    if (candidate._distanceKm != null) parts.push(`está a ~${candidate._distanceKm} km da unidade do colaborador RE ${target.re}`);
+    if (!parts.length) parts.push('disponibilidade verificada pela escala e status atual');
+    return `Motivo: ${parts.join(' e ')}.`;
+}
+
+function renderAiResultCard(item, target) {
+    const statusInfo = getStatusInfo(item);
+    const turnoInfo = getTurnoInfo(item.escala);
+    const retornoInfo = item.rotulo && item.rotuloFim ? `<span class="return-date">Retorno: ${formatDate(item.rotuloFim)}</span>` : '';
+    let rotulosHtml = '';
+    if (item.rotulo) {
+        const rotulos = item.rotulo.split(',');
+        rotulosHtml = rotulos.map(r => {
+            let display = r;
+            if (r === 'OUTRO' && item.rotuloDetalhe) {
+                display = item.rotuloDetalhe;
+            }
+            const map = { 'FÉRIAS': 'Férias', 'ATESTADO': 'Atestado', 'AFASTADO': 'Afastado', 'FT': 'FT', 'TROCA': 'Troca' };
+            return `<span class="label-badge">${map[r] || display}</span>`;
+        }).join('');
+    }
+    const bgClass = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT') ? 'bg-plantao' : 'bg-folga';
+    const reason = buildAiReason(item, target);
+
+    return `
+        <div class="result-card ${bgClass}" style="border-left: 5px solid ${statusInfo.color}">
+            <div class="card-header">
+                <div class="header-left">
+                    <span class="colaborador-nome">${item.nome}</span>
+                    <span class="status-badge" style="background-color: ${statusInfo.color}">${statusInfo.text}</span>
+                    ${rotulosHtml}
+                    ${retornoInfo}
+                </div>
+                <div class="header-right">
+                    <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal('${item.nome}', '${item.telefone || ''}')" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
+                </div>
+            </div>
+            <div class="card-details-grid">
+                <div><strong>RE:</strong> ${item.re}</div>
+                <div><strong>Posto:</strong> <span class="unit-link" onclick="navigateToUnit('${item.posto}')">${item.posto}</span></div>
+                <div><strong>Grupo:</strong> ${item.grupoLabel || 'N/I'}</div>
+                <div><strong>Escala:</strong> ${item.tipoEscala ? `<span class="scale-badge">${item.tipoEscala}</span>` : ''}</div>
+                <div>
+                    <strong>Horário:</strong> ${item.escala || 'N/I'}
+                    ${turnoInfo ? `<div style="margin-top: 4px;">${turnoInfo}</div>` : ''}
+                </div>
+                <div class="ai-reason">${reason}</div>
+            </div>
+        </div>
+    `;
+}
+
+function findUnitByName(name) {
+    const units = [...new Set(currentData.map(d => d.posto).filter(Boolean))];
+    const normTarget = normalizeUnitKey(name);
+    const direct = units.find(u => normalizeUnitKey(u) === normTarget);
+    if (direct) return direct;
+    return units.find(u => normalizeUnitKey(u).includes(normTarget));
+}
+
 function openEditModal(id) {
+    if (SiteAuth.mode !== 'edit') return;
     const item = currentData.find(d => d.id === id);
     if (!item) return;
 
@@ -992,19 +2499,26 @@ function salvarEdicao() {
     }
     
     if (item) {
+        const hasNextiAbsence = item._nextiAbsence === true;
+
         item.nome = document.getElementById('edit-nome').value.toUpperCase();
         item.re = document.getElementById('edit-re').value;
         item.telefone = document.getElementById('edit-telefone').value.replace(/\D/g, ''); // Salva apenas números
         item.posto = document.getElementById('edit-posto').value.toUpperCase();
         item.escala = document.getElementById('edit-escala').value;
         item.turma = parseInt(document.getElementById('edit-turma').value);
-        item.rotulo = getCheckboxValues('edit-rotulo-container');
-        item.rotuloInicio = document.getElementById('edit-inicio').value;
-        item.rotuloFim = document.getElementById('edit-fim').value;
-        item.rotuloDetalhe = document.getElementById('edit-rotulo-desc').value;
+
+        // Rótulos vindos da Nexti não podem ser editados manualmente
+        if (!hasNextiAbsence) {
+            item.rotulo = getCheckboxValues('edit-rotulo-container');
+            item.rotuloInicio = document.getElementById('edit-inicio').value;
+            item.rotuloFim = document.getElementById('edit-fim').value;
+            item.rotuloDetalhe = document.getElementById('edit-rotulo-desc').value;
+        }
 
         // Salvar edição localmente
         collaboratorEdits[item.re] = { ...item };
+        saveLocalState();
 
         // Registrar histórico
         changeHistory.unshift({
@@ -1013,6 +2527,7 @@ function salvarEdicao() {
             acao: "Edição de Colaborador",
             detalhe: `Alterou dados de ${item.nome} (${item.re})`
         });
+        saveLocalState();
 
         // Atualiza a visualização
         if (currentTab === 'busca') {
@@ -1032,10 +2547,10 @@ function salvarEdicao() {
 // ==========================================================================
 
 function openEditUnitModal(postoName) {
+    if (SiteAuth.mode !== 'edit') return;
     document.getElementById('edit-unit-old-name').value = postoName;
     document.getElementById('edit-unit-new-name').value = postoName;
 
-    document.getElementById('edit-unit-responsavel').value = '';
     // Carregar metadados existentes
     const meta = unitMetadata[postoName] || {};
     
@@ -1076,12 +2591,7 @@ function salvarEdicaoUnidade() {
     const newName = document.getElementById('edit-unit-new-name').value.toUpperCase().trim();
     const rotulo = getCheckboxValues('edit-unit-rotulo-container');
     const detalhe = document.getElementById('edit-unit-rotulo-desc').value;
-    const responsavel = document.getElementById('edit-unit-responsavel').value.trim();
-
-    if (!responsavel) {
-        showToast("Por favor, informe o nome do responsável.", "error");
-        return;
-    }
+    const responsavel = SiteAuth.user || 'Admin';
 
     // Atualizar chave dos metadados se o nome mudar
     if (newName && newName !== oldName) {
@@ -1100,17 +2610,18 @@ function salvarEdicaoUnidade() {
         renderizarUnidades();
         showToast("Nome da unidade atualizado!", "success");
         
-        changeHistory.unshift({
-            data: new Date().toLocaleString(),
-            responsavel: responsavel,
-            acao: "Renomear Unidade",
+    changeHistory.unshift({
+        data: new Date().toLocaleString(),
+        responsavel: responsavel,
+        acao: "Renomear Unidade",
             detalhe: `Renomeou ${oldName} para ${newName}`
         });
     }
 
     // Salvar novos metadados
     const targetName = newName || oldName;
-    unitMetadata[targetName] = { rotulo, detalhe };
+    unitMetadata[targetName] = { rotulo, detalhe, responsavel };
+    saveLocalState();
 
     // Histórico de rótulo não é crítico se o nome não mudou, mas podemos logar se quiser
     renderizarUnidades();
@@ -1182,7 +2693,10 @@ function removerColaborador() {
 function adicionarColaboradorNaUnidade() {
     const nome = document.getElementById('new-colab-nome').value.toUpperCase().trim();
     const re = document.getElementById('new-colab-re').value.trim();
-    const posto = document.getElementById('edit-unit-old-name').value;
+    const telefone = document.getElementById('new-colab-telefone').value.replace(/\D/g, '');
+    const horario = document.getElementById('new-colab-horario').value.trim();
+    const postoInput = document.getElementById('new-colab-unidade').value.toUpperCase().trim();
+    const posto = postoInput || document.getElementById('edit-unit-old-name').value;
 
     if(!nome || !re) {
         showToast("Preencha Nome e RE.", "error");
@@ -1194,23 +2708,29 @@ function adicionarColaboradorNaUnidade() {
     // Tenta herdar o grupo de alguém da mesma unidade
     const existingMember = currentData.find(d => d.posto === posto);
     const grupo = existingMember ? existingMember.grupo : (currentGroup !== 'todos' ? currentGroup : 'bombeiros');
+    const tipoEscala = extrairTipoEscala(horario);
 
     currentData.push({
         id: newId,
         nome: nome,
         re: re,
         posto: posto,
-        escala: '',
+        escala: horario,
+        tipoEscala: tipoEscala,
         turma: 1,
         rotulo: '',
         rotuloInicio: '',
         rotuloFim: '',
         rotuloDetalhe: '',
-        grupo: grupo
+        grupo: grupo,
+        telefone: telefone
     });
 
     document.getElementById('new-colab-nome').value = '';
     document.getElementById('new-colab-re').value = '';
+    document.getElementById('new-colab-telefone').value = '';
+    document.getElementById('new-colab-horario').value = '';
+    document.getElementById('new-colab-unidade').value = '';
     
     // Atualiza a lista no modal e no fundo
     renderizarUnidades();
@@ -1236,6 +2756,7 @@ function adicionarColaboradorNaUnidade() {
         acao: "Adição",
         detalhe: `Adicionou ${nome} em ${posto}`
     });
+    saveLocalState();
 }
 
 // ==========================================================================
@@ -1251,10 +2772,6 @@ function scrollToTop() {
     window.scrollTo({top: 0, behavior: 'smooth'});
 }
 
-// Carregar preferência de modo noturno
-if (localStorage.getItem('darkMode') === 'true') {
-    document.body.classList.add('dark-mode');
-}
 
 // ==========================================================================
 // 📌 UTILITÁRIOS GERAIS
@@ -1420,7 +2937,12 @@ function closePhoneModal() {
 function contactWhatsApp() {
     if (!currentContactPhone) return;
     const formatted = currentContactPhone.length <= 11 ? '55' + currentContactPhone : currentContactPhone;
-    window.open(`https://wa.me/${formatted}`, '_blank');
+    // Prefer deep link to app on mobile
+    window.location.href = `whatsapp://send?phone=${formatted}`;
+    // Fallback to wa.me after a short delay
+    setTimeout(() => {
+        window.open(`https://wa.me/${formatted}`, '_blank');
+    }, 600);
 }
 
 function contactCall() {
@@ -1443,4 +2965,551 @@ function verificarEscala(turma) {
     if (turma == 1) return isImpar;
     if (turma == 2) return !isImpar;
     return false; // Padrão se não for 1 ou 2
+}
+
+// ==========================================================================
+// ⚙️ FUNÇÕES DE GERENCIAMENTO
+// ==========================================================================
+
+function toggleManagementMenu() {
+    const menu = document.getElementById('managementMenu');
+    if (!menu) return;
+    menu.classList.toggle('hidden');
+    updateMenuStatus();
+}
+
+// ==========================================================================
+// 📦 EXPORTAÇÃO AVANÇADA
+// ==========================================================================
+
+function buildExportRows() {
+    return currentData.map(item => {
+        const status = getStatusInfo(item);
+        return {
+            "Nome": item.nome,
+            "RE": item.re,
+            "Unidade": item.posto,
+            "Escala": item.escala,
+            "Turma": item.turma === 1 ? "Ímpar" : "Par",
+            "Status": status.text,
+            "Rótulo": item.rotulo || "",
+            "Detalhe Rótulo": item.rotuloDetalhe || "",
+            "Início Afastamento": item.rotuloInicio ? formatDate(item.rotuloInicio) : "",
+            "Fim Afastamento": item.rotuloFim ? formatDate(item.rotuloFim) : ""
+        };
+    });
+}
+
+function buildResumoRows() {
+    const byUnit = {};
+    const byRotulo = {};
+
+    currentData.forEach(item => {
+        const status = getStatusInfo(item).text.includes('PLANTÃO') || getStatusInfo(item).text.includes('FT') ? 'PLANTÃO' : 'FOLGA';
+        const unidade = item.posto || 'N/I';
+
+        byUnit[unidade] = byUnit[unidade] || { unidade, total: 0, plantao: 0, folga: 0 };
+        byUnit[unidade].total += 1;
+        if (status === 'PLANTÃO') byUnit[unidade].plantao += 1;
+        else byUnit[unidade].folga += 1;
+
+        if (item.rotulo) {
+            byRotulo[item.rotulo] = (byRotulo[item.rotulo] || 0) + 1;
+        }
+    });
+
+    const unitRows = Object.values(byUnit).map(u => ({
+        "Unidade": u.unidade,
+        "Total": u.total,
+        "Plantão": u.plantao,
+        "Folga": u.folga
+    }));
+
+    const rotuloRows = Object.keys(byRotulo).map(r => ({
+        "Rótulo": r,
+        "Quantidade": byRotulo[r]
+    }));
+
+    return { unitRows, rotuloRows };
+}
+
+function exportarBaseAtualizada() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const rows = buildExportRows();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Base Atualizada");
+    XLSX.writeFile(wb, `base_atualizada_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Base atualizada gerada.", "success");
+}
+
+function exportarResumo() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const { unitRows, rotuloRows } = buildResumoRows();
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unitRows), "Resumo por Unidade");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rotuloRows), "Resumo por Rótulo");
+    XLSX.writeFile(wb, `resumo_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Resumo gerado.", "success");
+}
+
+function exportarTudo() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const rows = buildExportRows();
+    const { unitRows, rotuloRows } = buildResumoRows();
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Base Atualizada");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unitRows), "Resumo por Unidade");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rotuloRows), "Resumo por Rótulo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(changeHistory), "Historico Local");
+    XLSX.writeFile(wb, `exportacao_completa_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Exportação completa gerada.", "success");
+}
+
+function exportarCSVAtualizado() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const headers = ["Nome", "RE", "Posto", "Escala", "Turma", "Status", "Rótulo"];
+    const rows = currentData.map(item => [
+        `"${item.nome}"`,
+        `"${item.re}"`,
+        `"${item.posto}"`,
+        `"${item.escala}"`,
+        item.turma,
+        getStatusInfo(item).text,
+        item.rotulo || ""
+    ]);
+
+    const csvContent = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `base_atualizada_${new Date().toISOString().slice(0,10)}.csv`;
+    link.click();
+    showToast("CSV atualizado gerado.", "success");
+}
+
+function exportarGraficos() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const { unitRows, rotuloRows } = buildResumoRows();
+    const statusRows = [
+        { "Status": "PLANTÃO", "Quantidade": currentData.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT')).length },
+        { "Status": "FOLGA", "Quantidade": currentData.filter(d => !getStatusInfo(d).text.includes('PLANTÃO') && !getStatusInfo(d).text.includes('FT')).length }
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statusRows), "Status");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unitRows), "Unidades");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rotuloRows), "Rotulos");
+    XLSX.writeFile(wb, `dados_graficos_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Dados para gráficos gerados.", "success");
+}
+
+function exportarRelatorioIA() {
+    if (currentData.length === 0) {
+        showToast("Não há dados para exportar.", "error");
+        return;
+    }
+    const { unitRows, rotuloRows } = buildResumoRows();
+    const topUnits = unitRows.sort((a,b) => b.Total - a.Total).slice(0, 5);
+    const topRotulos = rotuloRows.sort((a,b) => b.Quantidade - a.Quantidade).slice(0, 5);
+    const report = [
+        { "Resumo": "Relatório gerado localmente (sem backend)", "Detalhe": new Date().toLocaleString() },
+        { "Resumo": "Total de colaboradores", "Detalhe": currentData.length },
+        { "Resumo": "Top 5 Unidades por efetivo", "Detalhe": topUnits.map(u => `${u.Unidade} (${u.Total})`).join('; ') },
+        { "Resumo": "Top 5 Rótulos", "Detalhe": topRotulos.map(r => `${r["Rótulo"]} (${r["Quantidade"]})`).join('; ') }
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(report), "Relatorio IA");
+    XLSX.writeFile(wb, `relatorio_ia_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Relatório IA gerado.", "success");
+}
+
+function openExportModal() {
+    document.getElementById('export-modal')?.classList.remove('hidden');
+}
+
+function closeExportModal() {
+    document.getElementById('export-modal')?.classList.add('hidden');
+}
+
+function loginSite() {
+    const re = document.getElementById('loginRe').value.trim();
+    const cpf = document.getElementById('loginCpf').value.trim();
+
+    if (!re || !cpf) {
+        alert('Preencha RE e CPF');
+        return;
+    }
+
+    const hash = btoa(re + ":" + cpf);
+    const admin = SiteAuth.admins.find(a => a.hash === hash);
+
+    if (!admin) {
+        alert('Acesso negado');
+        return;
+    }
+
+    SiteAuth.logged = true;
+    SiteAuth.user = admin.name;
+    SiteAuth.re = re;
+    SiteAuth.mode = 'edit';
+    
+    // Ativa modo edição visualmente
+    document.body.classList.add('mode-edit');
+
+    document.getElementById('config-login')?.classList.add('hidden');
+    document.getElementById('config-content')?.classList.remove('hidden');
+
+    updateMenuStatus();
+    renderAdminList();
+    renderAuditList();
+    saveAuthToStorage();
+
+    showToast("Login efetuado com sucesso, agora você está no modo editor.", "success");
+}
+
+function logoutSite() {
+    SiteAuth.logged = false;
+    SiteAuth.user = null;
+    SiteAuth.re = null;
+    SiteAuth.mode = 'view';
+    
+    document.body.classList.remove('mode-edit');
+
+    document.getElementById('config-login')?.classList.remove('hidden');
+    document.getElementById('config-content')?.classList.add('hidden');
+
+    updateMenuStatus();
+    localStorage.setItem('keepLogged', '0');
+    localStorage.removeItem('authHash');
+}
+
+function toggleEditMode() {
+    if (!SiteAuth.logged) return;
+
+    SiteAuth.mode = SiteAuth.mode === 'edit' ? 'view' : 'edit';
+    
+    document.body.classList.toggle('mode-edit', SiteAuth.mode === 'edit');
+    updateMenuStatus();
+}
+
+function renderAdminList() {
+    const list = document.getElementById('adminList');
+    if (!list) return;
+
+    list.innerHTML = '';
+
+    SiteAuth.admins.forEach(a => {
+        const div = document.createElement('div');
+        div.style.padding = "6px";
+        div.style.borderBottom = "1px solid #333";
+        div.style.fontSize = "0.8rem";
+        div.innerHTML = `
+            👤 ${a.name}
+            <button onclick="removeAdmin('${a.hash}')"
+                style="float:right;background:#dc3545;color:white;border:none;padding:2px 6px;border-radius:4px;">
+                X
+            </button>
+        `;
+        list.appendChild(div);
+    });
+}
+
+function addAdmin() {
+    const re = prompt('RE do colaborador');
+    if (!re) return;
+    
+    const person = currentData?.find(p => p.re === re || p.re?.endsWith(re));
+    if (!person) {
+        alert('Colaborador não encontrado na base carregada.');
+        return;
+    }
+
+    const cpf = prompt('4 primeiros dígitos do CPF');
+    if (!cpf) return;
+
+    const hash = btoa(re + ":" + cpf);
+    if (SiteAuth.admins.some(a => a.hash === hash)) {
+        alert('Este admin já existe.');
+        return;
+    }
+
+    SiteAuth.admins.push({ hash: hash, name: person.nome });
+    saveAdmins();
+    renderAdminList();
+}
+
+function removeAdmin(hash) {
+    if (!confirm('Remover administrador?')) return;
+    SiteAuth.admins = SiteAuth.admins.filter(a => a.hash !== hash);
+    saveAdmins();
+    renderAdminList();
+}
+
+function updateMenuStatus() {
+    const userReEl = document.getElementById('userRe');
+    const siteModeEl = document.getElementById('siteMode');
+    const sourceStatusEl = document.getElementById('sourceStatus');
+    const nextiActive = CONFIG.useApiNexti && NEXTI_AVAILABLE;
+    const adminToolsEl = document.getElementById('adminTools');
+    
+    if (userReEl) {
+        userReEl.innerHTML = SiteAuth.logged
+            ? `<span style="color:#28a745">●</span> ${SiteAuth.user}`
+            : `<span style="color:#666">●</span> Desconectado`;
+    }
+
+    if (siteModeEl) {
+        siteModeEl.innerHTML = SiteAuth.mode === 'edit'
+            ? `<span class="status-badge-menu edit">EDIÇÃO</span>`
+            : `<span class="status-badge-menu view">VISUALIZAÇÃO</span>`;
+    }
+    
+    if (sourceStatusEl) {
+        sourceStatusEl.innerHTML = `
+            <div>Fonte atual: CSV</div>
+            <div>Nexti: ${nextiActive ? '🟢 Ativo' : '🔴 Inativo'}</div>
+            <div>CSV: 🟢 Ativo</div>
+        `;
+    }
+
+    const keepLoggedEl = document.getElementById('keepLogged');
+    if (keepLoggedEl) {
+        keepLoggedEl.checked = localStorage.getItem('keepLogged') === '1';
+    }
+
+    if (adminToolsEl) {
+        adminToolsEl.classList.toggle('hidden', !(SiteAuth.logged && SiteAuth.mode === 'edit'));
+    }
+
+    if (document.getElementById('useNextiToggle')) {
+        document.getElementById('useNextiToggle').checked = nextiActive;
+        document.getElementById('useNextiToggle').disabled = !NEXTI_AVAILABLE;
+    }
+
+    document.getElementById('disableCsvToggle') &&
+        (document.getElementById('disableCsvToggle').checked = CONFIG.disableCsvFallback);
+
+    renderDataSourceList();
+}
+
+// Toggle de Fonte de Dados (Apenas altera flags)
+function toggleSource(type) {
+    if (type === 'nexti') {
+        CONFIG.useApiNexti = document.getElementById('useNextiToggle').checked;
+    }
+    if (type === 'csv') {
+        CONFIG.disableCsvFallback = document.getElementById('disableCsvToggle').checked;
+    }
+    updateMenuStatus();
+}
+
+function renderAuditList() {
+    const list = document.getElementById('auditList');
+    if (!list) return;
+
+    if (changeHistory.length > 0) {
+        list.innerHTML = changeHistory.slice(0, 20).map(h => `
+            <div style="padding:5px;border-bottom:1px solid #333;font-size:0.8rem">
+                🟢 Apenas no site<br>
+                <strong>${h.responsavel}</strong> — ${h.acao}<br>
+                <span style="color:#999">${h.detalhe}</span>
+            </div>
+        `).join('');
+        return;
+    }
+
+    const edits = Object.keys(collaboratorEdits || {});
+    const units = Object.keys(unitMetadata || {});
+    
+    if (edits.length === 0 && units.length === 0) {
+        list.innerHTML = '<div style="color:#777;font-style:italic">Nenhuma alteração local.</div>';
+        return;
+    }
+
+    let html = '';
+
+    edits.forEach(re => {
+        html += `
+            <div style="padding:5px;border-bottom:1px solid #333;font-size:0.8rem">
+                🟢 ${collaboratorEdits[re].nome}<br>
+                <span style="color:#999">RE ${re} — alteração local</span>
+            </div>
+        `;
+    });
+    
+    units.forEach(u => {
+        html += `
+            <div style="padding:5px;border-bottom:1px solid #333;font-size:0.8rem">
+                🟡 Unidade ${u}<br>
+                <span style="color:#999">Metadados locais</span>
+            </div>
+        `;
+    });
+
+    list.innerHTML = html;
+}
+
+function getLocalCollaborators() {
+    const stored = localStorage.getItem('localCollaborators');
+    if (!stored) return [];
+    try { return JSON.parse(stored) || []; } catch { return []; }
+}
+
+function saveLocalCollaborators(list) {
+    localStorage.setItem('localCollaborators', JSON.stringify(list));
+}
+
+function mergeLocalCollaborators(items, groupKey) {
+    const locals = getLocalCollaborators();
+    if (!locals.length) return items;
+
+    const filtered = groupKey === 'todos'
+        ? locals
+        : locals.filter(l => l.grupo === groupKey);
+
+    const existing = new Set(items.map(i => i.re));
+    const extras = filtered.filter(l => !existing.has(l.re));
+    return items.concat(extras);
+}
+
+function addLocalCollaboratorFromConfig() {
+    if (!(SiteAuth.logged && SiteAuth.mode === 'edit')) {
+        showToast("Apenas admins em modo edição podem adicionar.", "error");
+        return;
+    }
+
+    const re = document.getElementById('cfg-re').value.trim();
+    if (!re) {
+        showToast("Informe o RE do colaborador.", "error");
+        return;
+    }
+
+    const existing = currentData.find(d => d.re === re || d.re?.endsWith(re));
+    if (!existing) {
+        showToast("Colaborador não encontrado na base carregada.", "error");
+        return;
+    }
+
+    const locals = getLocalCollaborators();
+    if (locals.some(l => l.re === existing.re)) {
+        showToast("Colaborador já está no cadastro local.", "info");
+        return;
+    }
+
+    const newItem = { ...existing };
+    locals.push(newItem);
+    saveLocalCollaborators(locals);
+
+    document.getElementById('cfg-re').value = '';
+
+    renderizarUnidades();
+    if (currentTab === 'busca') realizarBusca();
+
+    changeHistory.unshift({
+        data: new Date().toLocaleString(),
+        responsavel: SiteAuth.user || 'Admin',
+        acao: "Adição",
+        detalhe: `Adicionou ${newItem.nome} (RE ${newItem.re}) localmente`
+    });
+
+    saveLocalState();
+    renderAuditList();
+    showToast("Colaborador adicionado localmente.", "success");
+}
+
+function changeLocalAdminPassword() {
+    if (!SiteAuth.logged || !SiteAuth.re) {
+        showToast("Faça login para alterar a senha.", "error");
+        return;
+    }
+
+    const newPass = document.getElementById('cfg-new-pass').value.trim();
+    const confirmPass = document.getElementById('cfg-new-pass-confirm').value.trim();
+    if (!newPass || newPass.length !== 4) {
+        showToast("Informe 4 dígitos.", "error");
+        return;
+    }
+    if (newPass !== confirmPass) {
+        showToast("A confirmação da senha não confere.", "error");
+        return;
+    }
+
+    const admin = SiteAuth.admins.find(a => a.name === SiteAuth.user);
+    if (!admin) {
+        showToast("Admin não encontrado.", "error");
+        return;
+    }
+
+    admin.hash = btoa(`${SiteAuth.re}:${newPass}`);
+    saveAdmins();
+    document.getElementById('cfg-new-pass').value = '';
+    document.getElementById('cfg-new-pass-confirm').value = '';
+    showToast("Senha local alterada com sucesso.", "success");
+}
+
+function renderDataSourceList() {
+    const list = document.getElementById('dataSourceList');
+    if (!list) return;
+
+    const labels = {
+        bombeiros: 'Planilha Bombeiros',
+        servicos: 'Planilha Serviços',
+        seguranca: 'Planilha Segurança',
+        rb: 'Planilha RB',
+        phones: 'Planilha Telefones'
+    };
+
+    const sources = Object.keys(CONFIG.sheets || {}).map(key => ({
+        name: labels[key] || `Planilha ${key}`,
+        status: 'ATIVO',
+        url: toSourceViewUrl(CONFIG.sheets[key])
+    }));
+
+    sources.push({ name: 'Nexti API', status: NEXTI_AVAILABLE ? 'ATIVO' : 'INATIVO' });
+    sources.push({ name: 'PASTA DO GOOGLE DRIVE', status: 'ATIVO', url: 'https://drive.google.com/drive/folders/1d-z_dHoqrjygeEv1CvL9JRJSjkJcs02m?usp=sharing' });
+
+    list.innerHTML = sources.map(s => {
+        if (s.url) {
+            return `
+                <details class="source-item">
+                    <summary>
+                        <span>${s.name}</span>
+                        <span class="source-pill ${s.status === 'ATIVO' ? 'ok' : 'off'}">${s.status}</span>
+                    </summary>
+                    <div class="source-link">
+                        <a href="${s.url}" target="_blank" rel="noopener noreferrer">Abrir fonte (planilha)</a>
+                    </div>
+                </details>
+            `;
+        }
+        return `
+            <div class="source-row">
+                <span>${s.name}</span>
+                <span class="source-pill ${s.status === 'ATIVO' ? 'ok' : 'off'}">${s.status}</span>
+            </div>
+        `;
+    }).join('');
+}
+
+function toSourceViewUrl(url) {
+    if (!url) return url;
+    if (url.includes('output=csv')) {
+        return url.replace('output=csv', 'pubhtml');
+    }
+    return url;
 }
