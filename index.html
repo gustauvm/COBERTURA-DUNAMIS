@@ -11,7 +11,24 @@
     <!-- HEADER -->
     <header>
         <div class="header-content">
-            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.3</span></h1>
+            <button id="home-btn" class="home-btn" onclick="resetToGateway()" title="Home" aria-label="Home">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 9.5L12 3l9 6.5"></path>
+                    <path d="M5 10.5V21h14V10.5"></path>
+                    <path d="M9 21V14h6v7"></path>
+                </svg>
+            </button>
+            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.4</span></h1>
+            <button id="avisos-bell" class="avisos-bell hidden" onclick="toggleAvisosMini()" title="Avisos">
+                <span class="bell-icon" aria-hidden="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5"/>
+                        <path d="M9.5 17a2.5 2.5 0 0 0 5 0"/>
+                    </svg>
+                </span>
+                <span class="bell-badge hidden" id="avisos-badge">0</span>
+            </button>
+            <span id="shadow-indicator" class="shadow-indicator hidden">Shadow offline</span>
             <button class="theme-toggle-btn" onclick="toggleDarkMode()">
                 🌙 Modo Noturno
             </button>
@@ -25,10 +42,6 @@
 
     <!-- APLICAÇÃO PRINCIPAL -->
     <main id="app-container">
-        <button class="btn btn-secondary" onclick="resetToGateway()">
-            &larr; Voltar para Seleção
-        </button>
-        
         <div id="content-area">
             <!-- Dashboard (Abas) será injetado aqui -->
         </div>
@@ -36,6 +49,15 @@
 
     <!-- Container de Notificações (Toast) -->
     <div id="toast-container" class="toast-container"></div>
+
+    <div id="avisos-mini" class="avisos-mini hidden">
+        <div class="avisos-mini-header">
+            <strong>Avisos</strong>
+            <button class="btn-mini btn-secondary" onclick="closeAvisosMini()">Fechar</button>
+        </div>
+        <div id="avisos-mini-list" class="avisos-mini-list"></div>
+        <button class="btn btn-small" onclick="openAvisosTab()">Ver todos</button>
+    </div>
 
     <!-- Botão Toggle Ações -->
     <button id="utility-toggle-btn" onclick="toggleUtilityButtons()" title="Ações rápidas" aria-label="Ações rápidas">

@@ -24,6 +24,100 @@ const CONFIG = {
         seguranca: 'images/logo-dunamis-seguranca.png',
         rb: 'images/logo-rb.png'
     },
+    ftForms: {
+        bombeiros: {
+            formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLSeuOXsSQLZszJCNp9rDph6tSQIfbKDv-AsCygTWzPJvtS6Ypw/viewform',
+            responsesCsv: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTMyDDUprjmq2WLQngddbpmu2nMLKbchfhUQBC2_WjfjAElytpuQXgJhsdWdPESVY-3OMhMMnlniVUV/pub?output=csv', // URL CSV da planilha de respostas publicada
+            entries: {
+                name: 'entry.2096846072',
+                re: 'entry.537356291',
+                unitCurrent: 'entry.447111840',
+                unitTarget: 'entry.741764159',
+                date: 'entry.1399757667',
+                shift: 'entry.1775882698',
+                reason: 'entry.1514142249',
+                covering: 'entry.1288672472',
+                notes: 'entry.2119128657',
+                createdBy: 'entry.2055959210',
+                ftId: 'entry.1267028897'
+            }
+        },
+        servicos: {
+            formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLSdK334I9A_6fkYmgn11XvrkgNWYVgfeG0QZD8LHcKJeFl09XA/viewform',
+            responsesCsv: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSR1gMUPMVIUwhnDYjcD8EHfRk_Sjx-WSHUF9gXBbwYtUmVpKDRVWAK6OS1FCBuGYdtJCgNQ79_SgNN/pub?output=csv',
+            entries: {
+                name: 'entry.2096846072',
+                re: 'entry.537356291',
+                unitCurrent: 'entry.447111840',
+                unitTarget: 'entry.741764159',
+                date: 'entry.1399757667',
+                shift: 'entry.1775882698',
+                reason: 'entry.1514142249',
+                covering: 'entry.1288672472',
+                notes: 'entry.2119128657',
+                createdBy: 'entry.2055959210',
+                ftId: 'entry.1267028897'
+            }
+        },
+        seguranca: {
+            formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLSf3Oq39lhapxIUocw6IKoop-7xzi2uN2DpXkQgiZmMiN5S2ig/viewform',
+            responsesCsv: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSo_a8pTABswSOYJ07etUZ72xS-h_4r9snM9kyeVFt6OdkQWm5wq38vWnduTUoDPDPFGFnpu833lity/pub?output=csv',
+            entries: {
+                name: 'entry.2096846072',
+                re: 'entry.537356291',
+                unitCurrent: 'entry.447111840',
+                unitTarget: 'entry.741764159',
+                date: 'entry.1399757667',
+                shift: 'entry.1775882698',
+                reason: 'entry.1514142249',
+                covering: 'entry.1288672472',
+                notes: 'entry.2119128657',
+                createdBy: 'entry.2055959210',
+                ftId: 'entry.1267028897'
+            }
+        },
+        rb: {
+            formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLSdCNcG_OSqRMbX0xdOApya2ydofiPWqavgyeMUkV6v_SMwHnw/viewform',
+            responsesCsv: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRsPqoRBIt90C4DdH1lk4vpQCsKlHRgXNdIwbueKNvow_bVJdcDs7k8OcXOSB-9DbZyeJ4eDhtixOSs/pub?output=csv',
+            entries: {
+                name: 'entry.2096846072',
+                re: 'entry.537356291',
+                unitCurrent: 'entry.447111840',
+                unitTarget: 'entry.741764159',
+                date: 'entry.1399757667',
+                shift: 'entry.1775882698',
+                reason: 'entry.1514142249',
+                covering: 'entry.1288672472',
+                notes: 'entry.2119128657',
+                createdBy: 'entry.2055959210',
+                ftId: 'entry.1267028897'
+            }
+        },
+        geral: {
+            formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLSeXBJnu5Pk8udDKbS3eQKxtAJI_BN_nXSF8omA8pfDJSIH33g/viewform',
+            responsesCsv: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTS3FwB36PK12tJwT0TYlI55M8KgPw4hbn67wXEOikCrFWQ4c9iHvS3foz_p8pJn_FeikzVq1Jdb7D5/pub?output=csv',
+            entries: {
+                name: 'entry.2096846072',
+                re: 'entry.537356291',
+                unitCurrent: 'entry.447111840',
+                unitTarget: 'entry.741764159',
+                date: 'entry.1399757667',
+                shift: 'entry.1775882698',
+                reason: 'entry.1514142249',
+                covering: 'entry.1288672472',
+                notes: 'entry.2119128657',
+                createdBy: 'entry.2055959210',
+                ftId: 'entry.1267028897'
+            }
+        }
+    },
+    ftReasons: [
+        { value: 'troca', label: 'Troca' },
+        { value: 'cobertura', label: 'Cobertura' },
+        { value: 'falta', label: 'Falta' },
+        { value: 'evento', label: 'Evento' },
+        { value: 'outro', label: 'Outro' }
+    ],
     sheetUpdatedAt: '31/01/2026, 00:24:43'
 };
 

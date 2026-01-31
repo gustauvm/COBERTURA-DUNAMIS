@@ -22,6 +22,18 @@ let shadowStatus = {
     pending: false,
     error: null
 };
+let lastShadowToastAt = 0;
+let avisos = [];
+let avisosSeenIds = new Set();
+let allCollaboratorsCache = { items: null, updatedAt: 0 };
+let exportUnitTarget = null;
+let ftLaunches = [];
+let currentLancamentosTab = 'dashboard';
+let ftFilter = { from: '', to: '', status: 'all' };
+let ftReasons = [];
+let lastFtCreatedId = null;
+let ftSyncTimer = null;
+let ftLastSyncAt = null;
 
 // ==========================================================================
 // 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
@@ -32,6 +44,7 @@ const SiteAuth = {
     mode: 'view', // 'view' | 'edit'
     user: null,
     re: null,
+    role: 'viewer', // 'viewer' | 'admin' | 'supervisor' | 'master'
     admins: []
 };
 
@@ -44,6 +57,65 @@ function loadLocalState() {
         if (units) unitMetadata = JSON.parse(units) || {};
         if (history) changeHistory = JSON.parse(history) || [];
     } catch {}
+}
+
+function loadAvisos() {
+    try {
+        const stored = localStorage.getItem('avisos');
+        avisos = stored ? JSON.parse(stored) || [] : [];
+    } catch {
+        avisos = [];
+    }
+    try {
+        const seen = localStorage.getItem('avisosSeen');
+        const list = seen ? JSON.parse(seen) || [] : [];
+        avisosSeenIds = new Set(list);
+    } catch {
+        avisosSeenIds = new Set();
+    }
+}
+
+function saveAvisos() {
+    localStorage.setItem('avisos', JSON.stringify(avisos));
+    localStorage.setItem('avisosSeen', JSON.stringify(Array.from(avisosSeenIds)));
+    scheduleShadowSync('avisos');
+    updateAvisosUI();
+}
+
+function loadFtLaunches() {
+    try {
+        const stored = localStorage.getItem('ftLaunches');
+        ftLaunches = stored ? JSON.parse(stored) || [] : [];
+    } catch {
+        ftLaunches = [];
+    }
+    ftLaunches.forEach(item => {
+        if (!item.status) item.status = 'pending';
+        if (item.status === 'confirmed') item.status = 'submitted';
+        if (!item.updatedAt) item.updatedAt = item.createdAt || new Date().toISOString();
+    });
+}
+
+function saveFtLaunches() {
+    localStorage.setItem('ftLaunches', JSON.stringify(ftLaunches));
+    scheduleShadowSync('ft');
+    updateLancamentosUI();
+}
+
+function loadFtReasons() {
+    try {
+        const stored = localStorage.getItem('ftReasons');
+        ftReasons = stored ? JSON.parse(stored) || [] : [];
+    } catch {
+        ftReasons = [];
+    }
+    if (!ftReasons.length) {
+        ftReasons = CONFIG?.ftReasons ? JSON.parse(JSON.stringify(CONFIG.ftReasons)) : [];
+    }
+}
+
+function saveFtReasons() {
+    localStorage.setItem('ftReasons', JSON.stringify(ftReasons));
 }
 
 function saveLocalState() {
@@ -74,17 +146,34 @@ async function shadowRequest(action, payload = {}) {
         token: CONFIG.shadow.token || '',
         payload
     };
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
-    const text = await response.text();
     try {
-        return JSON.parse(text);
-    } catch {
-        return null;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(body)
+        });
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch {}
+    } catch {}
+
+    if (action === 'pull') {
+        try {
+            const qs = new URLSearchParams({
+                action,
+                token: CONFIG.shadow.token || ''
+            });
+            const response = await fetch(`${url}${url.includes('?') ? '&' : '?'}${qs.toString()}`, {
+                method: 'GET',
+                cache: 'no-store'
+            });
+            const text = await response.text();
+            return JSON.parse(text);
+        } catch {}
     }
+
+    return null;
 }
 
 function buildShadowState() {
@@ -93,6 +182,8 @@ function buildShadowState() {
         unitMetadata,
         changeHistory,
         localCollaborators: getLocalCollaborators(),
+        avisos,
+        ftLaunches,
         updatedAt: new Date().toISOString()
     };
 }
@@ -102,11 +193,18 @@ function applyShadowState(state) {
     collaboratorEdits = state.collaboratorEdits || {};
     unitMetadata = state.unitMetadata || {};
     changeHistory = Array.isArray(state.changeHistory) ? state.changeHistory : [];
+    if (Array.isArray(state.avisos)) {
+        mergeAvisosFromShadow(state.avisos);
+    }
+    if (Array.isArray(state.ftLaunches)) {
+        mergeFtLaunchesFromShadow(state.ftLaunches);
+    }
     if (Array.isArray(state.localCollaborators)) {
         saveLocalCollaborators(state.localCollaborators);
     }
     saveLocalState();
     renderAuditList();
+    updateAvisosUI();
 }
 
 function scheduleShadowSync(reason) {
@@ -164,6 +262,11 @@ async function shadowPushAll(reason = '') {
         shadowStatus.pending = false;
         shadowStatus.error = null;
         updateShadowStatusUI();
+        const now = Date.now();
+        if (now - lastShadowToastAt > 5000) {
+            showToast("Mudança salva no Shadow.", "success");
+            lastShadowToastAt = now;
+        }
         return true;
     } catch {
         shadowStatus.pending = true;
@@ -239,6 +342,19 @@ async function shadowResetAll() {
         if (!result || !result.ok) throw new Error('Shadow reset failed');
         clearLocalState();
         saveLocalCollaborators([]);
+        if (ftLaunches.length) {
+            await shadowRequest('push_all', {
+                state: {
+                    collaboratorEdits: {},
+                    unitMetadata: {},
+                    changeHistory: [],
+                    localCollaborators: [],
+                    avisos: [],
+                    ftLaunches
+                },
+                reason: 'ft-restore'
+            });
+        }
         shadowStatus.available = true;
         shadowStatus.lastPush = new Date();
         shadowStatus.pending = false;
@@ -255,9 +371,11 @@ async function shadowResetAll() {
 
 function updateShadowStatusUI() {
     const el = document.getElementById('shadowStatus');
+    const indicator = document.getElementById('shadow-indicator');
     if (!el) return;
     if (!shadowEnabled()) {
         el.innerHTML = `<div class="shadow-status off">Shadow não configurado.</div>`;
+        if (indicator) indicator.classList.add('hidden');
         return;
     }
     const pull = shadowStatus.lastPull ? shadowStatus.lastPull.toLocaleString() : 'nunca';
@@ -271,6 +389,16 @@ function updateShadowStatusUI() {
         <div class="shadow-meta">Pendências: ${pending}</div>
         ${err}
     `;
+
+    if (indicator) {
+        const isOffline = !shadowStatus.available || !!shadowStatus.error;
+        if (isOffline || shadowStatus.pending) {
+            indicator.textContent = shadowStatus.pending ? 'Shadow offline • pendências' : 'Shadow offline';
+            indicator.classList.remove('hidden');
+        } else {
+            indicator.classList.add('hidden');
+        }
+    }
 }
 
 async function shadowPullAndReload() {
@@ -292,17 +420,23 @@ function loadAuthFromStorage() {
     if (!admin) return;
     SiteAuth.logged = true;
     SiteAuth.user = admin.name;
-    SiteAuth.mode = 'edit';
+    SiteAuth.role = admin.role || 'admin';
+    SiteAuth.mode = (SiteAuth.role === 'supervisor') ? 'observe' : 'edit';
     try {
         const decoded = atob(hash);
         const parts = decoded.split(':');
         SiteAuth.re = parts[0] || null;
     } catch {}
-    document.body.classList.add('mode-edit');
+    if (SiteAuth.role !== 'supervisor') document.body.classList.add('mode-edit');
+    document.getElementById('config-login')?.classList.add('hidden');
+    document.getElementById('config-content')?.classList.remove('hidden');
+    updateMenuStatus();
 }
 
-function saveAuthToStorage(authHash = null) {
-    const keep = document.getElementById('keepLogged')?.checked;
+function saveAuthToStorage(authHash = null, keepOverride = null) {
+    const keep = typeof keepOverride === 'boolean'
+        ? keepOverride
+        : document.getElementById('keepLogged')?.checked;
     if (!keep) {
         localStorage.setItem('keepLogged', '0');
         localStorage.removeItem('authHash');
@@ -321,14 +455,15 @@ function saveAuthToStorage(authHash = null) {
 function initAdmins() {
     const stored = localStorage.getItem('adminUsers');
     if (stored) {
-        SiteAuth.admins = JSON.parse(stored);
+        SiteAuth.admins = normalizeAdmins(JSON.parse(stored));
+        saveAdmins();
         return;
     }
 
     SiteAuth.admins = [
-        { hash: btoa('7164:0547'), name: 'GUSTAVO CORTES BRAGA' },
-        { hash: btoa('4648:4643'), name: 'MOISÉS PEREIRA FERNANDES' },
-        { hash: btoa('3935:1288'), name: 'WAGNER MONTEIRO' }
+        { hash: btoa('7164:0547'), name: 'GUSTAVO CORTES BRAGA', re: '7164', role: 'master', master: true },
+        { hash: btoa('4648:4643'), name: 'MOISÉS PEREIRA FERNANDES', re: '4648', role: 'admin' },
+        { hash: btoa('3935:1288'), name: 'WAGNER MONTEIRO', re: '3935', role: 'admin' }
     ];
 
     saveAdmins();
@@ -336,6 +471,33 @@ function initAdmins() {
 
 function saveAdmins() {
     localStorage.setItem('adminUsers', JSON.stringify(SiteAuth.admins));
+}
+
+function decodeAdminHash(hash) {
+    try {
+        const decoded = atob(hash);
+        const parts = decoded.split(':');
+        return { re: parts[0] || '', pass: parts[1] || '' };
+    } catch {
+        return { re: '', pass: '' };
+    }
+}
+
+function normalizeAdmins(list) {
+    return (list || []).map(a => {
+        const data = decodeAdminHash(a.hash || '');
+        const re = a.re || data.re || '';
+        let role = a.role || 'admin';
+        if (role === 'observer') role = 'supervisor';
+        const master = a.master || re === '7164';
+        return {
+            hash: a.hash,
+            name: a.name,
+            re,
+            role: master ? 'master' : role,
+            master: master
+        };
+    });
 }
 
 // Ícones SVG para substituir emojis
@@ -354,6 +516,9 @@ const ICONS = {
     chevronUp: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`,
     chevronDown: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`,
     arrowUp: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>`,
+    crown: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7l4 4 4-6 4 6 4-4 4 5-2 8H4l-2-8z"></path><path d="M5 20h14"></path></svg>`,
+    bell: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5"/><path d="M9.5 17a2.5 2.5 0 0 0 5 0"/></svg>`,
+    launch: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H9"></path><path d="M6 12H4a2 2 0 0 0-2 2v5"></path><rect x="2" y="3" width="7" height="10" rx="1"></rect><path d="M5 7h2"></path><path d="M5 10h2"></path></svg>`,
     whatsapp: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/></svg>`,
     phone: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`
 };
@@ -435,10 +600,14 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem('aiSearchEnabled', '0'); // Modo IA sempre inicia desativado
     initAdmins();
     loadLocalState();
+    loadAvisos();
+    loadFtLaunches();
+    loadFtReasons();
     loadAuthFromStorage();
     loadUnitAddressDb();
     shadowPullState(false);
     startShadowAutoPull();
+    document.body.classList.add('on-gateway');
     renderGateway();
     updateMenuStatus();
     updateLastUpdatedDisplay();
@@ -463,7 +632,14 @@ function renderGateway() {
             ${createCard('Dunamis Serviços', CONFIG.images.servicos, 'servicos')}
             ${createCard('Dunamis Segurança', CONFIG.images.seguranca, 'seguranca')}
             ${createCard('RB Facilities', CONFIG.images.rb, 'rb')}
-            <div class="gateway-card" onclick="loadGroup('todos')">
+            <div class="gateway-card gateway-card-general" onclick="loadGroup('todos')">
+                <div class="gateway-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9"></circle>
+                        <path d="M12 3a15 15 0 0 1 0 18"></path>
+                        <path d="M3 12h18"></path>
+                    </svg>
+                </div>
                 <h3>Visualização Geral</h3>
                 <p>Todas as unidades</p>
             </div>
@@ -520,6 +696,7 @@ async function loadGroup(groupKey) {
     
     // UI Feedback
     gateway.classList.add('hidden');
+    document.body.classList.remove('on-gateway');
     appContainer.style.display = 'block';
     contentArea.innerHTML = '<div class="loading">Carregando dados do Google Sheets...</div>';
 
@@ -635,11 +812,42 @@ async function loadGroup(groupKey) {
 function resetToGateway() {
     appContainer.style.display = 'none';
     gateway.classList.remove('hidden');
+    document.body.classList.add('on-gateway');
+    document.body.classList.remove('utility-open');
     currentData = [];
     currentGroup = '';
     hiddenUnits.clear();
     minimizedUnits.clear();
     // Não limpamos unitMetadata e collaboratorEdits aqui para permitir persistência na sessão
+}
+
+async function getAllCollaborators() {
+    const ttl = 5 * 60 * 1000;
+    if (allCollaboratorsCache.items && (Date.now() - allCollaboratorsCache.updatedAt) < ttl) {
+        return allCollaboratorsCache.items;
+    }
+    try {
+        const phoneCsv = await fetchSheetData(CONFIG.sheets.phones);
+        const phoneMap = processPhoneData(phoneCsv);
+        const keys = Object.keys(CONFIG.sheets).filter(k => k !== 'phones');
+        const results = await Promise.all(keys.map(async (key) => {
+            const csv = await fetchSheetData(CONFIG.sheets[key]);
+            if (!csv) return [];
+            const rows = parseCSV(csv);
+            if (rows.length > 0) rows.shift();
+            return mapRowsToObjects(rows, key, false, phoneMap);
+        }));
+        let allItems = [];
+        results.forEach(items => allItems = allItems.concat(items));
+        allItems = mergeLocalCollaborators(allItems, 'todos');
+        allCollaboratorsCache = {
+            items: allItems.map((item, idx) => ({ ...item, id: idx })),
+            updatedAt: Date.now()
+        };
+        return allCollaboratorsCache.items;
+    } catch {
+        return currentData || [];
+    }
 }
 
 // ==========================================================================
@@ -1056,6 +1264,8 @@ function renderDashboard() {
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('busca')">${ICONS.search} Busca Rápida</button>
             <button class="tab-btn" onclick="switchTab('unidades')">${ICONS.building} Unidades</button>
+            <button class="tab-btn" onclick="switchTab('avisos')">${ICONS.bell} Avisos <span id="avisos-tab-badge" class="tab-badge hidden">0</span></button>
+            ${(SiteAuth.logged && SiteAuth.role !== 'supervisor') ? `<button class="tab-btn" onclick="switchTab('lancamentos')">${ICONS.launch} Lançamentos</button>` : ''}
             <button class="tab-btn" onclick="switchTab('config')">${ICONS.settings} Configuração</button>
         </div>
 
@@ -1097,6 +1307,16 @@ function renderDashboard() {
                         <option value="plantao">Em Plantão</option>
                         <option value="folga">De Folga</option>
                     </select>
+                    <select id="unit-label-filter" class="filter-select" onchange="renderizarUnidades()">
+                        <option value="all">Todos os Rótulos</option>
+                        <option value="none">Sem Rótulo</option>
+                        <option value="FÉRIAS">Férias</option>
+                        <option value="ATESTADO">Atestado</option>
+                        <option value="AFASTADO">Afastado</option>
+                        <option value="FT">FT</option>
+                        <option value="TROCA">Troca</option>
+                        <option value="OUTRO">Outro</option>
+                    </select>
                     <button class="btn btn-secondary" style="width: auto; margin-bottom: 0;" onclick="openExportModal()">
                         ${ICONS.download} Exportar
                     </button>
@@ -1106,6 +1326,231 @@ function renderDashboard() {
                 </div>
             </div>
             <div id="units-list"></div>
+        </div>
+
+        <div id="tab-content-avisos" class="tab-content hidden">
+            <div class="avisos-shell">
+                <div class="avisos-panel">
+                <div class="avisos-header">
+                        <h3>Avisos</h3>
+                        <div class="avisos-header-actions">
+                            <span id="avisos-assignee-summary" class="avisos-summary"></span>
+                            <button class="btn btn-secondary btn-small" onclick="exportarAvisosMensal()">Relatório mensal</button>
+                            <button class="btn btn-secondary btn-small" onclick="openLembreteForm()">Novo Lembrete</button>
+                            <button class="btn btn-small" onclick="openAvisoForm()">Novo Aviso</button>
+                        </div>
+                    </div>
+                    <div class="avisos-filters">
+                        <select id="aviso-group-filter" class="filter-select" onchange="renderAvisos()">
+                            ${currentGroup === 'todos' ? `
+                                <option value="all">Todos os Grupos</option>
+                                <option value="bombeiros">Bombeiros</option>
+                                <option value="servicos">Serviços</option>
+                                <option value="seguranca">Segurança</option>
+                                <option value="rb">RB Facilities</option>
+                            ` : `<option value="${currentGroup}">${currentGroup.toUpperCase()}</option>`}
+                        </select>
+                        <select id="aviso-status-filter" class="filter-select" onchange="renderAvisos()">
+                            <option value="pending">Pendentes</option>
+                            <option value="all">Todos</option>
+                            <option value="done">Concluídos</option>
+                        </select>
+                        <select id="aviso-assignee-filter" class="filter-select" onchange="renderAvisos()"></select>
+                        <select id="aviso-priority-filter" class="filter-select" onchange="renderAvisos()">
+                            <option value="all">Todas as Prioridades</option>
+                            <option value="leve">Leve</option>
+                            <option value="normal">Normal</option>
+                            <option value="urgente">Urgente</option>
+                        </select>
+                        <select id="aviso-unit-filter" class="filter-select" onchange="renderAvisos()"></select>
+                    </div>
+                    <div id="avisos-list" class="avisos-list"></div>
+                </div>
+
+                <div class="avisos-form hidden" id="aviso-form">
+                    <div class="form-header">
+                        <h4>Novo Aviso</h4>
+                        <button class="btn btn-secondary btn-small" onclick="closeAvisoForm()">Fechar</button>
+                    </div>
+                    <div class="form-group">
+                        <label>Destinar para</label>
+                        <select id="aviso-assignee-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Grupo</label>
+                        <select id="aviso-group-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Tipo</label>
+                        <select id="aviso-scope-select" onchange="updateAvisoScope()">
+                            <option value="unit">Unidade</option>
+                            <option value="collab">Colaborador</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Unidade</label>
+                        <select id="aviso-unit-select"></select>
+                    </div>
+                    <div class="form-group hidden" id="aviso-collab-group">
+                        <label>Buscar colaborador (RE ou nome)</label>
+                        <input type="text" id="aviso-collab-search" placeholder="Digite RE ou nome">
+                        <label>Colaborador</label>
+                        <select id="aviso-collab-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Prioridade</label>
+                        <select id="aviso-priority-select">
+                            <option value="leve">Leve</option>
+                            <option value="normal" selected>Normal</option>
+                            <option value="urgente">Urgente</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Assunto</label>
+                        <input type="text" id="aviso-title" placeholder="Ex: Troca de posto">
+                    </div>
+                    <div class="form-group">
+                        <label>Mensagem</label>
+                        <textarea id="aviso-message" rows="4" placeholder="Digite o aviso"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <button class="btn btn-secondary btn-small" onclick="sendReminderWhatsapp()">Enviar no WhatsApp</button>
+                    </div>
+                    <button class="btn" onclick="createAviso()">Salvar Aviso</button>
+                </div>
+                <div class="avisos-form hidden" id="lembrete-form">
+                    <div class="form-header">
+                        <h4>Novo Lembrete</h4>
+                        <button class="btn btn-secondary btn-small" onclick="closeLembreteForm()">Fechar</button>
+                    </div>
+                    <div class="form-group">
+                        <label>Destinar para</label>
+                        <select id="reminder-assignee-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Grupo</label>
+                        <select id="reminder-group-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Tipo</label>
+                        <select id="reminder-scope-select" onchange="updateLembreteScope()">
+                            <option value="unit">Unidade</option>
+                            <option value="collab">Colaborador</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Unidade</label>
+                        <select id="reminder-unit-select"></select>
+                    </div>
+                    <div class="form-group hidden" id="reminder-collab-group">
+                        <label>Buscar colaborador (RE ou nome)</label>
+                        <input type="text" id="reminder-collab-search" placeholder="Digite RE ou nome">
+                        <label>Colaborador</label>
+                        <select id="reminder-collab-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Prioridade</label>
+                        <select id="reminder-priority-select">
+                            <option value="leve">Leve</option>
+                            <option value="normal" selected>Normal</option>
+                            <option value="urgente">Urgente</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Data/Hora do lembrete</label>
+                        <input type="datetime-local" id="reminder-at">
+                    </div>
+                    <div class="form-group">
+                        <label>Tipo</label>
+                        <select id="reminder-type">
+                            <option value="single">Único</option>
+                            <option value="recurring">Recorrente</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Recorrência</label>
+                        <select id="reminder-every">
+                            <option value="daily">Diário</option>
+                            <option value="weekly">Semanal</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Assunto</label>
+                        <input type="text" id="reminder-title" placeholder="Ex: Revisar troca de posto">
+                    </div>
+                    <div class="form-group">
+                        <label>Mensagem</label>
+                        <textarea id="reminder-message" rows="4" placeholder="Digite o lembrete"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <button class="btn btn-secondary btn-small" onclick="sendAvisoWhatsapp()">Enviar no WhatsApp</button>
+                    </div>
+                    <button class="btn" onclick="createReminder()">Salvar Lembrete</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-content-lancamentos" class="tab-content hidden">
+            <div class="lancamentos-shell">
+                <div class="lancamentos-header">
+                    <h3>Lançamentos de FT</h3>
+                    <div class="lancamentos-actions">
+                        <button class="btn btn-secondary btn-small" onclick="syncFtFormResponses()">Sincronizar confirmações</button>
+                        <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Dashboard</button>
+                        <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico</button>
+                        <button class="btn btn-small" onclick="switchLancamentosTab('novo')">Novo Lançamento</button>
+                    </div>
+                </div>
+                <div id="lancamentos-panel-dashboard" class="lancamentos-panel hidden"></div>
+                <div id="lancamentos-panel-historico" class="lancamentos-panel hidden"></div>
+                <div id="lancamentos-panel-novo" class="lancamentos-panel hidden">
+                    <div class="form-group">
+                        <label>Buscar colaborador (RE ou nome)</label>
+                        <input type="text" id="ft-search" placeholder="Digite RE ou nome">
+                        <select id="ft-collab-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Unidade atual</label>
+                        <input type="text" id="ft-unit-current" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label>Unidade FT</label>
+                        <select id="ft-unit-target"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Data da FT</label>
+                        <input type="date" id="ft-date">
+                    </div>
+                    <div class="form-group">
+                        <label>Horário / Escala</label>
+                        <select id="ft-shift"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Motivo</label>
+                        <select id="ft-reason"></select>
+                        <input type="text" id="ft-reason-other" class="hidden" placeholder="Descreva o motivo">
+                    </div>
+                    <div class="form-group">
+                        <label>Cobrindo quem</label>
+                        <input type="text" id="ft-covering-search" placeholder="Digite RE ou nome">
+                        <select id="ft-covering-select"></select>
+                        <input type="text" id="ft-covering-other" placeholder="Outro (se não estiver na lista)">
+                    </div>
+                    <div class="form-group">
+                        <label>Observações</label>
+                        <textarea id="ft-notes" class="ft-textarea" rows="3" placeholder="Digite observações..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <button class="btn" onclick="createFtLaunch()">Salvar Lançamento</button>
+                    </div>
+                    <div class="ft-actions">
+                        <div class="ft-actions-title">Após salvar</div>
+                        <button class="btn btn-secondary btn-small" onclick="copyFtLastLink()" id="ft-copy-last" disabled>Copiar link de confirmação</button>
+                        <button class="btn btn-secondary btn-small" onclick="sendFtLastWhatsapp()" id="ft-send-last" disabled>Enviar no WhatsApp</button>
+                    </div>
+                    <div class="hint" id="ft-form-hint"></div>
+                </div>
+            </div>
         </div>
 
         <div id="tab-content-config" class="tab-content hidden">
@@ -1130,10 +1575,11 @@ function renderDashboard() {
                 </div>
 
                 <div id="config-content" class="hidden">
-                    <div class="config-tabs">
-                        <button class="config-tab active" onclick="switchConfigTab('access')">Acesso</button>
-                        <button class="config-tab" onclick="switchConfigTab('datasource')">Fonte de Banco de Dados</button>
-                    </div>
+                        <div class="config-tabs">
+                            <button class="config-tab active" onclick="switchConfigTab('access')">Acesso</button>
+                            <button class="config-tab" onclick="switchConfigTab('datasource')">Fonte de Banco de Dados</button>
+                            <button class="config-tab" onclick="switchConfigTab('ft')">FT</button>
+                        </div>
 
                     <div id="config-pane-access" class="config-pane">
                         <div class="config-card">
@@ -1150,8 +1596,52 @@ function renderDashboard() {
                             </div>
                         </div>
 
-                        <div class="config-card hidden" id="adminTools">
-                            <div class="card-title">Admin</div>
+                    <div class="config-card hidden" id="adminTools">
+                        <div class="card-title">Admin</div>
+                        <div class="sub-title">Administradores</div>
+                        <div id="adminList" class="admin-list"></div>
+
+                        <div class="divider"></div>
+                        <div class="sub-title">Adicionar administrador</div>
+                        <div class="field-row">
+                            <label>RE</label>
+                            <input type="text" id="cfg-admin-re" placeholder="0000">
+                        </div>
+                        <div class="field-row">
+                            <label>CPF (4 primeiros)</label>
+                            <input type="password" id="cfg-admin-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <button class="btn" onclick="addAdminFromConfig()">Adicionar Admin</button>
+
+                        <div class="divider"></div>
+                        <div class="sub-title">Adicionar supervisor (somente avisos)</div>
+                        <div class="field-row">
+                            <label>RE</label>
+                            <input type="text" id="cfg-supervisor-re" placeholder="0000">
+                        </div>
+                        <div class="field-row">
+                            <label>CPF (4 primeiros)</label>
+                            <input type="password" id="cfg-supervisor-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <button class="btn" onclick="addSupervisorFromConfig()">Adicionar Supervisor</button>
+
+                        <div class="divider"></div>
+                        <div class="sub-title">Alterar senha de outro usuário (Admin Master)</div>
+                        <div class="field-row">
+                            <label>Usuário</label>
+                            <select id="cfg-reset-user"></select>
+                        </div>
+                        <div class="field-row">
+                            <label>Nova senha (4 dígitos)</label>
+                            <input type="password" id="cfg-reset-pass" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <div class="field-row">
+                            <label>Confirmar nova senha</label>
+                            <input type="password" id="cfg-reset-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <button class="btn" onclick="changeOtherAdminPassword()">Alterar Senha</button>
+
+                        <div class="divider"></div>
                         <div class="sub-title">Adicionar colaborador (local)</div>
                         <div class="field-row">
                             <label>RE</label>
@@ -1174,6 +1664,7 @@ function renderDashboard() {
                         <button class="btn" onclick="changeLocalAdminPassword()">Alterar Senha</button>
                         <div class="hint">Senha local é usada apenas no site.</div>
                     </div>
+
                 </div>
 
                     <div id="config-pane-datasource" class="config-pane hidden">
@@ -1208,6 +1699,23 @@ function renderDashboard() {
                             </div>
                         </div>
                     </div>
+
+                    <div id="config-pane-ft" class="config-pane hidden">
+                        <div class="config-card">
+                            <div class="card-title">Configurações de FT</div>
+                            <div class="hint">Edite motivos e mantenha o padrão de lançamentos.</div>
+                        </div>
+                        <div class="config-card" id="ftReasonsCard">
+                            <div class="card-title">Motivos de FT</div>
+                            <div id="ftReasonsList" class="admin-list"></div>
+                            <div class="divider"></div>
+                            <div class="field-row">
+                                <label>Novo motivo</label>
+                                <input type="text" id="ft-reason-new" placeholder="Ex: Treinamento">
+                            </div>
+                            <button class="btn btn-secondary" onclick="addFtReason()">Adicionar motivo</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1215,17 +1723,15 @@ function renderDashboard() {
         <!-- Modal de Edição -->
         <div id="edit-modal" class="modal hidden">
             <div class="modal-content">
-                <div class="modal-header">
+                <div class="modal-header sticky-modal-header">
                     <h3>${ICONS.edit} Editar Colaborador</h3>
-                    <button class="close-modal" onclick="closeEditModal()">${ICONS.close}</button>
+                    <div class="modal-header-actions">
+                        <button class="btn btn-secondary btn-compact" onclick="closeEditModal()">Fechar</button>
+                        <button class="btn btn-compact" onclick="salvarEdicao()">Salvar</button>
+                    </div>
                 </div>
                 
                 <input type="hidden" id="edit-id">
-                
-                <div class="form-group" style="background: #f8f9fa; padding: 10px; border-radius: 4px; border: 1px solid #e9ecef;">
-                    <label style="color: var(--dunamis-blue);">Nome do Responsável (Obrigatório)</label>
-                    <input type="text" id="edit-responsavel" placeholder="Quem está realizando a alteração?">
-                </div>
 
                 <div class="form-group">
                     <label>Nome Completo</label>
@@ -1269,7 +1775,6 @@ function renderDashboard() {
                 <div class="modal-actions" style="justify-content: space-between;">
                     <button class="btn" style="background-color: #dc3545; width: auto;" onclick="removerColaborador()">Excluir</button>
                     <button class="btn btn-secondary" style="width: auto;" onclick="closeEditModal()">Cancelar</button>
-                    <button class="btn" style="width: auto;" onclick="salvarEdicao()">Salvar</button>
                 </div>
             </div>
         </div>
@@ -1277,9 +1782,12 @@ function renderDashboard() {
         <!-- Modal de Edição de Unidade -->
         <div id="edit-unit-modal" class="modal hidden">
             <div class="modal-content">
-                <div class="modal-header">
+                <div class="modal-header sticky-modal-header">
                     <h3>${ICONS.settings} Editar Unidade</h3>
-                    <button class="close-modal" onclick="closeEditUnitModal()">${ICONS.close}</button>
+                    <div class="modal-header-actions">
+                        <button class="btn btn-secondary btn-compact" onclick="closeEditUnitModal()">Fechar</button>
+                        <button class="btn btn-compact" onclick="salvarEdicaoUnidade()">Salvar</button>
+                    </div>
                 </div>
                 <input type="hidden" id="edit-unit-old-name">
                 
@@ -1307,8 +1815,22 @@ function renderDashboard() {
                         <div class="form-group"><input type="text" id="new-colab-nome" placeholder="Nome Completo"></div>
                         <div class="form-group"><input type="text" id="new-colab-re" placeholder="RE"></div>
                         <div class="form-group"><input type="text" id="new-colab-telefone" placeholder="Celular"></div>
-                        <div class="form-group"><input type="text" id="new-colab-horario" placeholder="Horário"></div>
-                        <div class="form-group"><input type="text" id="new-colab-unidade" placeholder="Unidade (opcional)"></div>
+                        <div class="form-group">
+                            <select id="new-colab-horario">
+                                <option value="">Selecione o horário</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <select id="new-colab-turma">
+                                <option value="1">Plantão ÍMPAR</option>
+                                <option value="2">Plantão PAR</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <select id="new-colab-unidade">
+                                <option value="">Unidade atual</option>
+                            </select>
+                        </div>
                     </div>
                     <button class="btn btn-small" onclick="adicionarColaboradorNaUnidade()">Adicionar</button>
                 </div>
@@ -1331,9 +1853,6 @@ function renderDashboard() {
                     </div>
                 </div>
 
-                <div class="modal-actions">
-                    <button class="btn" onclick="salvarEdicaoUnidade()">Salvar</button>
-                </div>
             </div>
         </div>
 
@@ -1344,6 +1863,7 @@ function renderDashboard() {
                     <h3>${ICONS.history} Histórico de Alterações</h3>
                     <button class="close-modal" onclick="closeHistoryModal()">${ICONS.close}</button>
                 </div>
+                <div id="history-actions" class="history-actions"></div>
                 <div id="history-list" class="unit-members-list" style="max-height: 400px;"></div>
             </div>
         </div>
@@ -1374,6 +1894,8 @@ function renderDashboard() {
                 <div class="export-grid">
                     <div class="export-col">
                         <h4>Planilhas</h4>
+                        <button class="btn" onclick="exportarSomentePlantao()">Exportar Somente Plantão (XLSX)</button>
+                        <button class="btn btn-secondary" onclick="exportarSomenteFolga()">Exportar Somente Folga (XLSX)</button>
                         <button class="btn" onclick="exportarBaseAtualizada()">Baixar Base Atualizada (XLSX)</button>
                         <button class="btn btn-secondary" onclick="exportarResumo()">Baixar Resumo (XLSX)</button>
                         <button class="btn btn-secondary" onclick="exportarTudo()">Baixar Completo (XLSX)</button>
@@ -1400,6 +1922,21 @@ function renderDashboard() {
                         <p class="export-note">PDFs geram versões prontas para apresentação (resumo e histórico).</p>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Modal de Exportação Unidade -->
+        <div id="export-unit-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 420px;">
+                <div class="modal-header">
+                    <h3>${ICONS.download} Exportar Unidade</h3>
+                    <button class="close-modal" onclick="closeExportUnitModal()">${ICONS.close}</button>
+                </div>
+                <div class="export-grid">
+                    <button class="btn btn-secondary" onclick="confirmExportUnit('xlsx')">Exportar XLSX</button>
+                    <button class="btn btn-secondary" onclick="confirmExportUnit('csv')">Exportar CSV</button>
+                </div>
+                <p class="export-note" id="export-unit-note"></p>
             </div>
         </div>
 
@@ -1520,6 +2057,62 @@ function renderDashboard() {
 
     // Renderizar lista de unidades (já deixa pronto, mas oculto)
     renderizarUnidades();
+    const avisoGroupSelect = document.getElementById('aviso-group-select');
+    if (avisoGroupSelect) {
+        avisoGroupSelect.addEventListener('change', hydrateAvisoForm);
+    }
+    const reminderGroupSelect = document.getElementById('reminder-group-select');
+    if (reminderGroupSelect) {
+        reminderGroupSelect.addEventListener('change', hydrateLembreteForm);
+    }
+    const avisoCollabSearch = document.getElementById('aviso-collab-search');
+    if (avisoCollabSearch) {
+        avisoCollabSearch.addEventListener('input', filterAvisoCollabs);
+    }
+    const avisoCollabSelect = document.getElementById('aviso-collab-select');
+    if (avisoCollabSelect) {
+        avisoCollabSelect.addEventListener('change', syncAvisoUnitWithCollab);
+    }
+    const reminderCollabSearch = document.getElementById('reminder-collab-search');
+    if (reminderCollabSearch) {
+        reminderCollabSearch.addEventListener('input', filterLembreteCollabs);
+    }
+    const reminderCollabSelect = document.getElementById('reminder-collab-select');
+    if (reminderCollabSelect) {
+        reminderCollabSelect.addEventListener('change', syncLembreteUnitWithCollab);
+    }
+    const ftSearch = document.getElementById('ft-search');
+    if (ftSearch) {
+        ftSearch.addEventListener('input', filterFtCollabs);
+    }
+    const ftCollabSelect = document.getElementById('ft-collab-select');
+    if (ftCollabSelect) {
+        ftCollabSelect.addEventListener('change', syncFtUnitWithCollab);
+    }
+    const ftCoveringSearch = document.getElementById('ft-covering-search');
+    if (ftCoveringSearch) {
+        ftCoveringSearch.addEventListener('input', filterFtCovering);
+    }
+    const ftCoveringSelect = document.getElementById('ft-covering-select');
+    if (ftCoveringSelect) {
+        ftCoveringSelect.addEventListener('change', syncFtCoveringSelection);
+    }
+    const ftUnitTarget = document.getElementById('ft-unit-target');
+    if (ftUnitTarget) {
+        ftUnitTarget.dataset.auto = '1';
+        ftUnitTarget.addEventListener('change', () => {
+            ftUnitTarget.dataset.auto = '0';
+        });
+    }
+    const ftShift = document.getElementById('ft-shift');
+    if (ftShift) {
+        ftShift.dataset.auto = '1';
+        ftShift.addEventListener('change', () => {
+            ftShift.dataset.auto = '0';
+        });
+    }
+    initAvisosFilters();
+    updateAvisosUI();
 }
 
 function switchTab(tabName) {
@@ -1527,11 +2120,17 @@ function switchTab(tabName) {
     
     // Atualiza botões
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    event.target.classList.add('active');
+    if (typeof event !== 'undefined' && event?.target) {
+        event.target.classList.add('active');
+    } else {
+        document.querySelector(`.tab-btn[onclick="switchTab('${tabName}')"]`)?.classList.add('active');
+    }
 
     // Atualiza conteúdo
     document.getElementById('tab-content-busca').classList.add('hidden');
     document.getElementById('tab-content-unidades').classList.add('hidden');
+    document.getElementById('tab-content-avisos').classList.add('hidden');
+    document.getElementById('tab-content-lancamentos')?.classList.add('hidden');
     document.getElementById('tab-content-config').classList.add('hidden');
     
     document.getElementById(`tab-content-${tabName}`).classList.remove('hidden');
@@ -1544,14 +2143,28 @@ function switchTab(tabName) {
     if (tabName === 'busca') {
         document.getElementById('search-input').focus();
     }
+    if (tabName === 'avisos') {
+        renderAvisos();
+    }
+    if (tabName === 'lancamentos') {
+        renderLancamentos();
+    } else if (ftSyncTimer) {
+        clearInterval(ftSyncTimer);
+        ftSyncTimer = null;
+    }
 }
 
 function switchConfigTab(tabName) {
     document.querySelectorAll('.config-tab').forEach(btn => btn.classList.remove('active'));
-    event.target.classList.add('active');
+    if (typeof event !== 'undefined' && event?.target) {
+        event.target.classList.add('active');
+    } else {
+        document.querySelector(`.config-tab[onclick="switchConfigTab('${tabName}')"]`)?.classList.add('active');
+    }
     document.getElementById('config-pane-access').classList.add('hidden');
     document.getElementById('config-pane-datasource').classList.add('hidden');
-    document.getElementById(`config-pane-${tabName}`).classList.remove('hidden');
+    document.getElementById('config-pane-ft')?.classList.add('hidden');
+    document.getElementById(`config-pane-${tabName}`)?.classList.remove('hidden');
 }
 
 // 5. Lógica da Busca Rápida
@@ -1631,13 +2244,17 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         }
 
         // Cor de fundo baseada no status
-        const bgClass = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT') ? 'bg-plantao' : 'bg-folga';
+        const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
+        const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
+        const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
 
         return `
             <div class="result-card ${bgClass}" style="border-left: 5px solid ${statusInfo.color}">
                 <div class="card-header">
                     <div class="header-left">
                         <span class="colaborador-nome">${item.nome}</span>
+                        ${getPendingAvisosByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
+                        ${getPendingRemindersByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                         <span class="status-badge" style="background-color: ${statusInfo.color}">${statusInfo.text}</span>
                         ${rotulosHtml}
                         ${retornoInfo}
@@ -1668,6 +2285,7 @@ function renderizarUnidades() {
     const filterTerm = document.getElementById('unit-search-input')?.value.toUpperCase() || '';
     const groupFilter = document.getElementById('unit-group-filter')?.value || 'all';
     const statusFilter = document.getElementById('unit-status-filter')?.value || 'all';
+    const labelFilter = document.getElementById('unit-label-filter')?.value || 'all';
     
     // Atualizar Estatísticas
     atualizarEstatisticas(currentData, groupFilter);
@@ -1691,7 +2309,7 @@ function renderizarUnidades() {
     // Filtrar se houver busca
     if (filterTerm) postosOrdenados = postosOrdenados.filter(p => p.includes(filterTerm));
 
-    unitsContainer.innerHTML = postosOrdenados.map(posto => {
+    const unitBlocks = postosOrdenados.map(posto => {
         const efetivo = grupos[posto];
         // Ordenar alfabeticamente
         efetivo.sort((a, b) => a.nome.localeCompare(b.nome));
@@ -1707,6 +2325,15 @@ function renderizarUnidades() {
             const isFolga = !s.text.includes('PLANTÃO') && !s.text.includes('FT');
             return (statusFilter === 'all' || statusFilter === 'folga') && isFolga;
         });
+
+        const applyLabelFilter = (list) => {
+            if (labelFilter === 'all') return list;
+            if (labelFilter === 'none') return list.filter(p => !p.rotulo);
+            return list.filter(p => (p.rotulo || '').split(',').includes(labelFilter));
+        };
+        const filteredPlantao = applyLabelFilter(timePlantao);
+        const filteredFolga = applyLabelFilter(timeFolga);
+        if (filteredPlantao.length === 0 && filteredFolga.length === 0) return '';
 
         const safeId = 'unit-' + posto.replace(/[^a-zA-Z0-9]/g, '-');
         const isHidden = hiddenUnits.has(posto);
@@ -1724,11 +2351,26 @@ function renderizarUnidades() {
             }).join('');
         }
 
+        const hasUnitLabel = !!meta.rotulo;
+        const avisosPendentes = getPendingAvisosByUnit(posto, groupFilter === 'all' ? 'todos' : groupFilter);
+        const lembretesPendentes = getPendingRemindersByUnit(posto, groupFilter === 'all' ? 'todos' : groupFilter);
+        const avisosBadge = avisosPendentes > 0
+            ? `<span class="unit-aviso-badge">${avisosPendentes} pend.</span>`
+            : '';
+        const lembretesBadge = lembretesPendentes > 0
+            ? `<span class="unit-reminder-badge">${lembretesPendentes} lemb.</span>`
+            : '';
         return `
-            <div class="unit-section" id="${safeId}">
+            <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}">
                 <h3 class="unit-title">
-                    <span>${posto} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml}</span>
+                    <span>${posto} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${avisosBadge} ${lembretesBadge}</span>
                     <div class="unit-actions">
+                        <button class="action-btn" onclick="openAvisosForUnit('${posto}')" title="Avisos da unidade">
+                            ${ICONS.bell}
+                        </button>
+                        <button class="action-btn" onclick="exportUnitPrompt('${posto}')" title="Exportar unidade">
+                            ${ICONS.download}
+                        </button>
                         <button class="action-btn" onclick="openEditUnitModal('${posto}')" title="Editar Unidade">
                             ${ICONS.settings}
                         </button>
@@ -1744,19 +2386,21 @@ function renderizarUnidades() {
                 <div class="unit-teams-container ${isMinimized ? 'hidden' : ''}">
                     <!-- Time Plantão -->
                     <div class="team-block team-plantao">
-                        <h4 class="team-header header-plantao">EM PLANTÃO (${timePlantao.length})</h4>
-                        ${renderUnitTable(timePlantao)}
+                        <h4 class="team-header header-plantao">EM PLANTÃO (${filteredPlantao.length})</h4>
+                        ${renderUnitTable(filteredPlantao)}
                     </div>
 
                     <!-- Time Folga -->
                     <div class="team-block team-folga">
-                        <h4 class="team-header header-folga">NA FOLGA (${timeFolga.length})</h4>
-                        ${renderUnitTable(timeFolga)}
+                        <h4 class="team-header header-folga">NA FOLGA (${filteredFolga.length})</h4>
+                        ${renderUnitTable(filteredFolga)}
                     </div>
                 </div>
             </div>
         `;
-    }).join('');
+    }).filter(Boolean);
+
+    unitsContainer.innerHTML = unitBlocks.join('');
 }
 
 function atualizarEstatisticas(dados, groupFilter) {
@@ -1950,6 +2594,8 @@ function renderUnitTable(lista) {
                                 <td>
                                     <div class="colab-cell">
                                         <strong>${p.nome}</strong>
+                                        ${getPendingAvisosByCollaborator(p.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
+                                        ${getPendingRemindersByCollaborator(p.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                                         ${p.rotulo ? `
                                             ${p.rotulo.split(',').map(r => `
                                                 <span class="mini-label">
@@ -2058,7 +2704,7 @@ function getStatusInfo(item) {
     if (item.rotulo) {
         const r = item.rotulo;
         if (r === 'FÉRIAS' || r === 'ATESTADO' || r === 'AFASTADO') {
-            return { text: r, color: '#6c757d' }; // Cinza
+            return { text: r, color: '#0f766e' }; // Verde azulado (afastamento)
         }
         if (r === 'FT') {
             return { text: 'PLANTÃO EXTRA (FT)', color: '#002D72' }; // Azul Dunamis
@@ -2664,7 +3310,9 @@ function renderAiResultCard(item, target) {
             return `<span class="label-badge">${map[r] || display}</span>`;
         }).join('');
     }
-    const bgClass = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT') ? 'bg-plantao' : 'bg-folga';
+    const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
+    const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
+    const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
     const reason = buildAiReason(item, target);
 
     return `
@@ -2672,6 +3320,8 @@ function renderAiResultCard(item, target) {
             <div class="card-header">
                 <div class="header-left">
                     <span class="colaborador-nome">${item.nome}</span>
+                    ${getPendingAvisosByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
+                    ${getPendingRemindersByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                     <span class="status-badge" style="background-color: ${statusInfo.color}">${statusInfo.text}</span>
                     ${rotulosHtml}
                     ${retornoInfo}
@@ -2770,14 +3420,10 @@ function toggleRotuloDesc() {
 function salvarEdicao() {
     const id = parseInt(document.getElementById('edit-id').value);
     const item = currentData.find(d => d.id === id);
-    const responsavel = document.getElementById('edit-responsavel').value.trim();
-
-    if (!responsavel) {
-        showToast("Por favor, informe o nome do responsável pela alteração.", "error");
-        return;
-    }
+    const responsavel = SiteAuth.user || 'Admin';
     
     if (item) {
+        const before = JSON.parse(JSON.stringify(item));
         const hasNextiAbsence = item._nextiAbsence === true;
 
         item.nome = document.getElementById('edit-nome').value.toUpperCase();
@@ -2800,11 +3446,18 @@ function salvarEdicao() {
         saveLocalState();
 
         // Registrar histórico
+        const after = JSON.parse(JSON.stringify(item));
+        const changes = buildColabChanges(before, after);
         changeHistory.unshift({
             data: new Date().toLocaleString(),
             responsavel: responsavel,
             acao: "Edição de Colaborador",
-            detalhe: `Alterou dados de ${item.nome} (${item.re})`
+            detalhe: `Editou ${item.nome} (${item.re})`,
+            target: { re: item.re, nome: item.nome },
+            changes,
+            before,
+            after,
+            undo: { type: 'edit_colab', before, after }
         });
         saveLocalState();
 
@@ -2851,11 +3504,32 @@ function openEditUnitModal(postoName) {
         </div>
     `).join('');
 
+    // Populate add-collaborator selects
+    populateAddColabSelects(postoName);
+
     document.getElementById('edit-unit-modal').classList.remove('hidden');
 }
 
 function closeEditUnitModal() {
     document.getElementById('edit-unit-modal').classList.add('hidden');
+}
+
+function populateAddColabSelects(postoName) {
+    const escalasUnicas = [...new Set(currentData.map(d => d.escala).filter(Boolean))].sort();
+    const postosUnicos = [...new Set(currentData.map(d => d.posto).filter(Boolean))].sort();
+
+    const horarioSelect = document.getElementById('new-colab-horario');
+    if (horarioSelect) {
+        horarioSelect.innerHTML = `<option value="">Selecione o horário</option>` +
+            escalasUnicas.map(e => `<option value="${e}">${e}</option>`).join('');
+    }
+
+    const unidadeSelect = document.getElementById('new-colab-unidade');
+    if (unidadeSelect) {
+        unidadeSelect.innerHTML = `<option value="">Unidade atual</option>` +
+            postosUnicos.map(p => `<option value="${p}">${p}</option>`).join('');
+        unidadeSelect.value = postoName || '';
+    }
 }
 
 function toggleUnitRotuloDesc() {
@@ -2871,9 +3545,12 @@ function salvarEdicaoUnidade() {
     const rotulo = getCheckboxValues('edit-unit-rotulo-container');
     const detalhe = document.getElementById('edit-unit-rotulo-desc').value;
     const responsavel = SiteAuth.user || 'Admin';
+    const metaBefore = unitMetadata[oldName] ? { ...unitMetadata[oldName] } : null;
 
     // Atualizar chave dos metadados se o nome mudar
     if (newName && newName !== oldName) {
+        const affectedIds = currentData.filter(item => item.posto === oldName).map(item => item.id);
+        const metaSnapshot = { ...unitMetadata };
         if (unitMetadata[oldName]) {
             unitMetadata[newName] = unitMetadata[oldName];
             delete unitMetadata[oldName];
@@ -2889,11 +3566,14 @@ function salvarEdicaoUnidade() {
         renderizarUnidades();
         showToast("Nome da unidade atualizado!", "success");
         
-    changeHistory.unshift({
-        data: new Date().toLocaleString(),
-        responsavel: responsavel,
-        acao: "Renomear Unidade",
-            detalhe: `Renomeou ${oldName} para ${newName}`
+        changeHistory.unshift({
+            data: new Date().toLocaleString(),
+            responsavel: responsavel,
+            acao: "Renomear Unidade",
+            detalhe: `Renomeou ${oldName} para ${newName}`,
+            target: { unidade: newName },
+            changes: [{ label: 'Unidade', from: oldName, to: newName }],
+            undo: { type: 'rename_unit', oldName, newName, affectedIds, metaSnapshot }
         });
     }
 
@@ -2901,6 +3581,29 @@ function salvarEdicaoUnidade() {
     const targetName = newName || oldName;
     unitMetadata[targetName] = { rotulo, detalhe, responsavel };
     saveLocalState();
+
+    if (!newName || newName === oldName) {
+        const metaAfter = unitMetadata[targetName];
+        const metaChanges = [];
+        if ((metaBefore?.rotulo || '') !== (metaAfter?.rotulo || '')) {
+            metaChanges.push({ label: 'Rótulo', from: metaBefore?.rotulo || '—', to: metaAfter?.rotulo || '—' });
+        }
+        if ((metaBefore?.detalhe || '') !== (metaAfter?.detalhe || '')) {
+            metaChanges.push({ label: 'Detalhe', from: metaBefore?.detalhe || '—', to: metaAfter?.detalhe || '—' });
+        }
+        if (metaChanges.length) {
+            changeHistory.unshift({
+                data: new Date().toLocaleString(),
+                responsavel: responsavel,
+                acao: "Atualização de Rótulo",
+                detalhe: `Atualizou rótulos da unidade ${targetName}`,
+                target: { unidade: targetName },
+                changes: metaChanges,
+                undo: { type: 'update_unit_labels', unitName: targetName, metaBefore }
+            });
+            saveLocalState();
+        }
+    }
 
     // Histórico de rótulo não é crítico se o nome não mudou, mas podemos logar se quiser
     renderizarUnidades();
@@ -2928,6 +3631,12 @@ function executarAcaoEmMassa() {
 
     const ids = Array.from(checkboxes).map(cb => parseInt(cb.value));
     
+    const beforeItems = currentData.filter(item => ids.includes(item.id)).map(item => ({
+        id: item.id,
+        posto: item.posto,
+        escala: item.escala
+    }));
+
     currentData.forEach(item => {
         if (ids.includes(item.id)) {
             if (action === 'move') item.posto = value;
@@ -2936,16 +3645,20 @@ function executarAcaoEmMassa() {
     });
 
     showToast(`${checkboxes.length} colaboradores atualizados!`, "success");
+    changeHistory.unshift({
+        data: new Date().toLocaleString(),
+        responsavel: SiteAuth.user || 'Admin',
+        acao: "Ação em Massa",
+        detalhe: `${checkboxes.length} colaboradores atualizados (${action === 'move' ? 'Unidade' : 'Escala'}: ${value})`,
+        undo: { type: 'bulk_update', items: beforeItems, actionLabel: action }
+    });
+    saveLocalState();
     renderizarUnidades();
     closeEditUnitModal();
 }
 
 function removerColaborador() {
-    const responsavel = document.getElementById('edit-responsavel').value.trim();
-    if (!responsavel) {
-        showToast("Informe o responsável antes de excluir.", "error");
-        return;
-    }
+    const responsavel = SiteAuth.user || 'Admin';
 
     const id = parseInt(document.getElementById('edit-id').value);
     if(confirm("Tem certeza que deseja remover este colaborador permanentemente?")) {
@@ -2964,7 +3677,9 @@ function removerColaborador() {
             data: new Date().toLocaleString(),
             responsavel: responsavel,
             acao: "Exclusão",
-            detalhe: `Removeu ${item ? item.nome : 'Colaborador'} do sistema`
+            detalhe: `Removeu ${item ? item.nome : 'Colaborador'} do sistema`,
+            target: item ? { re: item.re, nome: item.nome } : null,
+            undo: item ? { type: 'remove_colab', item } : null
         });
         saveLocalState();
     }
@@ -2975,6 +3690,7 @@ function adicionarColaboradorNaUnidade() {
     const re = document.getElementById('new-colab-re').value.trim();
     const telefone = document.getElementById('new-colab-telefone').value.replace(/\D/g, '');
     const horario = document.getElementById('new-colab-horario').value.trim();
+    const turma = parseInt(document.getElementById('new-colab-turma')?.value || '1');
     const postoInput = document.getElementById('new-colab-unidade').value.toUpperCase().trim();
     const posto = postoInput || document.getElementById('edit-unit-old-name').value;
 
@@ -2990,26 +3706,28 @@ function adicionarColaboradorNaUnidade() {
     const grupo = existingMember ? existingMember.grupo : (currentGroup !== 'todos' ? currentGroup : 'bombeiros');
     const tipoEscala = extrairTipoEscala(horario);
 
-    currentData.push({
+    const newItem = {
         id: newId,
         nome: nome,
         re: re,
         posto: posto,
         escala: horario,
         tipoEscala: tipoEscala,
-        turma: 1,
+        turma: Number.isFinite(turma) ? turma : 1,
         rotulo: '',
         rotuloInicio: '',
         rotuloFim: '',
         rotuloDetalhe: '',
         grupo: grupo,
         telefone: telefone
-    });
+    };
+    currentData.push(newItem);
 
     document.getElementById('new-colab-nome').value = '';
     document.getElementById('new-colab-re').value = '';
     document.getElementById('new-colab-telefone').value = '';
     document.getElementById('new-colab-horario').value = '';
+    document.getElementById('new-colab-turma').value = '1';
     document.getElementById('new-colab-unidade').value = '';
     
     // Atualiza a lista no modal e no fundo
@@ -3034,7 +3752,9 @@ function adicionarColaboradorNaUnidade() {
         data: new Date().toLocaleString(),
         responsavel: "Sistema (Adição Rápida)",
         acao: "Adição",
-        detalhe: `Adicionou ${nome} em ${posto}`
+        detalhe: `Adicionou ${nome} em ${posto}`,
+        target: { re, nome },
+        undo: { type: 'add_colab', item: newItem }
     });
     saveLocalState();
 }
@@ -3147,22 +3867,1573 @@ function exportarDadosCSV() {
 
 function openHistoryModal() {
     const list = document.getElementById('history-list');
+    const actions = document.getElementById('history-actions');
+    if (actions) {
+        const canUndo = changeHistory.length > 0 && !!changeHistory[0]?.undo;
+        actions.innerHTML = `
+            <button class="btn btn-secondary btn-small" onclick="undoLastChange()" ${canUndo ? '' : 'disabled'}>
+                Desfazer última alteração
+            </button>
+        `;
+    }
     if (changeHistory.length === 0) {
         list.innerHTML = '<p class="empty-state">Nenhuma alteração registrada nesta sessão.</p>';
     } else {
-        list.innerHTML = changeHistory.map(h => `
-            <div class="member-item" style="border-left: 3px solid var(--dunamis-blue); padding-left: 10px; margin-bottom: 10px;">
-                <div style="font-size: 0.8rem; color: #666;">${h.data} - <strong>${h.responsavel}</strong></div>
-                <div style="font-weight: bold;">${h.acao}</div>
-                <div>${h.detalhe}</div>
-            </div>
-        `).join('');
+        list.innerHTML = changeHistory.map(h => renderHistoryEntry(h)).join('');
     }
     document.getElementById('history-modal').classList.remove('hidden');
 }
 
 function closeHistoryModal() {
     document.getElementById('history-modal').classList.add('hidden');
+}
+
+function renderHistoryEntry(h) {
+    const meta = `${h.data || ''} • <strong>${h.responsavel || 'N/I'}</strong>`;
+    const detail = h.detalhe ? `<div class="history-detail">${h.detalhe}</div>` : '';
+    const changes = Array.isArray(h.changes) && h.changes.length
+        ? `<ul class="history-changes">${h.changes.map(c => `
+                <li><strong>${c.label}:</strong> ${c.from} → ${c.to}</li>
+            `).join('')}</ul>`
+        : '';
+    return `
+        <div class="history-entry">
+            <div class="history-meta">${meta}</div>
+            <div class="history-title">${h.acao || 'Alteração'}</div>
+            ${detail}
+            ${changes}
+        </div>
+    `;
+}
+
+function formatChangeValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (Array.isArray(value)) return value.join(', ');
+    return String(value);
+}
+
+function formatPhoneNumber(phone) {
+    if (!phone) return '';
+    const clean = phone.replace(/\D/g, '');
+    if (clean.length === 11) return clean.replace(/(\d{2})(\d{5})(\d{4})/, '($1) $2-$3');
+    if (clean.length === 10) return clean.replace(/(\d{2})(\d{4})(\d{4})/, '($1) $2-$3');
+    return clean;
+}
+
+function buildColabChanges(before, after) {
+    const fields = [
+        { key: 'nome', label: 'Nome' },
+        { key: 're', label: 'RE' },
+        { key: 'telefone', label: 'Telefone', format: formatPhoneNumber },
+        { key: 'posto', label: 'Unidade' },
+        { key: 'escala', label: 'Horário' },
+        { key: 'turma', label: 'Turma' },
+        { key: 'rotulo', label: 'Rótulo' },
+        { key: 'rotuloDetalhe', label: 'Detalhe do Rótulo' },
+        { key: 'rotuloInicio', label: 'Início Afastamento' },
+        { key: 'rotuloFim', label: 'Fim Afastamento' }
+    ];
+    const changes = [];
+    fields.forEach(f => {
+        const fromRaw = before?.[f.key];
+        const toRaw = after?.[f.key];
+        const fromVal = f.format ? f.format(fromRaw) : formatChangeValue(fromRaw);
+        const toVal = f.format ? f.format(toRaw) : formatChangeValue(toRaw);
+        if (fromVal !== toVal) {
+            changes.push({ key: f.key, label: f.label, from: fromVal, to: toVal });
+        }
+    });
+    return changes;
+}
+
+function undoLastChange() {
+    if (!changeHistory.length || !changeHistory[0]?.undo) {
+        showToast("Nenhuma alteração para desfazer.", "info");
+        return;
+    }
+    if (!confirm("Deseja desfazer a última alteração registrada?")) return;
+    const undo = changeHistory[0].undo;
+
+    if (undo.type === 'edit_colab') {
+        const before = undo.before;
+        const after = undo.after;
+        const idx = currentData.findIndex(d => d.id === before.id);
+        if (idx >= 0) currentData[idx] = { ...before };
+        if (after?.re && after.re !== before.re) delete collaboratorEdits[after.re];
+        collaboratorEdits[before.re] = { ...before };
+        saveLocalState();
+        renderizarUnidades();
+        if (currentTab === 'busca') realizarBusca(document.getElementById('search-input')?.value || '');
+        changeHistory.unshift({
+            data: new Date().toLocaleString(),
+            responsavel: SiteAuth.user || 'Admin',
+            acao: "Desfazer",
+            detalhe: `Reverteu edição de ${before.nome} (${before.re})`
+        });
+        saveLocalState();
+        openHistoryModal();
+        showToast("Última edição desfeita.", "success");
+        return;
+    }
+
+    if (undo.type === 'remove_colab') {
+        const item = undo.item;
+        if (!currentData.find(d => d.id === item.id)) currentData.push({ ...item });
+        collaboratorEdits[item.re] = { ...item };
+        saveLocalState();
+        renderizarUnidades();
+        if (currentTab === 'busca') realizarBusca(document.getElementById('search-input')?.value || '');
+        changeHistory.unshift({
+            data: new Date().toLocaleString(),
+            responsavel: SiteAuth.user || 'Admin',
+            acao: "Desfazer",
+            detalhe: `Reverteu exclusão de ${item.nome} (${item.re})`
+        });
+        saveLocalState();
+        openHistoryModal();
+        showToast("Exclusão desfeita.", "success");
+        return;
+    }
+
+    if (undo.type === 'add_colab') {
+        const item = undo.item;
+        currentData = currentData.filter(d => d.id !== item.id);
+        delete collaboratorEdits[item.re];
+        saveLocalState();
+        renderizarUnidades();
+        if (currentTab === 'busca') realizarBusca(document.getElementById('search-input')?.value || '');
+        changeHistory.unshift({
+            data: new Date().toLocaleString(),
+            responsavel: SiteAuth.user || 'Admin',
+            acao: "Desfazer",
+            detalhe: `Reverteu adição de ${item.nome} (${item.re})`
+        });
+        saveLocalState();
+        openHistoryModal();
+        showToast("Adição desfeita.", "success");
+        return;
+    }
+
+    if (undo.type === 'rename_unit') {
+        const { oldName, newName, affectedIds, metaSnapshot } = undo;
+        currentData.forEach(item => {
+            if (affectedIds.includes(item.id)) item.posto = oldName;
+        });
+        unitMetadata = { ...metaSnapshot };
+        saveLocalState();
+        renderizarUnidades();
+        changeHistory.unshift({
+            data: new Date().toLocaleString(),
+            responsavel: SiteAuth.user || 'Admin',
+            acao: "Desfazer",
+            detalhe: `Reverteu renomeação da unidade ${newName} para ${oldName}`
+        });
+        saveLocalState();
+        openHistoryModal();
+        showToast("Renomeação desfeita.", "success");
+        return;
+    }
+
+    if (undo.type === 'update_unit_labels') {
+        const { unitName, metaBefore } = undo;
+        if (metaBefore) unitMetadata[unitName] = metaBefore;
+        saveLocalState();
+        renderizarUnidades();
+        changeHistory.unshift({
+            data: new Date().toLocaleString(),
+            responsavel: SiteAuth.user || 'Admin',
+            acao: "Desfazer",
+            detalhe: `Reverteu rótulo da unidade ${unitName}`
+        });
+        saveLocalState();
+        openHistoryModal();
+        showToast("Rótulo desfeito.", "success");
+        return;
+    }
+
+    if (undo.type === 'bulk_update') {
+        undo.items.forEach(prev => {
+            const item = currentData.find(d => d.id === prev.id);
+            if (!item) return;
+            item.posto = prev.posto;
+            item.escala = prev.escala;
+        });
+        saveLocalState();
+        renderizarUnidades();
+        changeHistory.unshift({
+            data: new Date().toLocaleString(),
+            responsavel: SiteAuth.user || 'Admin',
+            acao: "Desfazer",
+            detalhe: `Reverteu ação em massa (${undo.actionLabel || 'atualização'})`
+        });
+        saveLocalState();
+        openHistoryModal();
+        showToast("Ação em massa desfeita.", "success");
+        return;
+    }
+
+    showToast("Não foi possível desfazer esta alteração.", "error");
+}
+
+// ==========================================================================
+// 📌 AVISOS
+// ==========================================================================
+
+function openAvisosTab() {
+    if (!appContainer || appContainer.style.display === 'none') return;
+    closeAvisosMini();
+    switchTab('avisos');
+}
+
+function updateAvisosUI() {
+    const bell = document.getElementById('avisos-bell');
+    const badge = document.getElementById('avisos-badge');
+    const tabBadge = document.getElementById('avisos-tab-badge');
+    const pendingCount = getAvisosPendingCount(currentGroup);
+
+    if (bell) {
+        bell.classList.toggle('hidden', !SiteAuth.logged && avisos.length === 0);
+        bell.classList.toggle('has-pending', pendingCount > 0);
+    }
+    if (badge) {
+        if (pendingCount > 0) {
+            badge.textContent = pendingCount;
+            badge.classList.remove('hidden');
+        } else {
+            badge.classList.add('hidden');
+        }
+    }
+    if (tabBadge) {
+        if (pendingCount > 0) {
+            tabBadge.textContent = pendingCount;
+            tabBadge.classList.remove('hidden');
+        } else {
+            tabBadge.classList.add('hidden');
+        }
+    }
+    renderAvisosMini();
+}
+
+function updateLancamentosUI() {
+    if (currentTab === 'lancamentos') {
+        renderLancamentos();
+    }
+}
+
+function getAvisosPendingCount(groupKey) {
+    const items = getAvisosByGroup(groupKey).filter(a => a.status === 'pending');
+    return items.length;
+}
+
+function getAvisosByGroup(groupKey) {
+    if (!groupKey || groupKey === 'todos' || groupKey === 'all') return avisos;
+    return avisos.filter(a => a.group === groupKey);
+}
+
+function getPendingAvisosByUnit(unitName, groupKey) {
+    return getAvisosByGroup(groupKey)
+        .filter(a => a.unit === unitName && a.status === 'pending')
+        .length;
+}
+
+function getPendingAvisosByCollaborator(re, groupKey) {
+    return getAvisosByGroup(groupKey)
+        .filter(a => a.collabRe === re && a.status === 'pending')
+        .length;
+}
+
+function getPendingRemindersByUnit(unitName, groupKey) {
+    return getAvisosByGroup(groupKey)
+        .filter(a => a.unit === unitName && a.status === 'pending' && a.reminderEnabled)
+        .length;
+}
+
+function getPendingRemindersByCollaborator(re, groupKey) {
+    return getAvisosByGroup(groupKey)
+        .filter(a => a.collabRe === re && a.status === 'pending' && a.reminderEnabled)
+        .length;
+}
+
+function getPendingByAssignee(re) {
+    return avisos.filter(a => a.assignedToRe === re && a.status === 'pending').length;
+}
+
+function initAvisosFilters() {
+    const unitFilter = document.getElementById('aviso-unit-filter');
+    const groupFilter = document.getElementById('aviso-group-filter');
+    const assigneeFilter = document.getElementById('aviso-assignee-filter');
+    if (groupFilter && currentGroup !== 'todos') {
+        groupFilter.value = currentGroup;
+    }
+    if (unitFilter) {
+        unitFilter.innerHTML = `<option value="all">Todas as Unidades</option>`;
+    }
+    updateAvisoAssigneeFilter();
+    refreshAvisoUnitFilterOptions();
+    updateAvisoAssignees();
+}
+
+function updateAvisoAssigneeFilter() {
+    const assigneeFilter = document.getElementById('aviso-assignee-filter');
+    if (!assigneeFilter) return;
+    assigneeFilter.innerHTML = `<option value="all">Todos os responsáveis</option>` +
+        SiteAuth.admins.map(a => `<option value="${a.re}">${a.name}</option>`).join('');
+}
+
+function refreshAvisoUnitFilterOptions() {
+    const unitFilter = document.getElementById('aviso-unit-filter');
+    if (!unitFilter) return;
+    const groupFilter = document.getElementById('aviso-group-filter')?.value || currentGroup || 'todos';
+    const units = [...new Set(currentData
+        .filter(d => groupFilter === 'todos' || groupFilter === 'all' || d.grupo === groupFilter)
+        .map(d => d.posto)
+        .filter(Boolean))].sort();
+    unitFilter.innerHTML = `<option value="all">Todas as Unidades</option>` + units.map(u => `<option value="${u}">${u}</option>`).join('');
+}
+
+function renderAvisos() {
+    const list = document.getElementById('avisos-list');
+    const summary = document.getElementById('avisos-assignee-summary');
+    if (!list) return;
+    refreshAvisoUnitFilterOptions();
+
+    const groupFilter = document.getElementById('aviso-group-filter')?.value || currentGroup || 'todos';
+    const statusFilter = document.getElementById('aviso-status-filter')?.value || 'pending';
+    const assigneeFilter = document.getElementById('aviso-assignee-filter')?.value || 'all';
+    const priorityFilter = document.getElementById('aviso-priority-filter')?.value || 'all';
+    const unitFilter = document.getElementById('aviso-unit-filter')?.value || 'all';
+
+    let items = getAvisosByGroup(groupFilter === 'all' ? 'todos' : groupFilter);
+    if (statusFilter !== 'all') items = items.filter(a => a.status === statusFilter);
+    if (assigneeFilter !== 'all') items = items.filter(a => a.assignedToRe === assigneeFilter);
+    if (priorityFilter !== 'all') items = items.filter(a => a.priority === priorityFilter);
+    if (unitFilter !== 'all') items = items.filter(a => a.unit === unitFilter);
+
+    if (summary && SiteAuth.re) {
+        const mine = getPendingByAssignee(SiteAuth.re);
+        summary.textContent = mine ? `Pendências comigo: ${mine}` : '';
+    }
+
+    if (!items.length) {
+        list.innerHTML = `<p class="empty-state">Nenhum aviso encontrado.</p>`;
+        return;
+    }
+
+    list.innerHTML = items
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .map(a => `
+            <div class="aviso-card ${a.status === 'pending' ? 'pending' : 'done'} ${isAvisoOverdue(a) ? 'overdue' : ''}">
+                <div class="aviso-meta">
+                    <span class="aviso-priority ${a.priority}">${a.priority.toUpperCase()}</span>
+                    <span>${formatAvisoDate(a.createdAt)}</span>
+                    <span>${a.group?.toUpperCase() || 'GERAL'}</span>
+                </div>
+                <div class="aviso-title">${a.title || 'Aviso'}</div>
+                <div class="aviso-scope">
+                    ${a.unit ? `<strong>Unidade:</strong> ${a.unit}` : ''}
+                    ${a.collabName ? `<span> • <strong>Colaborador:</strong> ${a.collabName} (${a.collabRe})</span>` : ''}
+                </div>
+                <div class="aviso-flags">
+                    ${a.collabRe ? `<span class="aviso-flag">Colaborador</span>` : ''}
+                    ${a.reminderEnabled ? `<span class="aviso-flag reminder">Lembrete</span>` : ''}
+                    ${a.assignedToName ? `<span class="aviso-flag assigned">Destinado: ${a.assignedToName}</span>` : ''}
+                </div>
+                ${a.reminderEnabled && a.reminderNextAt ? `<div class="aviso-reminder-meta">Lembrete: ${formatAvisoDate(a.reminderNextAt)}</div>` : ''}
+                <div class="aviso-message">${a.message}</div>
+                <div class="aviso-footer">
+                    <span>Por ${a.createdBy || 'Sistema'}</span>
+                    <div class="aviso-actions">
+                        ${a.reminderEnabled ? `
+                            <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 30)">+30m</button>
+                            <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 120)">+2h</button>
+                            <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 1440)">+1d</button>
+                        ` : ''}
+                        <button class="btn-mini ${a.status === 'pending' ? 'btn-ok' : 'btn-secondary'}" onclick="toggleAvisoStatus('${a.id}')">
+                            ${a.status === 'pending' ? 'Dar baixa' : 'Reabrir'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+}
+
+function isAvisoOverdue(aviso) {
+    if (aviso.status !== 'pending') return false;
+    if (aviso.reminderEnabled && aviso.reminderNextAt) {
+        const nextAt = new Date(aviso.reminderNextAt).getTime();
+        if (nextAt && Date.now() > nextAt) return true;
+    }
+    if (aviso.priority !== 'urgente') return false;
+    const createdAt = new Date(aviso.createdAt).getTime();
+    if (!createdAt) return false;
+    const diffHours = (Date.now() - createdAt) / 36e5;
+    return diffHours >= 2;
+}
+
+function formatAvisoDate(value) {
+    try {
+        return new Date(value).toLocaleString();
+    } catch {
+        return value || '';
+    }
+}
+
+function openAvisoForm() {
+    const form = document.getElementById('aviso-form');
+    if (!form) return;
+    form.classList.remove('hidden');
+    document.getElementById('lembrete-form')?.classList.add('hidden');
+    hydrateAvisoForm();
+}
+
+function closeAvisoForm() {
+    const form = document.getElementById('aviso-form');
+    if (!form) return;
+    form.classList.add('hidden');
+}
+
+function openLembreteForm() {
+    const form = document.getElementById('lembrete-form');
+    if (!form) return;
+    form.classList.remove('hidden');
+    document.getElementById('aviso-form')?.classList.add('hidden');
+    hydrateLembreteForm();
+    updateLembreteScope();
+}
+
+function closeLembreteForm() {
+    const form = document.getElementById('lembrete-form');
+    if (!form) return;
+    form.classList.add('hidden');
+}
+
+function hydrateAvisoForm() {
+    const groupSelect = document.getElementById('aviso-group-select');
+    const unitSelect = document.getElementById('aviso-unit-select');
+    const collabSelect = document.getElementById('aviso-collab-select');
+    const assigneeSelect = document.getElementById('aviso-assignee-select');
+
+    if (groupSelect) {
+        if (currentGroup === 'todos') {
+            groupSelect.innerHTML = `
+                <option value="bombeiros">Bombeiros</option>
+                <option value="servicos">Serviços</option>
+                <option value="seguranca">Segurança</option>
+                <option value="rb">RB Facilities</option>
+            `;
+        } else {
+            groupSelect.innerHTML = `<option value="${currentGroup}">${currentGroup.toUpperCase()}</option>`;
+        }
+    }
+
+    const groupValue = groupSelect?.value || currentGroup;
+    const units = [...new Set(currentData.filter(d => d.grupo === groupValue).map(d => d.posto).filter(Boolean))].sort();
+    if (unitSelect) {
+        unitSelect.innerHTML = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    }
+
+    const collabs = currentData.filter(d => d.grupo === groupValue).sort((a,b) => a.nome.localeCompare(b.nome));
+    if (collabSelect) {
+        collabSelect.innerHTML = collabs.map(c => `<option value="${c.re}" data-search="${c.nome} ${c.re}">${c.nome} (${c.re})</option>`).join('');
+    }
+
+    if (assigneeSelect) {
+        assigneeSelect.innerHTML = SiteAuth.admins.map(a => `
+            <option value="${a.re}">${a.name} (${a.role === 'supervisor' ? 'Supervisor' : 'Admin'})</option>
+        `).join('');
+        if (SiteAuth.re) assigneeSelect.value = SiteAuth.re;
+    }
+}
+
+function updateAvisoScope() {
+    const scope = document.getElementById('aviso-scope-select')?.value || 'unit';
+    const collabGroup = document.getElementById('aviso-collab-group');
+    if (!collabGroup) return;
+    collabGroup.classList.toggle('hidden', scope !== 'collab');
+    if (scope === 'collab') syncAvisoUnitWithCollab();
+}
+
+function updateAvisoAssignees() {
+    const select = document.getElementById('aviso-assignee-select');
+    if (!select) return;
+    select.innerHTML = SiteAuth.admins.map(a => `
+        <option value="${a.re}">${a.name} (${a.role === 'supervisor' ? 'Supervisor' : 'Admin'})</option>
+    `).join('');
+}
+
+function hydrateLembreteForm() {
+    const groupSelect = document.getElementById('reminder-group-select');
+    const unitSelect = document.getElementById('reminder-unit-select');
+    const collabSelect = document.getElementById('reminder-collab-select');
+    const assigneeSelect = document.getElementById('reminder-assignee-select');
+
+    if (groupSelect) {
+        if (currentGroup === 'todos') {
+            groupSelect.innerHTML = `
+                <option value="bombeiros">Bombeiros</option>
+                <option value="servicos">Serviços</option>
+                <option value="seguranca">Segurança</option>
+                <option value="rb">RB Facilities</option>
+            `;
+        } else {
+            groupSelect.innerHTML = `<option value="${currentGroup}">${currentGroup.toUpperCase()}</option>`;
+        }
+    }
+
+    const groupValue = groupSelect?.value || currentGroup;
+    const units = [...new Set(currentData.filter(d => d.grupo === groupValue).map(d => d.posto).filter(Boolean))].sort();
+    if (unitSelect) {
+        unitSelect.innerHTML = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    }
+
+    const collabs = currentData.filter(d => d.grupo === groupValue).sort((a,b) => a.nome.localeCompare(b.nome));
+    if (collabSelect) {
+        collabSelect.innerHTML = collabs.map(c => `<option value="${c.re}" data-search="${c.nome} ${c.re}">${c.nome} (${c.re})</option>`).join('');
+    }
+
+    if (assigneeSelect) {
+        assigneeSelect.innerHTML = SiteAuth.admins.map(a => `
+            <option value="${a.re}">${a.name} (${a.role === 'supervisor' ? 'Supervisor' : 'Admin'})</option>
+        `).join('');
+        if (SiteAuth.re) assigneeSelect.value = SiteAuth.re;
+    }
+}
+
+function filterAvisoCollabs() {
+    const input = document.getElementById('aviso-collab-search');
+    const select = document.getElementById('aviso-collab-select');
+    const scopeSelect = document.getElementById('aviso-scope-select');
+    if (!input || !select) return;
+    const term = input.value.trim().toUpperCase();
+    if (term && scopeSelect && scopeSelect.value !== 'collab') {
+        scopeSelect.value = 'collab';
+        updateAvisoScope();
+    }
+    const options = Array.from(select.options);
+    let firstMatch = null;
+    options.forEach(opt => {
+        const hay = (opt.getAttribute('data-search') || '').toUpperCase();
+        const match = !term || hay.includes(term);
+        opt.hidden = !match;
+        if (match && !firstMatch) firstMatch = opt;
+        if (term && hay.startsWith(term)) firstMatch = opt;
+    });
+    if (firstMatch) select.value = firstMatch.value;
+    syncAvisoUnitWithCollab();
+}
+
+function updateLembreteScope() {
+    const scope = document.getElementById('reminder-scope-select')?.value || 'unit';
+    const collabGroup = document.getElementById('reminder-collab-group');
+    if (!collabGroup) return;
+    collabGroup.classList.toggle('hidden', scope !== 'collab');
+    if (scope === 'collab') syncLembreteUnitWithCollab();
+}
+
+function filterLembreteCollabs() {
+    const input = document.getElementById('reminder-collab-search');
+    const select = document.getElementById('reminder-collab-select');
+    const scopeSelect = document.getElementById('reminder-scope-select');
+    if (!input || !select) return;
+    const term = input.value.trim().toUpperCase();
+    if (term && scopeSelect && scopeSelect.value !== 'collab') {
+        scopeSelect.value = 'collab';
+        updateLembreteScope();
+    }
+    const options = Array.from(select.options);
+    let firstMatch = null;
+    options.forEach(opt => {
+        const hay = (opt.getAttribute('data-search') || '').toUpperCase();
+        const match = !term || hay.includes(term);
+        opt.hidden = !match;
+        if (match && !firstMatch) firstMatch = opt;
+        if (term && hay.startsWith(term)) firstMatch = opt;
+    });
+    if (firstMatch) select.value = firstMatch.value;
+    syncLembreteUnitWithCollab();
+}
+
+function syncAvisoUnitWithCollab() {
+    const collabSelect = document.getElementById('aviso-collab-select');
+    const unitSelect = document.getElementById('aviso-unit-select');
+    if (!collabSelect || !unitSelect) return;
+    const collab = currentData.find(c => c.re === collabSelect.value);
+    if (collab?.posto) unitSelect.value = collab.posto;
+}
+
+function syncLembreteUnitWithCollab() {
+    const collabSelect = document.getElementById('reminder-collab-select');
+    const unitSelect = document.getElementById('reminder-unit-select');
+    if (!collabSelect || !unitSelect) return;
+    const collab = currentData.find(c => c.re === collabSelect.value);
+    if (collab?.posto) unitSelect.value = collab.posto;
+}
+
+function createAviso() {
+    if (!(SiteAuth.logged)) {
+        showToast("Faça login para criar avisos.", "error");
+        return;
+    }
+    const assigneeRe = document.getElementById('aviso-assignee-select')?.value || '';
+    const assignee = SiteAuth.admins.find(a => a.re === assigneeRe);
+    const group = document.getElementById('aviso-group-select')?.value || currentGroup;
+    const scope = document.getElementById('aviso-scope-select')?.value || 'unit';
+    const unit = document.getElementById('aviso-unit-select')?.value || '';
+    const collabRe = document.getElementById('aviso-collab-select')?.value || '';
+    const collab = currentData.find(c => c.re === collabRe);
+    const priority = document.getElementById('aviso-priority-select')?.value || 'normal';
+    const title = document.getElementById('aviso-title')?.value.trim();
+    const message = document.getElementById('aviso-message')?.value.trim();
+    const reminderEnabled = false;
+    const reminderAt = '';
+    const reminderType = 'single';
+    const reminderEvery = 'daily';
+
+    if (!message) {
+        showToast("Digite a mensagem do aviso.", "error");
+        return;
+    }
+
+    const item = {
+        id: `av-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+        group,
+        unit,
+        collabRe: scope === 'collab' ? collabRe : '',
+        collabName: scope === 'collab' ? (collab?.nome || '') : '',
+        assignedToRe: assignee?.re || '',
+        assignedToName: assignee?.name || '',
+        priority,
+        title,
+        message,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        createdBy: SiteAuth.user || 'Sistema',
+        reminderEnabled: reminderEnabled,
+        reminderType: reminderType,
+        reminderEvery: reminderEvery,
+        reminderNextAt: reminderEnabled ? (reminderAt || new Date().toISOString()) : null
+    };
+
+    avisos.unshift(item);
+    avisosSeenIds.add(item.id);
+    saveAvisos();
+    renderAvisos();
+    closeAvisoForm();
+    showToast("Aviso registrado.", "success");
+    playAvisoSound(priority);
+}
+
+function createReminder() {
+    if (!(SiteAuth.logged)) {
+        showToast("Faça login para criar lembretes.", "error");
+        return;
+    }
+    const assigneeRe = document.getElementById('reminder-assignee-select')?.value || '';
+    const assignee = SiteAuth.admins.find(a => a.re === assigneeRe);
+    const group = document.getElementById('reminder-group-select')?.value || currentGroup;
+    const scope = document.getElementById('reminder-scope-select')?.value || 'unit';
+    const unit = document.getElementById('reminder-unit-select')?.value || '';
+    const collabRe = document.getElementById('reminder-collab-select')?.value || '';
+    const collab = currentData.find(c => c.re === collabRe);
+    const priority = document.getElementById('reminder-priority-select')?.value || 'normal';
+    const title = document.getElementById('reminder-title')?.value.trim();
+    const message = document.getElementById('reminder-message')?.value.trim();
+    const reminderAt = document.getElementById('reminder-at')?.value || '';
+    const reminderType = document.getElementById('reminder-type')?.value || 'single';
+    const reminderEvery = document.getElementById('reminder-every')?.value || 'daily';
+
+    if (!message) {
+        showToast("Digite a mensagem do lembrete.", "error");
+        return;
+    }
+    if (scope === 'collab' && !collabRe) {
+        showToast("Selecione o colaborador do lembrete.", "error");
+        return;
+    }
+    if (scope === 'unit' && !unit) {
+        showToast("Selecione a unidade do lembrete.", "error");
+        return;
+    }
+
+    const item = {
+        id: `av-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+        group,
+        unit,
+        collabRe: scope === 'collab' ? collabRe : '',
+        collabName: scope === 'collab' ? (collab?.nome || '') : '',
+        assignedToRe: assignee?.re || '',
+        assignedToName: assignee?.name || '',
+        priority,
+        title,
+        message,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        createdBy: SiteAuth.user || 'Sistema',
+        reminderEnabled: true,
+        reminderType: reminderType,
+        reminderEvery: reminderEvery,
+        reminderNextAt: reminderAt || new Date().toISOString()
+    };
+
+    avisos.unshift(item);
+    avisosSeenIds.add(item.id);
+    saveAvisos();
+    renderAvisos();
+    closeLembreteForm();
+    showToast("Lembrete registrado.", "success");
+    playAvisoSound(priority);
+}
+
+function toggleAvisoStatus(id) {
+    const item = avisos.find(a => a.id === id);
+    if (!item) return;
+    item.status = item.status === 'pending' ? 'done' : 'pending';
+    item.doneAt = item.status === 'done' ? new Date().toISOString() : null;
+    item.doneBy = item.status === 'done' ? (SiteAuth.user || 'Admin') : null;
+    if (item.status === 'done') {
+        item.reminderNextAt = null;
+    }
+    saveAvisos();
+    renderAvisos();
+}
+
+function snoozeAviso(id, minutes) {
+    const item = avisos.find(a => a.id === id);
+    if (!item) return;
+    const base = item.reminderNextAt ? new Date(item.reminderNextAt) : new Date();
+    const next = new Date(base.getTime() + minutes * 60000);
+    item.reminderEnabled = true;
+    item.reminderNextAt = next.toISOString();
+    saveAvisos();
+    renderAvisos();
+    showToast("Lembrete adiado.", "success");
+}
+
+function sendAvisoWhatsapp() {
+    const title = document.getElementById('aviso-title')?.value.trim();
+    const message = document.getElementById('aviso-message')?.value.trim();
+    if (!message) {
+        showToast("Digite a mensagem do aviso.", "error");
+        return;
+    }
+    const text = [title, message].filter(Boolean).join(' - ');
+    const url = `https://wa.me/?text=${encodeURIComponent(text)}`;
+    window.open(url, '_blank');
+}
+
+function sendReminderWhatsapp() {
+    const title = document.getElementById('reminder-title')?.value.trim();
+    const message = document.getElementById('reminder-message')?.value.trim();
+    if (!message) {
+        showToast("Digite a mensagem do lembrete.", "error");
+        return;
+    }
+    const text = [title, message].filter(Boolean).join(' - ');
+    const url = `https://wa.me/?text=${encodeURIComponent(text)}`;
+    window.open(url, '_blank');
+}
+
+function toggleAvisosMini() {
+    const box = document.getElementById('avisos-mini');
+    if (!box) return;
+    box.classList.toggle('hidden');
+    renderAvisosMini();
+}
+
+function closeAvisosMini() {
+    document.getElementById('avisos-mini')?.classList.add('hidden');
+}
+
+function renderAvisosMini() {
+    const list = document.getElementById('avisos-mini-list');
+    if (!list) return;
+    const groupKey = currentGroup || 'todos';
+    const items = getAvisosByGroup(groupKey).filter(a => a.status === 'pending')
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 5);
+    if (!items.length) {
+        list.innerHTML = `<div class="avisos-mini-empty">Sem pendências.</div>`;
+        return;
+    }
+    list.innerHTML = items.map(a => `
+        <div class="avisos-mini-item ${isAvisoOverdue(a) ? 'overdue' : ''}">
+            <div class="mini-title">${a.title || 'Aviso'}</div>
+            <div class="mini-meta">${a.unit || 'Geral'} • ${formatAvisoDate(a.createdAt)}${a.assignedToName ? ` • ${a.assignedToName}` : ''}</div>
+        </div>
+    `).join('');
+}
+
+function exportarAvisosMensal() {
+    const groupFilter = document.getElementById('aviso-group-filter')?.value || currentGroup || 'todos';
+    const now = new Date();
+    const month = now.getMonth();
+    const year = now.getFullYear();
+    const items = getAvisosByGroup(groupFilter === 'all' ? 'todos' : groupFilter)
+        .filter(a => {
+            const dt = new Date(a.createdAt);
+            return dt.getMonth() === month && dt.getFullYear() === year;
+        });
+
+    if (!items.length) {
+        showToast("Nenhum aviso no mês atual.", "info");
+        return;
+    }
+
+    const byUnit = {};
+    items.forEach(a => {
+        const key = a.unit || 'Geral';
+        if (!byUnit[key]) byUnit[key] = { Unidade: key, Total: 0, Pendentes: 0, Urgentes: 0 };
+        byUnit[key].Total += 1;
+        if (a.status === 'pending') byUnit[key].Pendentes += 1;
+        if (a.priority === 'urgente') byUnit[key].Urgentes += 1;
+    });
+
+    const rows = Object.values(byUnit).sort((a,b) => b.Total - a.Total);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Avisos por Unidade");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(items), "Avisos Detalhados");
+    const tag = `${year}-${String(month + 1).padStart(2, '0')}`;
+    XLSX.writeFile(wb, `avisos_${tag}.xlsx`);
+    showToast("Relatório mensal de avisos gerado.", "success");
+}
+
+function openAvisosForUnit(unitName) {
+    switchTab('avisos');
+    const unitFilter = document.getElementById('aviso-unit-filter');
+    const groupFilter = document.getElementById('aviso-group-filter');
+    if (unitFilter) unitFilter.value = unitName;
+    if (groupFilter && currentGroup && currentGroup !== 'todos') groupFilter.value = currentGroup;
+    renderAvisos();
+}
+
+function mergeAvisosFromShadow(remoteAvisos) {
+    const byId = {};
+    avisos.forEach(a => { byId[a.id] = a; });
+    remoteAvisos.forEach(a => { byId[a.id] = a; });
+    const merged = Object.values(byId);
+    const newItems = merged.filter(a => !avisosSeenIds.has(a.id));
+    avisos = merged;
+    newItems.forEach(a => {
+        avisosSeenIds.add(a.id);
+        playAvisoSound(a.priority);
+    });
+    saveAvisos();
+}
+
+function mergeFtLaunchesFromShadow(remoteLaunches) {
+    const byId = {};
+    ftLaunches.forEach(a => { byId[a.id] = a; });
+    remoteLaunches.forEach(a => {
+        const existing = byId[a.id];
+        if (!existing) {
+            byId[a.id] = a;
+            return;
+        }
+        const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const eTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+        byId[a.id] = aTime >= eTime ? a : existing;
+    });
+    ftLaunches = Object.values(byId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    saveFtLaunches();
+}
+
+function playAvisoSound(priority) {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const beep = (delayMs, freq) => {
+            const o = ctx.createOscillator();
+            const g = ctx.createGain();
+            o.frequency.value = freq;
+            o.type = 'sine';
+            o.connect(g);
+            g.connect(ctx.destination);
+            const now = ctx.currentTime + delayMs / 1000;
+            g.gain.setValueAtTime(0.001, now);
+            g.gain.exponentialRampToValueAtTime(0.2, now + 0.02);
+            g.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+            o.start(now);
+            o.stop(now + 0.3);
+        };
+        if (priority === 'urgente') {
+            beep(0, 800);
+            beep(400, 800);
+            beep(800, 800);
+        } else {
+            beep(0, 600);
+        }
+    } catch {}
+}
+
+// ==========================================================================
+// 📌 LANÇAMENTOS DE FT
+// ==========================================================================
+
+function switchLancamentosTab(tab) {
+    currentLancamentosTab = tab;
+    renderLancamentos();
+}
+
+async function hydrateFtCollabs() {
+    const select = document.getElementById('ft-collab-select');
+    if (!select) return;
+    const list = await getAllCollaborators();
+    const collabs = (list || [])
+        .filter(c => !currentGroup || currentGroup === 'todos' || c.grupo === currentGroup)
+        .slice()
+        .sort((a, b) => a.nome.localeCompare(b.nome));
+    select.innerHTML = collabs.map(c => `<option value="${c.re}" data-search="${c.nome} ${c.re}" data-unit="${c.posto || ''}">${c.nome} (${c.re})</option>`).join('');
+}
+
+async function hydrateFtUnitsScales() {
+    const unitSelect = document.getElementById('ft-unit-target');
+    const scaleSelect = document.getElementById('ft-shift');
+    if (!unitSelect || !scaleSelect) return;
+    const list = await getAllCollaborators();
+    const filtered = (list || []).filter(c => !currentGroup || currentGroup === 'todos' || c.grupo === currentGroup);
+    const units = [...new Set(filtered.map(c => c.posto).filter(Boolean))].sort();
+    const scales = [...new Set(filtered.map(c => c.escala).filter(Boolean))].sort();
+    unitSelect.innerHTML = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    scaleSelect.innerHTML = scales.map(s => `<option value="${s}">${s}</option>`).join('');
+}
+
+async function hydrateFtCovering() {
+    const select = document.getElementById('ft-covering-select');
+    if (!select) return;
+    const list = await getAllCollaborators();
+    const collabs = (list || [])
+        .filter(c => !currentGroup || currentGroup === 'todos' || c.grupo === currentGroup)
+        .slice()
+        .sort((a, b) => a.nome.localeCompare(b.nome));
+    const options = [`<option value="NA" data-search="NA">Não se aplica</option>`]
+        .concat(collabs.map(c => `<option value="${c.re}" data-search="${c.nome} ${c.re}" data-phone="${c.telefone || ''}">${c.nome} (${c.re})</option>`));
+    select.innerHTML = options.join('');
+}
+
+function hydrateFtReasons() {
+    const select = document.getElementById('ft-reason');
+    if (!select) return;
+    const items = ftReasons.length ? ftReasons : (CONFIG?.ftReasons || []);
+    select.innerHTML = items.map(r => `<option value="${r.value}">${r.label}</option>`).join('');
+    select.addEventListener('change', handleFtReasonChange);
+    handleFtReasonChange();
+}
+
+function handleFtReasonChange() {
+    const select = document.getElementById('ft-reason');
+    const other = document.getElementById('ft-reason-other');
+    if (!select || !other) return;
+    other.classList.toggle('hidden', select.value !== 'outro');
+}
+
+function getFtReasonLabel(value, other) {
+    if (value === 'outro' && other) return other;
+    const found = ftReasons.find(r => r.value === value);
+    return found ? found.label : value;
+}
+
+function filterFtCovering() {
+    const input = document.getElementById('ft-covering-search');
+    const select = document.getElementById('ft-covering-select');
+    if (!input || !select) return;
+    const term = input.value.trim().toUpperCase();
+    const options = Array.from(select.options);
+    let firstMatch = null;
+    options.forEach(opt => {
+        const hay = (opt.getAttribute('data-search') || '').toUpperCase();
+        const match = !term || hay.includes(term);
+        opt.hidden = !match;
+        if (match && !firstMatch) firstMatch = opt;
+        if (term && hay.startsWith(term)) firstMatch = opt;
+    });
+    if (firstMatch) select.value = firstMatch.value;
+}
+
+function syncFtCoveringSelection() {
+    const other = document.getElementById('ft-covering-other');
+    if (other) other.value = '';
+}
+
+function filterFtCollabs() {
+    const input = document.getElementById('ft-search');
+    const select = document.getElementById('ft-collab-select');
+    if (!input || !select) return;
+    const term = input.value.trim().toUpperCase();
+    const options = Array.from(select.options);
+    let firstMatch = null;
+    options.forEach(opt => {
+        const hay = (opt.getAttribute('data-search') || '').toUpperCase();
+        const match = !term || hay.includes(term);
+        opt.hidden = !match;
+        if (match && !firstMatch) firstMatch = opt;
+        if (term && hay.startsWith(term)) firstMatch = opt;
+    });
+    if (firstMatch) select.value = firstMatch.value;
+    syncFtUnitWithCollab();
+}
+
+function syncFtUnitWithCollab() {
+    const select = document.getElementById('ft-collab-select');
+    const unitCurrent = document.getElementById('ft-unit-current');
+    const unitTarget = document.getElementById('ft-unit-target');
+    const shiftSelect = document.getElementById('ft-shift');
+    if (!select || !unitCurrent) return;
+    const opt = select.selectedOptions?.[0];
+    const unit = opt?.getAttribute('data-unit') || '';
+    const collab = (allCollaboratorsCache.items || []).find(c => c.re === select.value);
+    unitCurrent.value = unit;
+    if (unitTarget) {
+        const auto = unitTarget.dataset.auto !== '0';
+        if (auto && unit) unitTarget.value = unit;
+    }
+    if (shiftSelect && collab?.escala) {
+        const autoShift = shiftSelect.dataset.auto !== '0';
+        if (autoShift) shiftSelect.value = collab.escala;
+    }
+}
+
+function getFtFormConfig(data) {
+    const forms = CONFIG?.ftForms || {};
+    const group = data?.group || currentGroup || 'todos';
+    if (currentGroup === 'todos' && forms.geral) return forms.geral;
+    if (group && group !== 'todos' && forms[group]) return forms[group];
+    return forms.geral || forms.todos || null;
+}
+
+function getFtFormLink(data) {
+    const form = getFtFormConfig(data);
+    if (!form?.formUrl) return '';
+    const entries = form.entries || {};
+    const params = new URLSearchParams();
+    const setIf = (key, value) => {
+        if (!key) return;
+        if (value == null) return;
+        params.set(key, value);
+    };
+    const reasonText = getFtReasonLabel(data.reason, data.reasonOther);
+    const coveringText = data.coveringOther
+        ? data.coveringOther
+        : (data.coveringName ? `${data.coveringName} (${data.coveringRe})` : data.coveringRe);
+    setIf(entries.name, data.collabName);
+    setIf(entries.re, data.collabRe);
+    setIf(entries.unitCurrent, data.unitCurrent);
+    setIf(entries.unitTarget, data.unitTarget);
+    setIf(entries.date, data.date);
+    setIf(entries.shift, data.shift);
+    setIf(entries.reason, reasonText);
+    setIf(entries.covering, coveringText);
+    setIf(entries.notes, data.notes);
+    setIf(entries.createdBy, data.createdBy);
+    setIf(entries.ftId, data.id);
+    const qs = params.toString();
+    return qs ? `${form.formUrl}?${qs}` : form.formUrl;
+}
+
+function formatFtDate(value) {
+    if (!value) return '';
+    try {
+        return new Date(value).toLocaleDateString();
+    } catch {
+        return value;
+    }
+}
+
+function applyFtFilters(list) {
+    let items = list.slice();
+    if (ftFilter.from) items = items.filter(i => (i.date || '').slice(0,10) >= ftFilter.from);
+    if (ftFilter.to) items = items.filter(i => (i.date || '').slice(0,10) <= ftFilter.to);
+    if (ftFilter.status !== 'all') items = items.filter(i => i.status === ftFilter.status);
+    return items;
+}
+
+function renderLancamentos() {
+    const panelDashboard = document.getElementById('lancamentos-panel-dashboard');
+    const panelHistorico = document.getElementById('lancamentos-panel-historico');
+    const panelNovo = document.getElementById('lancamentos-panel-novo');
+    if (!panelDashboard || !panelHistorico || !panelNovo) return;
+
+    panelDashboard.classList.add('hidden');
+    panelHistorico.classList.add('hidden');
+    panelNovo.classList.add('hidden');
+
+    if (currentLancamentosTab === 'dashboard') {
+        panelDashboard.classList.remove('hidden');
+        renderLancamentosDashboard();
+    } else if (currentLancamentosTab === 'historico') {
+        panelHistorico.classList.remove('hidden');
+        renderLancamentosHistorico();
+    } else {
+        panelNovo.classList.remove('hidden');
+        renderLancamentosNovo();
+    }
+
+    if (!ftSyncTimer) {
+        ftSyncTimer = setInterval(() => {
+            if (currentTab === 'lancamentos') syncFtFormResponses(true);
+        }, 120000);
+    }
+}
+
+function getFtResponseUrls() {
+    const forms = CONFIG?.ftForms || {};
+    return Object.entries(forms)
+        .map(([group, cfg]) => ({ group, url: cfg?.responsesCsv || '' }))
+        .filter(item => item.url);
+}
+
+async function syncFtFormResponses(silent = false) {
+    const sources = getFtResponseUrls();
+    if (!sources.length) {
+        if (!silent) showToast("Configure as planilhas de respostas (CSV) para sincronizar.", "info");
+        return;
+    }
+    const ids = new Set();
+    for (const src of sources) {
+        try {
+            const csv = await fetchSheetData(src.url);
+            if (!csv) continue;
+            const rows = parseCSV(csv);
+            if (!rows.length) continue;
+            const header = rows[0].map(h => String(h).toLowerCase());
+            let idx = header.findIndex(h => h.includes('ft id'));
+            if (idx < 0) idx = header.findIndex(h => h.includes('ft') && h.includes('id'));
+            if (idx < 0) continue;
+            for (let i = 1; i < rows.length; i++) {
+                const id = rows[i][idx];
+                if (id) ids.add(String(id).trim());
+            }
+        } catch {}
+    }
+    if (!ids.size) {
+        if (!silent) showToast("Nenhuma confirmação encontrada.", "info");
+        return;
+    }
+    let updated = 0;
+    ftLaunches.forEach(item => {
+        if (item.status === 'pending' && ids.has(item.id)) {
+            setFtStatus(item, 'submitted');
+            updated++;
+        }
+    });
+    if (updated) {
+        saveFtLaunches();
+        showToast("Confirmações atualizadas.", "success");
+    } else if (!silent) {
+        showToast("Nenhuma FT nova confirmada.", "info");
+    }
+    ftLastSyncAt = new Date().toISOString();
+}
+
+async function renderLancamentosNovo() {
+    await hydrateFtCollabs();
+    await hydrateFtUnitsScales();
+    await hydrateFtCovering();
+    hydrateFtReasons();
+    const select = document.getElementById('ft-collab-select');
+    if (select && select.options.length && !select.value) {
+        select.selectedIndex = 0;
+    }
+    syncFtUnitWithCollab();
+    const coveringSelect = document.getElementById('ft-covering-select');
+    if (coveringSelect && coveringSelect.options.length && !coveringSelect.value) {
+        coveringSelect.selectedIndex = 0;
+    }
+    updateFtFormHint();
+    updateFtPostActions();
+}
+
+function updateFtFormHint() {
+    const hint = document.getElementById('ft-form-hint');
+    if (!hint) return;
+    const form = getFtFormConfig(buildFtFromForm());
+    if (!form?.formUrl) {
+        hint.textContent = 'Configure o link do Google Forms em config.js para gerar o link de confirmação.';
+        return;
+    }
+    hint.textContent = 'Link de confirmação será gerado automaticamente ao salvar.';
+}
+
+function renderLancamentosDashboard() {
+    const panel = document.getElementById('lancamentos-panel-dashboard');
+    if (!panel) return;
+
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const items = applyFtFilters(ftLaunches);
+    const pending = items.filter(i => i.status === 'pending').length;
+    const submitted = items.filter(i => i.status === 'submitted').length;
+    const launched = items.filter(i => i.status === 'launched').length;
+    const totalMonth = items.filter(i => (i.date || '').startsWith(monthKey)).length;
+
+    const byUnit = {};
+    items.forEach(i => {
+        const unit = i.unitTarget || i.unitCurrent || 'N/I';
+        byUnit[unit] = (byUnit[unit] || 0) + 1;
+    });
+    const topUnits = Object.entries(byUnit).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+    const byPerson = {};
+    items.forEach(i => {
+        const name = i.collabName || 'N/I';
+        byPerson[name] = (byPerson[name] || 0) + 1;
+    });
+    const topPeople = Object.entries(byPerson).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+    panel.innerHTML = `
+        <div class="lancamentos-filters">
+            <div class="form-group">
+                <label>De</label>
+                <input type="date" id="ft-filter-from" value="${ftFilter.from}">
+            </div>
+            <div class="form-group">
+                <label>Até</label>
+                <input type="date" id="ft-filter-to" value="${ftFilter.to}">
+            </div>
+            <div class="form-group">
+                <label>Status</label>
+                <select id="ft-filter-status">
+                    <option value="all" ${ftFilter.status === 'all' ? 'selected' : ''}>Todos</option>
+                    <option value="pending" ${ftFilter.status === 'pending' ? 'selected' : ''}>Pendentes</option>
+                    <option value="submitted" ${ftFilter.status === 'submitted' ? 'selected' : ''}>Confirmados (Forms)</option>
+                    <option value="launched" ${ftFilter.status === 'launched' ? 'selected' : ''}>Lançados no Nexti</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Última sync</label>
+                <div class="ft-sync-info">${ftLastSyncAt ? formatFtDate(ftLastSyncAt) : '—'}</div>
+            </div>
+        </div>
+        <div class="lancamentos-cards">
+            <div class="lanc-card"><div class="label">Pendentes</div><div class="value">${pending}</div></div>
+            <div class="lanc-card"><div class="label">Confirmados (Forms)</div><div class="value">${submitted}</div></div>
+            <div class="lanc-card"><div class="label">Lançados no Nexti</div><div class="value">${launched}</div></div>
+            <div class="lanc-card"><div class="label">Total no mês</div><div class="value">${totalMonth}</div></div>
+        </div>
+        ${getFtResponseUrls().length ? '' : '<p class="empty-state">Para confirmação automática, publique a planilha de respostas (CSV) e preencha em config.js.</p>'}
+        <div class="lancamentos-grid">
+            <div class="lanc-panel">
+                <h4>Top Unidades</h4>
+                ${topUnits.map(([unit, count]) => `<div class="lanc-row"><span>${unit}</span><strong>${count}</strong></div>`).join('') || '<div class="empty-state">Sem dados.</div>'}
+            </div>
+            <div class="lanc-panel">
+                <h4>Top Colaboradores</h4>
+                ${topPeople.map(([name, count]) => `<div class="lanc-row"><span>${name}</span><strong>${count}</strong></div>`).join('') || '<div class="empty-state">Sem dados.</div>'}
+            </div>
+        </div>
+    `;
+
+    document.getElementById('ft-filter-from')?.addEventListener('change', (e) => {
+        ftFilter.from = e.target.value || '';
+        renderLancamentosDashboard();
+    });
+    document.getElementById('ft-filter-to')?.addEventListener('change', (e) => {
+        ftFilter.to = e.target.value || '';
+        renderLancamentosDashboard();
+    });
+    document.getElementById('ft-filter-status')?.addEventListener('change', (e) => {
+        ftFilter.status = e.target.value || 'all';
+        renderLancamentosDashboard();
+    });
+}
+
+function renderLancamentosHistorico() {
+    const panel = document.getElementById('lancamentos-panel-historico');
+    if (!panel) return;
+    if (!ftLaunches.length) {
+        panel.innerHTML = `<p class="empty-state">Nenhum lançamento registrado.</p>`;
+        return;
+    }
+    const items = applyFtFilters(ftLaunches).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    panel.innerHTML = `
+        <div class="lancamentos-filters">
+            <div class="form-group">
+                <label>De</label>
+                <input type="date" id="ft-filter-from-h" value="${ftFilter.from}">
+            </div>
+            <div class="form-group">
+                <label>Até</label>
+                <input type="date" id="ft-filter-to-h" value="${ftFilter.to}">
+            </div>
+            <div class="form-group">
+                <label>Status</label>
+                <select id="ft-filter-status-h">
+                    <option value="all" ${ftFilter.status === 'all' ? 'selected' : ''}>Todos</option>
+                    <option value="pending" ${ftFilter.status === 'pending' ? 'selected' : ''}>Pendentes</option>
+                    <option value="submitted" ${ftFilter.status === 'submitted' ? 'selected' : ''}>Confirmados (Forms)</option>
+                    <option value="launched" ${ftFilter.status === 'launched' ? 'selected' : ''}>Lançados no Nexti</option>
+                </select>
+            </div>
+        </div>
+        ${items.map(item => {
+            const statusText = item.status === 'launched'
+                ? 'LANÇADO NO NEXTI'
+                : (item.status === 'submitted' ? 'CONFIRMADO (Forms)' : 'AGUARDANDO CONFIRMAÇÃO');
+            const canLaunch = item.status === 'submitted';
+            const launched = item.status === 'launched';
+            return `
+        <div class="lancamento-card">
+            <div class="lancamento-meta">
+                <span>${formatFtDate(item.createdAt)}</span>
+                <span>${statusText}</span>
+            </div>
+            <div class="lancamento-steps">
+                <span class="step ${item.createdAt ? 'done' : ''}">Lançada</span>
+                <span class="step ${item.linkSentAt ? 'done' : ''}">Link enviado</span>
+                <span class="step ${item.status === 'submitted' || item.status === 'launched' ? 'done' : ''}">Colaborador enviou</span>
+                <span class="step ${item.status === 'launched' ? 'done' : ''}">Lançado no Nexti</span>
+            </div>
+            <div class="lancamento-title">${item.collabName || 'Colaborador'} (${item.collabRe})</div>
+            <div class="lancamento-details">
+                <div><strong>Unidade:</strong> ${item.unitTarget || item.unitCurrent || 'N/I'}</div>
+                <div><strong>Data:</strong> ${item.date || 'N/I'} • <strong>Escala:</strong> ${item.shift || 'N/I'}</div>
+                <div><strong>Motivo:</strong> ${getFtReasonLabel(item.reason, item.reasonOther) || 'N/I'} • <strong>Cobrindo:</strong> ${item.coveringOther || (item.coveringName ? `${item.coveringName} (${item.coveringRe})` : (item.coveringRe || '-'))}</div>
+                <div><strong>Responsável:</strong> ${item.createdBy || 'Admin'}</div>
+            </div>
+            <div class="lancamento-actions">
+                <button class="btn-mini btn-secondary" onclick="copyFtLinkById('${item.id}')">Copiar link</button>
+                <button class="btn-mini btn-secondary" onclick="sendFtWhatsappById('${item.id}')">WhatsApp</button>
+                <button class="btn-mini ${launched ? 'btn-ok' : 'btn-secondary'}" onclick="markFtLaunched('${item.id}')" ${canLaunch ? '' : 'disabled'}>${launched ? 'Lançado no Nexti' : 'Marcar Lançado no Nexti'}</button>
+                <button class="btn-mini btn-danger" onclick="deleteFtLaunch('${item.id}')">Remover</button>
+            </div>
+        </div>
+    `;
+        }).join('')}
+    `;
+
+    document.getElementById('ft-filter-from-h')?.addEventListener('change', (e) => {
+        ftFilter.from = e.target.value || '';
+        renderLancamentosHistorico();
+    });
+    document.getElementById('ft-filter-to-h')?.addEventListener('change', (e) => {
+        ftFilter.to = e.target.value || '';
+        renderLancamentosHistorico();
+    });
+    document.getElementById('ft-filter-status-h')?.addEventListener('change', (e) => {
+        ftFilter.status = e.target.value || 'all';
+        renderLancamentosHistorico();
+    });
+}
+
+function buildFtFromForm() {
+    const select = document.getElementById('ft-collab-select');
+    const collabRe = select?.value || '';
+    const collabName = select?.selectedOptions?.[0]?.text?.split('(')[0]?.trim() || '';
+    const unitCurrent = document.getElementById('ft-unit-current')?.value.trim() || '';
+    const unitTarget = document.getElementById('ft-unit-target')?.value.trim() || '';
+    const date = document.getElementById('ft-date')?.value || '';
+    const shift = document.getElementById('ft-shift')?.value.trim() || '';
+    const reason = document.getElementById('ft-reason')?.value || '';
+    const reasonOther = document.getElementById('ft-reason-other')?.value.trim() || '';
+    const coveringSelect = document.getElementById('ft-covering-select');
+    const coveringRe = coveringSelect?.value || '';
+    const coveringName = coveringSelect?.selectedOptions?.[0]?.text?.split('(')[0]?.trim() || '';
+    const coveringOther = document.getElementById('ft-covering-other')?.value.trim() || '';
+    const notes = document.getElementById('ft-notes')?.value.trim() || '';
+    let group = currentGroup || '';
+    const collab = currentData.find(c => c.re === collabRe) || (allCollaboratorsCache.items || []).find(c => c.re === collabRe);
+    const coveringCollab = (allCollaboratorsCache.items || []).find(c => c.re === coveringRe);
+    if (collab?.grupo) group = collab.grupo;
+    const resolvedUnitCurrent = unitCurrent || collab?.posto || '';
+    let resolvedCoveringRe = coveringRe;
+    let resolvedCoveringOther = coveringOther;
+    if (coveringRe === 'NA') {
+        resolvedCoveringRe = '';
+        resolvedCoveringOther = 'Não se aplica';
+    }
+    return {
+        collabRe,
+        collabName: collab?.nome || collabName,
+        collabPhone: collab?.telefone || '',
+        unitCurrent: resolvedUnitCurrent,
+        unitTarget,
+        date,
+        shift,
+        reason,
+        reasonOther,
+        coveringRe: resolvedCoveringRe,
+        coveringName: coveringCollab?.nome || coveringName,
+        coveringPhone: coveringCollab?.telefone || '',
+        coveringOther: resolvedCoveringOther,
+        notes,
+        group
+    };
+}
+
+function createFtLaunch() {
+    if (!(SiteAuth.logged && SiteAuth.role !== 'supervisor')) {
+        showToast("Apenas admins podem lançar FT.", "error");
+        return;
+    }
+    const data = buildFtFromForm();
+    if (!data.collabRe) {
+        showToast("Selecione o colaborador.", "error");
+        return;
+    }
+    if (!data.date) {
+        showToast("Informe a data da FT.", "error");
+        return;
+    }
+    if (!data.unitTarget) {
+        showToast("Informe a unidade FT.", "error");
+        return;
+    }
+    if (data.reason === 'outro' && !data.reasonOther) {
+        showToast("Descreva o motivo da FT.", "error");
+        return;
+    }
+    const item = {
+        id: `ft-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        createdBy: SiteAuth.user || 'Admin',
+        ...data
+    };
+    item.updatedAt = item.createdAt;
+    item.formLink = getFtFormLink(item);
+    ftLaunches.unshift(item);
+    saveFtLaunches();
+    showToast("FT lançada com sucesso.", "success");
+    lastFtCreatedId = item.id;
+    updateFtPostActions();
+}
+
+function updateFtPostActions() {
+    const copyBtn = document.getElementById('ft-copy-last');
+    const sendBtn = document.getElementById('ft-send-last');
+    const enabled = !!lastFtCreatedId;
+    if (copyBtn) copyBtn.disabled = !enabled;
+    if (sendBtn) sendBtn.disabled = !enabled;
+}
+
+function copyFtLastLink() {
+    if (!lastFtCreatedId) {
+        showToast("Salve o lançamento primeiro.", "error");
+        return;
+    }
+    copyFtLinkById(lastFtCreatedId);
+}
+
+function sendFtLastWhatsapp() {
+    if (!lastFtCreatedId) {
+        showToast("Salve o lançamento primeiro.", "error");
+        return;
+    }
+    sendFtWhatsappById(lastFtCreatedId);
+}
+
+function copyFtLinkById(id) {
+    const item = ftLaunches.find(i => i.id === id);
+    if (!item) return;
+    const link = item.formLink || getFtFormLink(item);
+    if (!link) {
+        showToast("Configure o Google Forms para gerar o link.", "error");
+        return;
+    }
+    item.linkSentAt = item.linkSentAt || new Date().toISOString();
+    item.updatedAt = new Date().toISOString();
+    navigator.clipboard?.writeText(link);
+    saveFtLaunches();
+    showToast("Link copiado.", "success");
+}
+
+function sendFtWhatsappById(id) {
+    const item = ftLaunches.find(i => i.id === id);
+    if (!item) return;
+    const link = item.formLink || getFtFormLink(item);
+    if (!link) {
+        showToast("Configure o Google Forms para gerar o link.", "error");
+        return;
+    }
+    const reasonText = getFtReasonLabel(item.reason, item.reasonOther);
+    const coveringText = item.coveringOther
+        ? item.coveringOther
+        : (item.coveringName ? `${item.coveringName} (${item.coveringRe})` : item.coveringRe);
+    const text = `FT confirmação\n${item.collabName} (${item.collabRe})\nUnidade: ${item.unitTarget || item.unitCurrent}\nData: ${item.date}\nEscala: ${item.shift}\nMotivo: ${reasonText}\nCobrindo: ${coveringText || '-'}\nLink: ${link}`;
+    const url = buildWhatsUrl(item.collabPhone, text);
+    item.linkSentAt = item.linkSentAt || new Date().toISOString();
+    item.updatedAt = new Date().toISOString();
+    saveFtLaunches();
+    window.open(url, '_blank');
+}
+
+function buildWhatsUrl(phone, text) {
+    if (!phone) return `https://wa.me/?text=${encodeURIComponent(text)}`;
+    const clean = String(phone).replace(/\D/g, '');
+    if (clean.length >= 10) {
+        const withCountry = clean.startsWith('55') ? clean : `55${clean}`;
+        return `https://wa.me/${withCountry}?text=${encodeURIComponent(text)}`;
+    }
+    return `https://wa.me/?text=${encodeURIComponent(text)}`;
+}
+
+function applyFtToCollaborator(item) {
+    if (!item?.collabRe || !item?.date) return;
+    const base = currentData.find(c => c.re === item.collabRe) || (allCollaboratorsCache.items || []).find(c => c.re === item.collabRe);
+    const edit = base ? { ...base } : (collaboratorEdits[item.collabRe] || { re: item.collabRe, nome: item.collabName });
+    if (edit.rotulo && edit.rotulo !== 'FT') return;
+    edit.rotulo = 'FT';
+    edit.rotuloInicio = item.date;
+    edit.rotuloFim = item.date;
+    edit.rotuloDetalhe = item.unitTarget || '';
+    collaboratorEdits[item.collabRe] = edit;
+    const live = currentData.find(c => c.re === item.collabRe);
+    if (live) {
+        live.rotulo = 'FT';
+        live.rotuloInicio = item.date;
+        live.rotuloFim = item.date;
+        live.rotuloDetalhe = item.unitTarget || '';
+    }
+    saveLocalState();
+}
+
+function removeFtFromCollaborator(item) {
+    if (!item?.collabRe) return;
+    const edit = collaboratorEdits[item.collabRe];
+    if (!edit) return;
+    if (edit.rotulo === 'FT' && edit.rotuloInicio === item.date && edit.rotuloFim === item.date) {
+        delete edit.rotulo;
+        delete edit.rotuloInicio;
+        delete edit.rotuloFim;
+        delete edit.rotuloDetalhe;
+        collaboratorEdits[item.collabRe] = edit;
+        const live = currentData.find(c => c.re === item.collabRe);
+        if (live && live.rotulo === 'FT' && live.rotuloInicio === item.date && live.rotuloFim === item.date) {
+            delete live.rotulo;
+            delete live.rotuloInicio;
+            delete live.rotuloFim;
+            delete live.rotuloDetalhe;
+        }
+        saveLocalState();
+    }
+}
+
+function setFtStatus(item, status) {
+    item.status = status;
+    item.updatedAt = new Date().toISOString();
+    if (status === 'submitted' || status === 'launched') {
+        applyFtToCollaborator(item);
+    } else if (status === 'pending') {
+        removeFtFromCollaborator(item);
+    }
+}
+
+function markFtLaunched(id) {
+    const item = ftLaunches.find(i => i.id === id);
+    if (!item || item.status !== 'submitted') return;
+    setFtStatus(item, 'launched');
+    saveFtLaunches();
+    renderLancamentosHistorico();
+    showToast("FT marcada como lançada no Nexti.", "success");
+}
+
+function deleteFtLaunch(id) {
+    const item = ftLaunches.find(i => i.id === id);
+    if (!item) return;
+    if (!confirm('Remover lançamento de FT?')) return;
+    removeFtFromCollaborator(item);
+    ftLaunches = ftLaunches.filter(i => i.id !== id);
+    saveFtLaunches();
+    renderLancamentosHistorico();
+    showToast("Lançamento removido.", "success");
 }
 
 // ==========================================================================
@@ -3284,6 +5555,24 @@ function buildExportRows() {
     });
 }
 
+function buildExportRowsFor(items) {
+    return (items || []).map(item => {
+        const status = getStatusInfo(item);
+        return {
+            "Nome": item.nome,
+            "RE": item.re,
+            "Unidade": item.posto,
+            "Escala": item.escala,
+            "Turma": item.turma === 1 ? "Ímpar" : "Par",
+            "Status": status.text,
+            "Rótulo": item.rotulo || "",
+            "Detalhe Rótulo": item.rotuloDetalhe || "",
+            "Início Afastamento": item.rotuloInicio ? formatDate(item.rotuloInicio) : "",
+            "Fim Afastamento": item.rotuloFim ? formatDate(item.rotuloFim) : ""
+        };
+    });
+}
+
 function buildResumoRows() {
     const byUnit = {};
     const byRotulo = {};
@@ -3368,7 +5657,10 @@ function buildHistoryRows(history) {
         "Data": h.data || '',
         "Responsável": h.responsavel || '',
         "Ação": h.acao || '',
-        "Detalhe": h.detalhe || ''
+        "Detalhe": h.detalhe || '',
+        "Alterações": Array.isArray(h.changes) && h.changes.length
+            ? h.changes.map(c => `${c.label}: ${c.from} → ${c.to}`).join(' | ')
+            : ''
     }));
 }
 
@@ -3393,6 +5685,34 @@ function exportarBaseAtualizada() {
     XLSX.utils.book_append_sheet(wb, ws, "Base Atualizada");
     XLSX.writeFile(wb, `base_atualizada_${new Date().toISOString().slice(0,10)}.xlsx`);
     showToast("Base atualizada gerada.", "success");
+}
+
+function exportarSomentePlantao() {
+    const items = currentData.filter(i => isPlantaoStatus(i));
+    if (!items.length) {
+        showToast("Não há colaboradores em plantão.", "info");
+        return;
+    }
+    const rows = buildExportRowsFor(items);
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Somente Plantao");
+    XLSX.writeFile(wb, `somente_plantao_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Exportação de plantão gerada.", "success");
+}
+
+function exportarSomenteFolga() {
+    const items = currentData.filter(i => !isPlantaoStatus(i));
+    if (!items.length) {
+        showToast("Não há colaboradores de folga.", "info");
+        return;
+    }
+    const rows = buildExportRowsFor(items);
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Somente Folga");
+    XLSX.writeFile(wb, `somente_folga_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Exportação de folga gerada.", "success");
 }
 
 function exportarResumo() {
@@ -3422,6 +5742,67 @@ function exportarTudo() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(changeHistory), "Historico Global");
     XLSX.writeFile(wb, `exportacao_completa_${new Date().toISOString().slice(0,10)}.xlsx`);
     showToast("Exportação completa gerada.", "success");
+}
+
+function exportUnitPrompt(posto) {
+    openExportUnitModal(posto);
+}
+
+function openExportUnitModal(posto) {
+    exportUnitTarget = posto;
+    const modal = document.getElementById('export-unit-modal');
+    const note = document.getElementById('export-unit-note');
+    if (note) note.textContent = posto ? `Unidade selecionada: ${posto}` : '';
+    modal?.classList.remove('hidden');
+}
+
+function closeExportUnitModal() {
+    document.getElementById('export-unit-modal')?.classList.add('hidden');
+    exportUnitTarget = null;
+}
+
+function confirmExportUnit(format) {
+    if (!exportUnitTarget) {
+        showToast("Selecione uma unidade para exportar.", "error");
+        return;
+    }
+    closeExportUnitModal();
+    exportUnitData(exportUnitTarget, format);
+}
+
+function exportUnitData(posto, format = 'xlsx') {
+    const items = currentData.filter(i => i.posto === posto);
+    if (!items.length) {
+        showToast("Nenhum colaborador encontrado nesta unidade.", "error");
+        return;
+    }
+    if (format === 'csv') {
+        const headers = ["Nome", "RE", "Posto", "Escala", "Turma", "Status", "Rótulo"];
+        const rows = items.map(item => [
+            `"${item.nome}"`,
+            `"${item.re}"`,
+            `"${item.posto}"`,
+            `"${item.escala}"`,
+            item.turma,
+            getStatusInfo(item).text,
+            item.rotulo || ""
+        ]);
+        const csvContent = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = `unidade_${posto.replace(/\s+/g,'_').toLowerCase()}_${new Date().toISOString().slice(0,10)}.csv`;
+        link.click();
+        showToast("CSV da unidade gerado.", "success");
+        return;
+    }
+
+    const rows = buildExportRowsFor(items);
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Unidade");
+    XLSX.writeFile(wb, `unidade_${posto.replace(/\s+/g,'_').toLowerCase()}_${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("XLSX da unidade gerado.", "success");
 }
 
 function exportarCSVAtualizado() {
@@ -3710,18 +6091,21 @@ function loginSite() {
     SiteAuth.logged = true;
     SiteAuth.user = admin.name;
     SiteAuth.re = re;
-    SiteAuth.mode = 'edit';
+    SiteAuth.role = admin.role || 'admin';
+    SiteAuth.mode = (SiteAuth.role === 'supervisor') ? 'observe' : 'edit';
     
     // Ativa modo edição visualmente
-    document.body.classList.add('mode-edit');
+    if (SiteAuth.role !== 'supervisor') document.body.classList.add('mode-edit');
 
     document.getElementById('config-login')?.classList.add('hidden');
     document.getElementById('config-content')?.classList.remove('hidden');
 
-    updateMenuStatus();
+    const keepLogged = document.getElementById('keepLogged')?.checked === true;
+    saveAuthToStorage(hash, keepLogged);
+    renderDashboard();
+    switchTab('config');
     renderAdminList();
     renderAuditList();
-    saveAuthToStorage(hash);
 
     showToast("Login efetuado com sucesso, agora você está no modo editor.", "success");
 }
@@ -3731,13 +6115,15 @@ function logoutSite() {
     SiteAuth.user = null;
     SiteAuth.re = null;
     SiteAuth.mode = 'view';
+    SiteAuth.role = 'viewer';
     
     document.body.classList.remove('mode-edit');
 
     document.getElementById('config-login')?.classList.remove('hidden');
     document.getElementById('config-content')?.classList.add('hidden');
 
-    updateMenuStatus();
+    renderDashboard();
+    switchTab('config');
     localStorage.setItem('keepLogged', '0');
     localStorage.removeItem('authHash');
     localStorage.removeItem('authUser');
@@ -3745,7 +6131,7 @@ function logoutSite() {
 }
 
 function toggleEditMode() {
-    if (!SiteAuth.logged) return;
+    if (!SiteAuth.logged || SiteAuth.role === 'supervisor') return;
 
     SiteAuth.mode = SiteAuth.mode === 'edit' ? 'view' : 'edit';
     
@@ -3757,46 +6143,134 @@ function renderAdminList() {
     const list = document.getElementById('adminList');
     if (!list) return;
 
-    list.innerHTML = '';
+    const admins = SiteAuth.admins.filter(a => a.role !== 'supervisor');
+    const supervisors = SiteAuth.admins.filter(a => a.role === 'supervisor');
 
-    SiteAuth.admins.forEach(a => {
-        const div = document.createElement('div');
-        div.style.padding = "6px";
-        div.style.borderBottom = "1px solid #333";
-        div.style.fontSize = "0.8rem";
-        div.innerHTML = `
-            👤 ${a.name}
-            <button onclick="removeAdmin('${a.hash}')"
-                style="float:right;background:#dc3545;color:white;border:none;padding:2px 6px;border-radius:4px;">
-                X
-            </button>
-        `;
-        list.appendChild(div);
-    });
+    const adminRows = admins.map(a => `
+        <div class="admin-row">
+            <span class="admin-name gold">${ICONS.crown} ${a.name}</span>
+            <button onclick="removeAdmin('${a.hash}')" class="btn-mini btn-danger">X</button>
+        </div>
+    `).join('');
+
+    const supervisorRows = supervisors.map(a => `
+        <div class="admin-row supervisor">
+            <span class="admin-name gold">${a.name}</span>
+            <button onclick="removeAdmin('${a.hash}')" class="btn-mini btn-danger">X</button>
+        </div>
+    `).join('');
+
+    list.innerHTML = `
+        <div class="admin-section">
+            <div class="admin-section-title">Admins</div>
+            ${adminRows || '<div class="admin-empty">Nenhum admin cadastrado.</div>'}
+        </div>
+        <div class="admin-section">
+            <div class="admin-section-title">Supervisores</div>
+            ${supervisorRows || '<div class="admin-empty">Nenhum supervisor cadastrado.</div>'}
+        </div>
+    `;
+
+    updateAdminResetOptions();
+    updateAvisoAssigneeFilter();
 }
 
-function addAdmin() {
-    const re = prompt('RE do colaborador');
-    if (!re) return;
-    
-    const person = currentData?.find(p => p.re === re || p.re?.endsWith(re));
-    if (!person) {
-        alert('Colaborador não encontrado na base carregada.');
+function renderFtReasonsConfig() {
+    const list = document.getElementById('ftReasonsList');
+    if (!list) return;
+    const rows = ftReasons.map((r, idx) => `
+        <div class="admin-row">
+            <span class="admin-name">${r.label || r.value}</span>
+            <button onclick="removeFtReason(${idx})" class="btn-mini btn-danger">X</button>
+        </div>
+    `).join('');
+    list.innerHTML = rows || '<div class="admin-empty">Nenhum motivo cadastrado.</div>';
+}
+
+function addFtReason() {
+    if (!(SiteAuth.logged && SiteAuth.role !== 'supervisor')) return;
+    const input = document.getElementById('ft-reason-new');
+    const label = input?.value.trim();
+    if (!label) return;
+    const value = label.toLowerCase().replace(/\s+/g, '_');
+    if (ftReasons.some(r => r.value === value)) {
+        showToast("Esse motivo já existe.", "info");
         return;
     }
+    ftReasons.push({ value, label });
+    saveFtReasons();
+    renderFtReasonsConfig();
+    input.value = '';
+}
 
-    const cpf = prompt('4 primeiros dígitos do CPF');
-    if (!cpf) return;
+function removeFtReason(idx) {
+    if (!(SiteAuth.logged && SiteAuth.role !== 'supervisor')) return;
+    if (!confirm('Remover motivo?')) return;
+    ftReasons.splice(idx, 1);
+    saveFtReasons();
+    renderFtReasonsConfig();
+}
 
+async function addAdminFromConfig() {
+    if (!(SiteAuth.logged && SiteAuth.role !== 'supervisor')) {
+        showToast("Apenas admins podem adicionar.", "error");
+        return;
+    }
+    const re = document.getElementById('cfg-admin-re')?.value.trim();
+    const cpf = document.getElementById('cfg-admin-cpf')?.value.trim();
+    if (!re || !cpf) {
+        showToast("Informe RE e CPF.", "error");
+        return;
+    }
+    const list = await getAllCollaborators();
+    const person = list?.find(p => p.re === re || p.re?.endsWith(re));
+    if (!person) {
+        showToast("Colaborador não encontrado na base.", "error");
+        return;
+    }
     const hash = btoa(re + ":" + cpf);
     if (SiteAuth.admins.some(a => a.hash === hash)) {
-        alert('Este admin já existe.');
+        showToast("Este admin já existe.", "info");
         return;
     }
-
-    SiteAuth.admins.push({ hash: hash, name: person.nome });
+    SiteAuth.admins.push({ hash, name: person.nome, re, role: 'admin' });
+    SiteAuth.admins = normalizeAdmins(SiteAuth.admins);
     saveAdmins();
     renderAdminList();
+    document.getElementById('cfg-admin-re').value = '';
+    document.getElementById('cfg-admin-cpf').value = '';
+    showToast("Administrador adicionado.", "success");
+}
+
+async function addSupervisorFromConfig() {
+    if (!(SiteAuth.logged && SiteAuth.role !== 'supervisor')) {
+        showToast("Apenas admins podem adicionar.", "error");
+        return;
+    }
+    const re = document.getElementById('cfg-supervisor-re')?.value.trim();
+    const cpf = document.getElementById('cfg-supervisor-cpf')?.value.trim();
+    if (!re || !cpf) {
+        showToast("Informe RE e CPF.", "error");
+        return;
+    }
+    const list = await getAllCollaborators();
+    const person = list?.find(p => p.re === re || p.re?.endsWith(re));
+    if (!person) {
+        showToast("Colaborador não encontrado na base.", "error");
+        return;
+    }
+    const hash = btoa(re + ":" + cpf);
+    if (SiteAuth.admins.some(a => a.hash === hash)) {
+        showToast("Este supervisor já existe.", "info");
+        return;
+    }
+    SiteAuth.admins.push({ hash, name: person.nome, re, role: 'supervisor' });
+    SiteAuth.admins = normalizeAdmins(SiteAuth.admins);
+    saveAdmins();
+    renderAdminList();
+    document.getElementById('cfg-supervisor-re').value = '';
+    document.getElementById('cfg-supervisor-cpf').value = '';
+    showToast("Supervisor adicionado.", "success");
 }
 
 function removeAdmin(hash) {
@@ -3804,6 +6278,53 @@ function removeAdmin(hash) {
     SiteAuth.admins = SiteAuth.admins.filter(a => a.hash !== hash);
     saveAdmins();
     renderAdminList();
+}
+
+function updateAdminResetOptions() {
+    const select = document.getElementById('cfg-reset-user');
+    if (!select) return;
+    const options = SiteAuth.admins.map(a => ({
+        hash: a.hash,
+        label: `${a.name} (${a.role === 'supervisor' ? 'Supervisor' : (a.master ? 'Master' : 'Admin')})`
+    }));
+    select.innerHTML = options.map(o => `<option value="${o.hash}">${o.label}</option>`).join('');
+}
+
+function changeOtherAdminPassword() {
+    if (!SiteAuth.logged || SiteAuth.re !== '7164') {
+        showToast("Apenas o Admin Master pode alterar senhas.", "error");
+        return;
+    }
+    const targetHash = document.getElementById('cfg-reset-user')?.value;
+    const newPass = document.getElementById('cfg-reset-pass')?.value.trim();
+    const confirmPass = document.getElementById('cfg-reset-pass-confirm')?.value.trim();
+    if (!targetHash || !newPass || newPass.length !== 4) {
+        showToast("Informe a senha com 4 dígitos.", "error");
+        return;
+    }
+    if (newPass !== confirmPass) {
+        showToast("A confirmação da senha não confere.", "error");
+        return;
+    }
+
+    const target = SiteAuth.admins.find(a => a.hash === targetHash);
+    if (!target) {
+        showToast("Usuário não encontrado.", "error");
+        return;
+    }
+    const decoded = decodeAdminHash(target.hash);
+    if (!decoded.re) {
+        showToast("Não foi possível identificar o RE.", "error");
+        return;
+    }
+
+    target.hash = btoa(`${decoded.re}:${newPass}`);
+    SiteAuth.admins = normalizeAdmins(SiteAuth.admins);
+    saveAdmins();
+    renderAdminList();
+    document.getElementById('cfg-reset-pass').value = '';
+    document.getElementById('cfg-reset-pass-confirm').value = '';
+    showToast(`Senha atualizada para ${target.name}.`, "success");
 }
 
 function updateMenuStatus() {
@@ -3821,9 +6342,13 @@ function updateMenuStatus() {
     }
 
     if (siteModeEl) {
-        siteModeEl.innerHTML = SiteAuth.mode === 'edit'
-            ? `<span class="status-badge-menu edit">EDIÇÃO</span>`
-            : `<span class="status-badge-menu view">VISUALIZAÇÃO</span>`;
+        if (SiteAuth.role === 'supervisor') {
+            siteModeEl.innerHTML = `<span class="status-badge-menu view">SUPERVISOR</span>`;
+        } else {
+            siteModeEl.innerHTML = SiteAuth.mode === 'edit'
+                ? `<span class="status-badge-menu edit">EDIÇÃO</span>`
+                : `<span class="status-badge-menu view">VISUALIZAÇÃO</span>`;
+        }
     }
     
     if (sourceStatusEl) {
@@ -3840,7 +6365,11 @@ function updateMenuStatus() {
     }
 
     if (adminToolsEl) {
-        adminToolsEl.classList.toggle('hidden', !(SiteAuth.logged && SiteAuth.mode === 'edit'));
+        adminToolsEl.classList.toggle('hidden', !(SiteAuth.logged && SiteAuth.mode === 'edit' && SiteAuth.role !== 'supervisor'));
+    }
+    const ftPane = document.getElementById('config-pane-ft');
+    if (ftPane && SiteAuth.logged && SiteAuth.mode === 'edit' && SiteAuth.role !== 'supervisor') {
+        renderFtReasonsConfig();
     }
     if (shadowActionsEl) {
         shadowActionsEl.classList.toggle('hidden', !(SiteAuth.logged && SiteAuth.mode === 'edit'));
@@ -3856,6 +6385,7 @@ function updateMenuStatus() {
 
     renderDataSourceList();
     updateShadowStatusUI();
+    updateAvisosUI();
 }
 
 // Toggle de Fonte de Dados (Apenas altera flags)
