@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gerenciamento de Efetivos - Grupo Dunamis</title>
+    <title>Gerenciamento de Efetivos v3.5 - Grupo Dunamis</title>
+    <link rel="icon" href="images/logo-dunamis-servicos.png">
     <link rel="stylesheet" href="main.css">
 </head>
 <body>
@@ -18,7 +19,7 @@
                     <path d="M9 21V14h6v7"></path>
                 </svg>
             </button>
-            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.4</span></h1>
+            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.5</span></h1>
             <button id="avisos-bell" class="avisos-bell hidden" onclick="toggleAvisosMini()" title="Avisos">
                 <span class="bell-icon" aria-hidden="true">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -29,9 +30,7 @@
                 <span class="bell-badge hidden" id="avisos-badge">0</span>
             </button>
             <span id="shadow-indicator" class="shadow-indicator hidden">Shadow offline</span>
-            <button class="theme-toggle-btn" onclick="toggleDarkMode()">
-                🌙 Modo Noturno
-            </button>
+            <button class="compact-toggle" onclick="toggleCompactMode()" title="Modo compacto" aria-label="Modo compacto">Compacto</button>
         </div>
     </header>
 
@@ -45,6 +44,7 @@
         <div id="content-area">
             <!-- Dashboard (Abas) será injetado aqui -->
         </div>
+        <div id="context-bar" class="context-bar hidden"></div>
     </main>
 
     <!-- Container de Notificações (Toast) -->

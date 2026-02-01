@@ -118,6 +118,31 @@ const CONFIG = {
         { value: 'evento', label: 'Evento' },
         { value: 'outro', label: 'Outro' }
     ],
+    reciclagem: {
+        baseCsvUrl: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQdzkgjwcAzHJV3q3RLQZJQxrldl3LRnOxCxoGFOX0Uq7tqHIYob4mliUz0z480jQ/pub?output=csv',
+        alertDays: 30,
+        sheets: {
+            ASO: { gid: '381955838', match: 're' },
+            REQUALIFICACAO: { gid: '2058979239', match: 're' },
+            NR10: { gid: '458793233', match: 're', biennial: true },
+            NR20: { gid: '1622267529', match: 're' },
+            NR33: { gid: '1868699624', match: 're' },
+            NR35: { gid: '1085356243', match: 're', biennial: true },
+            DEA: { gid: '297509705', match: 're' },
+            HELIPONTO: { gid: '1102031631', match: 're' },
+            UNIFORME: { gid: '641775675', match: 're' },
+            PCMSO: { gid: '993826591', match: 'unit' },
+            PGR: { gid: '401635898', match: 'unit', biennial: true }
+        },
+        renewalTemplates: [
+            { id: 'aso_mesat', label: 'ASO MESAT', text: 'Olá! Sua reciclagem ASO MESAT está próxima do vencimento. Vamos agendar a renovação?' },
+            { id: 'aso_medsetra', label: 'ASO MEDSETRA', text: 'Olá! Sua reciclagem ASO MEDSETRA está próxima do vencimento. Vamos agendar a renovação?' },
+            { id: 'aso_reembolso', label: 'ASO por conta própria (reembolsado)', text: 'Olá! Sua reciclagem ASO está próxima do vencimento. Você fará por conta própria com reembolso?' },
+            { id: 'recic_presencial', label: 'Reciclagem nacional presencial', text: 'Olá! Sua reciclagem nacional presencial está próxima do vencimento. Podemos agendar?' },
+            { id: 'recic_online', label: 'Reciclagem nacional online', text: 'Olá! Sua reciclagem nacional online está próxima do vencimento. Podemos agendar?' },
+            { id: 'recic_propria', label: 'Reciclagem por conta própria (menos de 1 ano)', text: 'Olá! Sua reciclagem está próxima do vencimento. Você fará por conta própria?' }
+        ]
+    },
     sheetUpdatedAt: '31/01/2026, 00:24:43'
 };
 

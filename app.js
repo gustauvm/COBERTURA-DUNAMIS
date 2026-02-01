@@ -15,6 +15,7 @@ let shadowReady = false;
 let shadowSyncTimer = null;
 let shadowAutoPullTimer = null;
 let shadowAutoPullBound = false;
+let shadowDirty = false;
 let shadowStatus = {
     available: false,
     lastPull: null,
@@ -34,6 +35,19 @@ let ftReasons = [];
 let lastFtCreatedId = null;
 let ftSyncTimer = null;
 let ftLastSyncAt = null;
+let searchFilterStatus = 'all'; // all | plantao | folga | ft | afastado
+let searchHideAbsence = false;
+let currentContext = null;
+let contextBound = false;
+let reciclagemData = {};
+let reciclagemLoadedAt = null;
+let reciclagemTemplates = [];
+let reciclagemTab = 'colab';
+let reciclagemOverrides = {};
+let reciclagemHistory = [];
+let reciclagemNotes = {};
+let reciclagemOnlyExpired = false;
+let reciclagemRenderCache = [];
 
 // ==========================================================================
 // 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
@@ -47,6 +61,235 @@ const SiteAuth = {
     role: 'viewer', // 'viewer' | 'admin' | 'supervisor' | 'master'
     admins: []
 };
+
+const ROLE_LABELS = {
+    master: 'Master',
+    admin: 'Admin',
+    supervisor: 'Supervisor',
+    viewer: 'Colaborador'
+};
+
+function isAdminRole() {
+    return SiteAuth.logged && (SiteAuth.role === 'admin' || SiteAuth.role === 'master');
+}
+
+function getUserGroupKey() {
+    if (!SiteAuth.re) return currentGroup || 'todos';
+    const byCurrent = currentData.find(c => c.re === SiteAuth.re || c.re?.endsWith(SiteAuth.re));
+    if (byCurrent?.grupo) return byCurrent.grupo;
+    const cached = (allCollaboratorsCache.items || []).find(c => c.re === SiteAuth.re || c.re?.endsWith(SiteAuth.re));
+    if (cached?.grupo) return cached.grupo;
+    return currentGroup || 'todos';
+}
+
+function getGroupOptionsHtml() {
+    if (isAdminRole()) {
+        return `
+            <option value="all">Todos os Grupos</option>
+            <option value="bombeiros">Bombeiros</option>
+            <option value="servicos">Serviços</option>
+            <option value="seguranca">Segurança</option>
+            <option value="rb">RB Facilities</option>
+        `;
+    }
+    const groupKey = getUserGroupKey();
+    if (!groupKey || groupKey === 'todos') return `<option value="all">Todos os Grupos</option>`;
+    return `<option value="${groupKey}">${groupKey.toUpperCase()}</option>`;
+}
+
+function updateBreadcrumb() {
+    const groupEl = document.getElementById('breadcrumb-group');
+    const tabEl = document.getElementById('breadcrumb-tab');
+    const updatedEl = document.getElementById('breadcrumb-updated');
+    const groupPillEl = document.getElementById('breadcrumb-group-pill');
+    if (!groupEl || !tabEl) return;
+    const groupLabelMap = {
+        todos: 'Todos os Grupos',
+        bombeiros: 'Bombeiros',
+        servicos: 'Serviços',
+        seguranca: 'Segurança',
+        rb: 'RB Facilities'
+    };
+    const tabLabelMap = {
+        busca: 'Busca Rápida',
+        unidades: 'Unidades',
+        avisos: 'Avisos',
+        lancamentos: 'Lançamentos',
+        config: 'Configuração'
+    };
+    const groupLabel = groupLabelMap[currentGroup] || (currentGroup ? currentGroup.toUpperCase() : 'Grupo');
+    const tabLabel = tabLabelMap[currentTab] || 'Seção';
+    groupEl.textContent = groupLabel;
+    tabEl.textContent = tabLabel;
+    if (groupPillEl) groupPillEl.textContent = `Grupo: ${groupLabel}`;
+    if (updatedEl) {
+        updatedEl.textContent = lastUpdatedAt
+            ? `Atualizado: ${lastUpdatedAt.toLocaleString()}`
+            : '';
+    }
+}
+
+function updateSearchFilterUI() {
+    document.querySelectorAll('.filter-chip[data-filter]').forEach(btn => {
+        const key = btn.getAttribute('data-filter');
+        const active = key === searchFilterStatus;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    const hideBtn = document.querySelector('.filter-chip[data-hide]');
+    if (hideBtn) {
+        hideBtn.classList.toggle('active', searchHideAbsence);
+        hideBtn.setAttribute('aria-pressed', searchHideAbsence ? 'true' : 'false');
+    }
+    const filterWrap = document.querySelector('.search-filters');
+    if (filterWrap) {
+        const hasActive = searchFilterStatus !== 'all' || searchHideAbsence;
+        filterWrap.classList.toggle('filters-active', hasActive);
+    }
+}
+
+function setSearchFilterStatus(status) {
+    searchFilterStatus = status;
+    updateSearchFilterUI();
+    realizarBusca();
+}
+
+function toggleSearchHideAbsence() {
+    searchHideAbsence = !searchHideAbsence;
+    updateSearchFilterUI();
+    realizarBusca();
+}
+
+function toggleConfigCard(btn) {
+    const card = btn?.closest('.config-card');
+    if (!card) return;
+    card.classList.toggle('collapsed');
+}
+
+function toggleCompactMode() {
+    const isOn = document.body.classList.toggle('compact-mode');
+    localStorage.setItem('compactMode', isOn ? '1' : '0');
+}
+
+function clearContextBar() {
+    currentContext = null;
+    renderContextBar();
+}
+
+function setContextUnit(unitName) {
+    if (!unitName) return;
+    currentContext = { type: 'unit', unitName };
+    renderContextBar();
+}
+
+function setContextCollab(re) {
+    if (!re) return;
+    currentContext = { type: 'collab', re };
+    renderContextBar();
+}
+
+function renderContextBar() {
+    const bar = document.getElementById('context-bar');
+    if (!bar) return;
+    if (!currentContext) {
+        bar.classList.add('hidden');
+        bar.innerHTML = '';
+        return;
+    }
+
+    if (currentContext.type === 'unit') {
+        const unitName = currentContext.unitName;
+        const unitJs = JSON.stringify(unitName);
+        const canEdit = SiteAuth.mode === 'edit';
+        bar.innerHTML = `
+            <div class="context-bar-inner">
+                <div class="context-title">Unidade: <strong>${unitName}</strong></div>
+                <div class="context-actions">
+                    <button class="context-action" onclick="openAvisosForUnit(${unitJs})">Avisos</button>
+                    <button class="context-action" onclick="exportUnitPrompt(${unitJs})">Exportar</button>
+                    <button class="context-action" onclick="openEditUnitModal(${unitJs})" ${canEdit ? '' : 'disabled'}>Editar</button>
+                </div>
+                <button class="context-close" onclick="clearContextBar()">Fechar</button>
+            </div>
+        `;
+        bar.classList.remove('hidden');
+        return;
+    }
+
+    if (currentContext.type === 'collab') {
+        const item = currentData.find(c => c.re === currentContext.re || c.re?.endsWith(currentContext.re))
+            || (allCollaboratorsCache.items || []).find(c => c.re === currentContext.re || c.re?.endsWith(currentContext.re));
+        if (!item) {
+            clearContextBar();
+            return;
+        }
+        const nameJs = JSON.stringify(item.nome || 'Colaborador');
+        const phoneJs = JSON.stringify(item.telefone || '');
+        const unitJs = JSON.stringify(item.posto || '');
+        const canEdit = SiteAuth.mode === 'edit';
+        bar.innerHTML = `
+            <div class="context-bar-inner">
+                <div class="context-title">Colaborador: <strong>${item.nome}</strong> (${item.re})</div>
+                <div class="context-actions">
+                    <button class="context-action" onclick="openPhoneModal(${nameJs}, ${phoneJs})">Contato</button>
+                    <button class="context-action" onclick="navigateToUnit(${unitJs})">Unidade</button>
+                    <button class="context-action" onclick="openEditModal(${item.id})" ${canEdit ? '' : 'disabled'}>Editar</button>
+                </div>
+                <button class="context-close" onclick="clearContextBar()">Fechar</button>
+            </div>
+        `;
+        bar.classList.remove('hidden');
+        return;
+    }
+}
+
+function bindContextSelection() {
+    if (contextBound) return;
+    contextBound = true;
+    document.addEventListener('click', (e) => {
+        if (e.target.closest('.context-bar')) return;
+        const unitTitle = e.target.closest('.unit-title');
+        if (unitTitle && !e.target.closest('.unit-actions')) {
+            const unitSection = unitTitle.closest('.unit-section');
+            const unitName = unitSection?.getAttribute('data-unit-name');
+            if (unitName) setContextUnit(unitName);
+            return;
+        }
+        const card = e.target.closest('.result-card');
+        if (card && !e.target.closest('button') && !e.target.closest('a') && !e.target.closest('select')) {
+            const re = card.getAttribute('data-collab-re');
+            if (re) setContextCollab(re);
+        }
+    });
+}
+
+function flashAvisoCard(id) {
+    const el = document.querySelector(`[data-aviso-id="${id}"]`);
+    if (!el) return;
+    el.classList.remove('pulse');
+    void el.offsetWidth;
+    el.classList.add('pulse');
+    setTimeout(() => el.classList.remove('pulse'), 1400);
+}
+
+function flashLancamentoCard(id) {
+    const el = document.querySelector(`[data-ft-id="${id}"]`);
+    if (!el) return;
+    el.classList.remove('pulse');
+    void el.offsetWidth;
+    el.classList.add('pulse');
+    setTimeout(() => el.classList.remove('pulse'), 1400);
+}
+
+function canViewAvisoItem(item) {
+    if (!SiteAuth.logged) return false;
+    if (isAdminRole()) return true;
+    return !!(item?.assignedToRe && SiteAuth.re && item.assignedToRe === SiteAuth.re);
+}
+
+function filterAvisosByVisibility(items) {
+    return (items || []).filter(canViewAvisoItem);
+}
 
 function loadLocalState() {
     try {
@@ -75,10 +318,10 @@ function loadAvisos() {
     }
 }
 
-function saveAvisos() {
+function saveAvisos(silent = false) {
     localStorage.setItem('avisos', JSON.stringify(avisos));
     localStorage.setItem('avisosSeen', JSON.stringify(Array.from(avisosSeenIds)));
-    scheduleShadowSync('avisos');
+    scheduleShadowSync('avisos', { silent, notify: !silent });
     updateAvisosUI();
 }
 
@@ -96,9 +339,9 @@ function loadFtLaunches() {
     });
 }
 
-function saveFtLaunches() {
+function saveFtLaunches(silent = false) {
     localStorage.setItem('ftLaunches', JSON.stringify(ftLaunches));
-    scheduleShadowSync('ft');
+    scheduleShadowSync('ft', { silent, notify: !silent });
     updateLancamentosUI();
 }
 
@@ -114,15 +357,16 @@ function loadFtReasons() {
     }
 }
 
-function saveFtReasons() {
+function saveFtReasons(silent = false) {
     localStorage.setItem('ftReasons', JSON.stringify(ftReasons));
+    scheduleShadowSync('ft-reasons', { silent, notify: !silent });
 }
 
-function saveLocalState() {
+function saveLocalState(silent = false) {
     localStorage.setItem('collaboratorEdits', JSON.stringify(collaboratorEdits));
     localStorage.setItem('unitMetadata', JSON.stringify(unitMetadata));
     localStorage.setItem('changeHistory', JSON.stringify(changeHistory));
-    scheduleShadowSync('local-save');
+    scheduleShadowSync('local-save', { silent, notify: !silent });
 }
 
 function clearLocalState() {
@@ -184,6 +428,13 @@ function buildShadowState() {
         localCollaborators: getLocalCollaborators(),
         avisos,
         ftLaunches,
+        ftReasons,
+        adminUsers: SiteAuth.admins,
+        reciclagemTemplates,
+        reciclagemOverrides,
+        reciclagemHistory,
+        reciclagemNotes,
+        unitGeoCache,
         updatedAt: new Date().toISOString()
     };
 }
@@ -193,6 +444,34 @@ function applyShadowState(state) {
     collaboratorEdits = state.collaboratorEdits || {};
     unitMetadata = state.unitMetadata || {};
     changeHistory = Array.isArray(state.changeHistory) ? state.changeHistory : [];
+    if (Array.isArray(state.ftReasons)) {
+        ftReasons = state.ftReasons;
+        saveFtReasons(true);
+    }
+    if (Array.isArray(state.adminUsers)) {
+        SiteAuth.admins = normalizeAdmins(state.adminUsers);
+        saveAdmins(true);
+    }
+    if (Array.isArray(state.reciclagemTemplates)) {
+        reciclagemTemplates = state.reciclagemTemplates;
+        saveReciclagemTemplates(true);
+    }
+    if (state.reciclagemOverrides && typeof state.reciclagemOverrides === 'object') {
+        reciclagemOverrides = state.reciclagemOverrides;
+        saveReciclagemOverrides(true);
+    }
+    if (Array.isArray(state.reciclagemHistory)) {
+        reciclagemHistory = state.reciclagemHistory;
+        saveReciclagemHistory(true);
+    }
+    if (state.reciclagemNotes && typeof state.reciclagemNotes === 'object') {
+        reciclagemNotes = state.reciclagemNotes;
+        saveReciclagemNotes(true);
+    }
+    if (state.unitGeoCache && typeof state.unitGeoCache === 'object') {
+        unitGeoCache = state.unitGeoCache;
+        localStorage.setItem('unitGeoCache', JSON.stringify(unitGeoCache));
+    }
     if (Array.isArray(state.avisos)) {
         mergeAvisosFromShadow(state.avisos);
     }
@@ -200,15 +479,16 @@ function applyShadowState(state) {
         mergeFtLaunchesFromShadow(state.ftLaunches);
     }
     if (Array.isArray(state.localCollaborators)) {
-        saveLocalCollaborators(state.localCollaborators);
+        saveLocalCollaborators(state.localCollaborators, true);
     }
-    saveLocalState();
+    saveLocalState(true);
     renderAuditList();
     updateAvisosUI();
 }
 
-function scheduleShadowSync(reason) {
+function scheduleShadowSync(reason, options = {}) {
     if (!shadowEnabled()) return;
+    if (!options.silent && options.notify !== false) shadowDirty = true;
     if (shadowSyncTimer) clearTimeout(shadowSyncTimer);
     shadowSyncTimer = setTimeout(() => {
         shadowPushAll(reason);
@@ -263,10 +543,11 @@ async function shadowPushAll(reason = '') {
         shadowStatus.error = null;
         updateShadowStatusUI();
         const now = Date.now();
-        if (now - lastShadowToastAt > 5000) {
-            showToast("Mudança salva no Shadow.", "success");
+        if (shadowDirty && now - lastShadowToastAt > 5000) {
+            showToast("Alteração salva.", "success");
             lastShadowToastAt = now;
         }
+        shadowDirty = false;
         return true;
     } catch {
         shadowStatus.pending = true;
@@ -469,8 +750,9 @@ function initAdmins() {
     saveAdmins();
 }
 
-function saveAdmins() {
+function saveAdmins(silent = false) {
     localStorage.setItem('adminUsers', JSON.stringify(SiteAuth.admins));
+    scheduleShadowSync('admin-users', { silent, notify: !silent });
 }
 
 function decodeAdminHash(hash) {
@@ -519,6 +801,7 @@ const ICONS = {
     crown: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7l4 4 4-6 4 6 4-4 4 5-2 8H4l-2-8z"></path><path d="M5 20h14"></path></svg>`,
     bell: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5"/><path d="M9.5 17a2.5 2.5 0 0 0 5 0"/></svg>`,
     launch: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H9"></path><path d="M6 12H4a2 2 0 0 0-2 2v5"></path><rect x="2" y="3" width="7" height="10" rx="1"></rect><path d="M5 7h2"></path><path d="M5 10h2"></path></svg>`,
+    recycle: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6v6h-6"></path><path d="M3 18v-6h6"></path><path d="M20 9a8 8 0 0 0-14.4-3.6L3 8"></path><path d="M4 15a8 8 0 0 0 14.4 3.6L21 16"></path></svg>`,
     whatsapp: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/></svg>`,
     phone: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`
 };
@@ -603,6 +886,11 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAvisos();
     loadFtLaunches();
     loadFtReasons();
+    loadReciclagemTemplates();
+    loadReciclagemOverrides();
+    loadReciclagemHistory();
+    loadReciclagemNotes();
+    loadReciclagemData(false);
     loadAuthFromStorage();
     loadUnitAddressDb();
     shadowPullState(false);
@@ -1259,13 +1547,26 @@ function findPhone(colabRE, colabName, phoneList) {
 
 // 4. Renderizar Dashboard (Sistema de Abas)
 function renderDashboard() {
+    const canManageLancamentos = isAdminRole();
     contentArea.innerHTML = `
+        <div class="breadcrumb-bar">
+            <div class="breadcrumb-main">
+                <span id="breadcrumb-group"></span>
+                <span class="breadcrumb-sep">›</span>
+                <span id="breadcrumb-tab"></span>
+            </div>
+            <div class="breadcrumb-meta">
+                <span id="breadcrumb-updated" class="breadcrumb-updated"></span>
+                <span id="breadcrumb-group-pill" class="group-pill"></span>
+            </div>
+        </div>
         <!-- Navegação de Abas -->
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('busca')">${ICONS.search} Busca Rápida</button>
             <button class="tab-btn" onclick="switchTab('unidades')">${ICONS.building} Unidades</button>
-            <button class="tab-btn" onclick="switchTab('avisos')">${ICONS.bell} Avisos <span id="avisos-tab-badge" class="tab-badge hidden">0</span></button>
-            ${(SiteAuth.logged && SiteAuth.role !== 'supervisor') ? `<button class="tab-btn" onclick="switchTab('lancamentos')">${ICONS.launch} Lançamentos</button>` : ''}
+            ${SiteAuth.logged ? `<button class="tab-btn" onclick="switchTab('avisos')">${ICONS.bell} Avisos <span id="avisos-tab-badge" class="tab-badge hidden">0</span></button>` : ''}
+            <button class="tab-btn" onclick="switchTab('reciclagem')">${ICONS.recycle} Reciclagem</button>
+            <button class="tab-btn" onclick="switchTab('lancamentos')">${ICONS.launch} Lançamentos</button>
             <button class="tab-btn" onclick="switchTab('config')">${ICONS.settings} Configuração</button>
         </div>
 
@@ -1278,7 +1579,14 @@ function renderDashboard() {
                            placeholder="Digite nome, RE ou unidade..." autocomplete="off">
                 </div>
                 <div id="search-suggestions" class="search-suggestions hidden"></div>
-                <div class="search-filters"></div>
+                <div class="search-filters">
+                    <button class="filter-chip active" data-filter="all" onclick="setSearchFilterStatus('all')">Todos</button>
+                    <button class="filter-chip" data-filter="plantao" onclick="setSearchFilterStatus('plantao')">Plantão</button>
+                    <button class="filter-chip" data-filter="folga" onclick="setSearchFilterStatus('folga')">Folga</button>
+                    <button class="filter-chip" data-filter="ft" onclick="setSearchFilterStatus('ft')">FT</button>
+                    <button class="filter-chip" data-filter="afastado" onclick="setSearchFilterStatus('afastado')">Afastados</button>
+                    <button class="filter-chip" data-hide="1" onclick="toggleSearchHideAbsence()">Sem afastamento</button>
+                </div>
             </div>
             <div id="search-results" class="results-grid"></div>
         </div>
@@ -1287,12 +1595,12 @@ function renderDashboard() {
             <!-- Barra de Estatísticas -->
             <div id="stats-bar" class="stats-bar"></div>
             <!-- Controles -->
-            <div class="unit-controls">
-                <div class="unit-search-container">
+            <div class="search-container">
+                <div class="search-bar">
                     <input type="text" id="unit-search-input" class="search-input" 
                         placeholder="🔍 Buscar unidade..." autocomplete="off">
                 </div>
-                <div class="unit-filters">
+                <div class="search-filters unit-filters">
                     ${currentGroup === 'todos' ? `
                         <select id="unit-group-filter" class="filter-select" onchange="renderizarUnidades()">
                             <option value="all">Todos os Grupos</option>
@@ -1317,10 +1625,10 @@ function renderDashboard() {
                         <option value="TROCA">Troca</option>
                         <option value="OUTRO">Outro</option>
                     </select>
-                    <button class="btn btn-secondary" style="width: auto; margin-bottom: 0;" onclick="openExportModal()">
+                    <button class="btn btn-secondary btn-small" onclick="openExportModal()">
                         ${ICONS.download} Exportar
                     </button>
-                    <button class="btn btn-secondary" style="width: auto; margin-bottom: 0;" onclick="openHistoryModal()">
+                    <button class="btn btn-secondary btn-small" onclick="openHistoryModal()">
                         ${ICONS.history} Histórico
                     </button>
                 </div>
@@ -1337,22 +1645,16 @@ function renderDashboard() {
                             <span id="avisos-assignee-summary" class="avisos-summary"></span>
                             <button class="btn btn-secondary btn-small" onclick="exportarAvisosMensal()">Relatório mensal</button>
                             <button class="btn btn-secondary btn-small" onclick="openLembreteForm()">Novo Lembrete</button>
-                            <button class="btn btn-small" onclick="openAvisoForm()">Novo Aviso</button>
+                            ${isAdminRole() ? `<button class="btn btn-small" onclick="openAvisoForm()">Novo Aviso</button>` : ''}
                         </div>
                     </div>
                     <div class="avisos-filters">
                         <select id="aviso-group-filter" class="filter-select" onchange="renderAvisos()">
-                            ${currentGroup === 'todos' ? `
-                                <option value="all">Todos os Grupos</option>
-                                <option value="bombeiros">Bombeiros</option>
-                                <option value="servicos">Serviços</option>
-                                <option value="seguranca">Segurança</option>
-                                <option value="rb">RB Facilities</option>
-                            ` : `<option value="${currentGroup}">${currentGroup.toUpperCase()}</option>`}
+                            ${getGroupOptionsHtml()}
                         </select>
                         <select id="aviso-status-filter" class="filter-select" onchange="renderAvisos()">
+                            <option value="all" selected>Todos</option>
                             <option value="pending">Pendentes</option>
-                            <option value="all">Todos</option>
                             <option value="done">Concluídos</option>
                         </select>
                         <select id="aviso-assignee-filter" class="filter-select" onchange="renderAvisos()"></select>
@@ -1377,27 +1679,34 @@ function renderDashboard() {
                         <select id="aviso-assignee-select"></select>
                     </div>
                     <div class="form-group">
+                        <label>Formato</label>
+                        <select id="aviso-type" onchange="updateAvisoType()">
+                            <option value="full" selected>Aviso completo</option>
+                            <option value="simple">Mensagem simples</option>
+                        </select>
+                    </div>
+                    <div class="form-group aviso-advanced">
                         <label>Grupo</label>
                         <select id="aviso-group-select"></select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group aviso-advanced">
                         <label>Tipo</label>
                         <select id="aviso-scope-select" onchange="updateAvisoScope()">
                             <option value="unit">Unidade</option>
                             <option value="collab">Colaborador</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group aviso-advanced">
                         <label>Unidade</label>
                         <select id="aviso-unit-select"></select>
                     </div>
-                    <div class="form-group hidden" id="aviso-collab-group">
+                    <div class="form-group hidden aviso-advanced" id="aviso-collab-group">
                         <label>Buscar colaborador (RE ou nome)</label>
                         <input type="text" id="aviso-collab-search" placeholder="Digite RE ou nome">
                         <label>Colaborador</label>
                         <select id="aviso-collab-select"></select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group aviso-advanced">
                         <label>Prioridade</label>
                         <select id="aviso-priority-select">
                             <option value="leve">Leve</option>
@@ -1490,15 +1799,74 @@ function renderDashboard() {
             </div>
         </div>
 
+        <div id="tab-content-reciclagem" class="tab-content hidden">
+            <div class="reciclagem-shell">
+                <div class="reciclagem-header">
+                    <h3>Reciclagem</h3>
+                    <div class="reciclagem-actions">
+                        <button class="btn btn-secondary btn-small" onclick="loadReciclagemData(true); renderReciclagem();">Atualizar</button>
+                        ${isAdminRole() ? `<button class="btn btn-secondary btn-small" onclick="toggleReciclagemTemplatesPanel()">Editar mensagens</button>` : ''}
+                        ${isAdminRole() ? `<button class="btn btn-secondary btn-small" onclick="toggleReciclagemHistory()">Histórico</button>` : ''}
+                    </div>
+                </div>
+                <div id="reciclagem-summary" class="reciclagem-summary"></div>
+                <div class="reciclagem-tabs">
+                    <button class="reciclagem-tab active" onclick="switchReciclagemTab('colab')">Colaboradores</button>
+                    <button class="reciclagem-tab" onclick="switchReciclagemTab('unit')">Unidades</button>
+                </div>
+                <div class="reciclagem-filters">
+                    <input type="text" id="reciclagem-search" class="search-input" placeholder="Buscar por nome, RE ou unidade...">
+                    <select id="reciclagem-sheet-filter" class="filter-select"></select>
+                    <select id="reciclagem-status-filter" class="filter-select">
+                        <option value="all">Todos os status</option>
+                        <option value="ok">Em dia</option>
+                        <option value="due">Próximo do vencimento</option>
+                        <option value="expired">Vencido</option>
+                        <option value="unknown">Sem data</option>
+                    </select>
+                    <button id="reciclagem-only-expired" class="btn btn-secondary btn-small" onclick="toggleReciclagemOnlyExpired()">Somente vencidos</button>
+                </div>
+                <div class="reciclagem-quick">
+                    <span>Rápidos:</span>
+                    <button class="filter-chip" data-status="expired" onclick="setReciclagemStatusFilter('expired')">Vencidos</button>
+                    <button class="filter-chip" data-status="due" onclick="setReciclagemStatusFilter('due')">Próximos</button>
+                    <button class="filter-chip" data-status="ok" onclick="setReciclagemStatusFilter('ok')">Em dia</button>
+                    <button class="filter-chip" data-status="all" onclick="setReciclagemStatusFilter('all')">Limpar</button>
+                </div>
+                <div id="reciclagem-templates-panel" class="reciclagem-templates hidden">
+                    <div class="reciclagem-templates-header">
+                        <strong>Mensagens de renovação</strong>
+                        <button class="btn-mini btn-secondary" onclick="toggleReciclagemTemplatesPanel()">Fechar</button>
+                    </div>
+                    <div id="reciclagem-templates-list" class="reciclagem-templates-list"></div>
+                    <div class="reciclagem-templates-form">
+                        <input type="text" id="reciclagem-template-id" placeholder="ID (ex: aso_mesat)">
+                        <input type="text" id="reciclagem-template-label" placeholder="Título">
+                        <textarea id="reciclagem-template-text" rows="3" placeholder="Mensagem"></textarea>
+                        <button class="btn btn-secondary btn-small" onclick="addReciclagemTemplate()">Adicionar modelo</button>
+                    </div>
+                </div>
+                <div id="reciclagem-history-panel" class="reciclagem-history hidden">
+                    <div class="reciclagem-templates-header">
+                        <strong>Histórico de alterações</strong>
+                        <button class="btn-mini btn-secondary" onclick="toggleReciclagemHistory()">Fechar</button>
+                    </div>
+                    <div id="reciclagem-history-list" class="reciclagem-templates-list"></div>
+                </div>
+                <div id="reciclagem-list" class="reciclagem-list"></div>
+                <div id="reciclagem-type-counts" class="reciclagem-type-counts"></div>
+            </div>
+        </div>
+
         <div id="tab-content-lancamentos" class="tab-content hidden">
             <div class="lancamentos-shell">
                 <div class="lancamentos-header">
                     <h3>Lançamentos de FT</h3>
                     <div class="lancamentos-actions">
-                        <button class="btn btn-secondary btn-small" onclick="syncFtFormResponses()">Sincronizar confirmações</button>
+                        <button class="btn btn-secondary btn-small" onclick="syncFtFormResponses()" ${canManageLancamentos ? '' : 'disabled'}>Sincronizar confirmações</button>
                         <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Dashboard</button>
                         <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico</button>
-                        <button class="btn btn-small" onclick="switchLancamentosTab('novo')">Novo Lançamento</button>
+                        <button class="btn btn-small" onclick="switchLancamentosTab('novo')" ${canManageLancamentos ? '' : 'disabled'}>Novo Lançamento</button>
                     </div>
                 </div>
                 <div id="lancamentos-panel-dashboard" class="lancamentos-panel hidden"></div>
@@ -1557,20 +1925,25 @@ function renderDashboard() {
             <div class="config-shell">
                 <div id="config-login" class="config-gate">
                     <div class="config-card">
-                        <div class="card-title">Acesso Administrativo</div>
-                        <div class="field-row">
-                            <label>RE (últimos 4)</label>
-                            <input type="text" id="loginRe" maxlength="4" inputmode="numeric" placeholder="0000">
+                        <div class="config-card-header">
+                            <div class="card-title">Acesso Administrativo</div>
+                            <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
                         </div>
-                        <div class="field-row">
-                            <label>CPF (primeiros 4)</label>
-                            <input type="password" id="loginCpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                        <div class="config-card-body">
+                            <div class="field-row">
+                                <label>RE (últimos 4)</label>
+                                <input type="text" id="loginRe" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <div class="field-row">
+                                <label>CPF (primeiros 4)</label>
+                                <input type="password" id="loginCpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <label style="font-size:0.8rem; color:#666; display:block; margin-bottom:10px;">
+                                <input type="checkbox" id="keepLogged"> Manter-me conectado neste dispositivo
+                            </label>
+                            <button class="btn" onclick="loginSite()">Entrar</button>
+                            <div class="hint">Somente administradores podem acessar as configurações.</div>
                         </div>
-                        <label style="font-size:0.8rem; color:#666; display:block; margin-bottom:10px;">
-                            <input type="checkbox" id="keepLogged"> Manter-me conectado neste dispositivo
-                        </label>
-                        <button class="btn" onclick="loginSite()">Entrar</button>
-                        <div class="hint">Somente administradores podem acessar as configurações.</div>
                     </div>
                 </div>
 
@@ -1583,137 +1956,172 @@ function renderDashboard() {
 
                     <div id="config-pane-access" class="config-pane">
                         <div class="config-card">
-                            <div class="card-title">Login</div>
-                            <div id="statusSection">
-                                <div class="status-block">
-                                    <div class="status-row"><span>Usuário</span><span id="userRe"></span></div>
-                                    <div class="status-row"><span>Modo</span><span id="siteMode"></span></div>
-                                </div>
-                                <div class="actions">
-                                    <button class="btn" onclick="toggleEditMode()">Alternar Modo Edição</button>
-                                    <button class="btn btn-secondary" onclick="logoutSite()">Sair</button>
+                            <div class="config-card-header">
+                                <div class="card-title">Login</div>
+                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                            </div>
+                            <div class="config-card-body">
+                                <div id="statusSection">
+                                    <div class="status-block">
+                                        <div class="status-row"><span>Usuário</span><span id="userRe"></span></div>
+                                        <div class="status-row"><span>Modo</span><span id="siteMode"></span></div>
+                                    </div>
+                                    <div class="actions">
+                                        <button class="btn" onclick="toggleEditMode()">Alternar Modo Edição</button>
+                                        <button class="btn btn-secondary" onclick="logoutSite()">Sair</button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
 
                     <div class="config-card hidden" id="adminTools">
-                        <div class="card-title">Admin</div>
-                        <div class="sub-title">Administradores</div>
-                        <div id="adminList" class="admin-list"></div>
+                        <div class="config-card-header">
+                            <div class="card-title">Admin</div>
+                            <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                        </div>
+                        <div class="config-card-body">
+                            <div class="sub-title">Administradores</div>
+                            <div id="adminList" class="admin-list"></div>
 
-                        <div class="divider"></div>
-                        <div class="sub-title">Adicionar administrador</div>
-                        <div class="field-row">
-                            <label>RE</label>
-                            <input type="text" id="cfg-admin-re" placeholder="0000">
-                        </div>
-                        <div class="field-row">
-                            <label>CPF (4 primeiros)</label>
-                            <input type="password" id="cfg-admin-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
-                        </div>
-                        <button class="btn" onclick="addAdminFromConfig()">Adicionar Admin</button>
+                            <div class="divider"></div>
+                            <div class="sub-title">Adicionar administrador</div>
+                            <div class="field-row">
+                                <label>RE</label>
+                                <input type="text" id="cfg-admin-re" placeholder="0000">
+                            </div>
+                            <div class="field-row">
+                                <label>CPF (4 primeiros)</label>
+                                <input type="password" id="cfg-admin-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <button class="btn" onclick="addAdminFromConfig()">Adicionar Admin</button>
 
-                        <div class="divider"></div>
-                        <div class="sub-title">Adicionar supervisor (somente avisos)</div>
-                        <div class="field-row">
-                            <label>RE</label>
-                            <input type="text" id="cfg-supervisor-re" placeholder="0000">
-                        </div>
-                        <div class="field-row">
-                            <label>CPF (4 primeiros)</label>
-                            <input type="password" id="cfg-supervisor-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
-                        </div>
-                        <button class="btn" onclick="addSupervisorFromConfig()">Adicionar Supervisor</button>
+                            <div class="divider"></div>
+                            <div class="sub-title">Adicionar supervisor (somente avisos)</div>
+                            <div class="field-row">
+                                <label>RE</label>
+                                <input type="text" id="cfg-supervisor-re" placeholder="0000">
+                            </div>
+                            <div class="field-row">
+                                <label>CPF (4 primeiros)</label>
+                                <input type="password" id="cfg-supervisor-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <button class="btn" onclick="addSupervisorFromConfig()">Adicionar Supervisor</button>
 
-                        <div class="divider"></div>
-                        <div class="sub-title">Alterar senha de outro usuário (Admin Master)</div>
-                        <div class="field-row">
-                            <label>Usuário</label>
-                            <select id="cfg-reset-user"></select>
-                        </div>
-                        <div class="field-row">
-                            <label>Nova senha (4 dígitos)</label>
-                            <input type="password" id="cfg-reset-pass" maxlength="4" inputmode="numeric" placeholder="0000">
-                        </div>
-                        <div class="field-row">
-                            <label>Confirmar nova senha</label>
-                            <input type="password" id="cfg-reset-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
-                        </div>
-                        <button class="btn" onclick="changeOtherAdminPassword()">Alterar Senha</button>
+                            <div class="divider"></div>
+                            <div class="sub-title">Alterar senha de outro usuário (Admin Master)</div>
+                            <div class="field-row">
+                                <label>Usuário</label>
+                                <select id="cfg-reset-user"></select>
+                            </div>
+                            <div class="field-row">
+                                <label>Nova senha (4 dígitos)</label>
+                                <input type="password" id="cfg-reset-pass" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <div class="field-row">
+                                <label>Confirmar nova senha</label>
+                                <input type="password" id="cfg-reset-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <button class="btn" onclick="changeOtherAdminPassword()">Alterar Senha</button>
 
-                        <div class="divider"></div>
-                        <div class="sub-title">Adicionar colaborador (local)</div>
-                        <div class="field-row">
-                            <label>RE</label>
-                            <input type="text" id="cfg-re" placeholder="0000">
-                        </div>
-                        <button class="btn" onclick="addLocalCollaboratorFromConfig()">Adicionar Colaborador</button>
-                        <div class="hint">Senha padrão do colaborador: 4 primeiros dígitos do CPF (sem pontuação).</div>
+                            <div class="divider"></div>
+                            <div class="sub-title">Adicionar colaborador (local)</div>
+                            <div class="field-row">
+                                <label>RE</label>
+                                <input type="text" id="cfg-re" placeholder="0000">
+                            </div>
+                            <button class="btn" onclick="addLocalCollaboratorFromConfig()">Adicionar Colaborador</button>
+                            <div class="hint">Senha padrão do colaborador: 4 primeiros dígitos do CPF (sem pontuação).</div>
 
-                        <div class="divider"></div>
+                            <div class="divider"></div>
 
-                        <div class="sub-title">Alterar senha (local)</div>
-                        <div class="field-row">
-                            <label>Nova senha (4 dígitos)</label>
-                            <input type="password" id="cfg-new-pass" maxlength="4" inputmode="numeric" placeholder="0000">
+                            <div class="sub-title">Alterar senha (local)</div>
+                            <div class="field-row">
+                                <label>Nova senha (4 dígitos)</label>
+                                <input type="password" id="cfg-new-pass" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <div class="field-row">
+                                <label>Confirmar nova senha</label>
+                                <input type="password" id="cfg-new-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
+                            </div>
+                            <button class="btn" onclick="changeLocalAdminPassword()">Alterar Senha</button>
+                            <div class="hint">Senha local é usada apenas no site.</div>
                         </div>
-                        <div class="field-row">
-                            <label>Confirmar nova senha</label>
-                            <input type="password" id="cfg-new-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
-                        </div>
-                        <button class="btn" onclick="changeLocalAdminPassword()">Alterar Senha</button>
-                        <div class="hint">Senha local é usada apenas no site.</div>
                     </div>
 
                 </div>
 
                     <div id="config-pane-datasource" class="config-pane hidden">
                         <div class="config-card">
-                            <div class="card-title">Modo de Banco de Dados</div>
-                            <div class="field-row">
-                                <label><input type="checkbox" id="useNextiToggle" onchange="toggleSource('nexti')"> Fonte principal: Nexti</label>
+                            <div class="config-card-header">
+                                <div class="card-title">Modo de Banco de Dados</div>
+                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
                             </div>
-                            <div class="field-row">
-                                <label><input type="checkbox" id="disableCsvToggle" onchange="toggleSource('csv')"> Fallback: usar Planilhas (CSV) se Nexti falhar</label>
+                            <div class="config-card-body">
+                                <div class="field-row">
+                                    <label><input type="checkbox" id="useNextiToggle" onchange="toggleSource('nexti')"> Fonte principal: Nexti</label>
+                                </div>
+                                <div class="field-row">
+                                    <label><input type="checkbox" id="disableCsvToggle" onchange="toggleSource('csv')"> Fallback: usar Planilhas (CSV) se Nexti falhar</label>
+                                </div>
                             </div>
                         </div>
 
                         <div class="config-card">
-                            <div class="card-title">Status das Fontes</div>
-                            <div id="sourceStatus" class="source-status"></div>
-                            <div id="dataSourceList" class="source-list"></div>
+                            <div class="config-card-header">
+                                <div class="card-title">Status das Fontes</div>
+                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                            </div>
+                            <div class="config-card-body">
+                                <div id="sourceStatus" class="source-status"></div>
+                                <div id="dataSourceList" class="source-list"></div>
+                            </div>
                         </div>
 
                         <div class="config-card">
-                            <div class="card-title">Sincronização (Shadow)</div>
-                            <div id="shadowStatus" class="shadow-status-block"></div>
-                            <div class="config-note">Manter alterações (padrão): carrega a base original e aplica as alterações do shadow por cima. Nada é apagado.</div>
-                            <div class="config-note">Importar base atual para o shadow: grava a base atual do site no banco shadow. Útil para criar um snapshot global. Pode sobrescrever versões anteriores.</div>
-                            <div class="config-note">Zerar banco shadow: apaga todas as alterações e histórico global. O site volta a usar apenas a base original.</div>
-                            <div class="config-note">Sincronizar histórico: força a regravação do histórico do site no banco shadow. Não altera a base original.</div>
-                            <div class="actions" id="shadowActions">
-                                <button class="btn" onclick="shadowPullAndReload()">Aplicar alterações do shadow agora</button>
-                                <button class="btn btn-secondary" onclick="shadowPushSnapshot()">Importar base atual para o shadow</button>
-                                <button class="btn btn-danger" onclick="shadowResetAll()">Resetar banco de dados (shadow)</button>
-                                <button class="btn btn-secondary" onclick="shadowPushHistory()">Sincronizar histórico</button>
+                            <div class="config-card-header">
+                                <div class="card-title">Sincronização (Shadow)</div>
+                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                            </div>
+                            <div class="config-card-body">
+                                <div id="shadowStatus" class="shadow-status-block"></div>
+                                <div class="config-note">Manter alterações (padrão): carrega a base original e aplica as alterações do shadow por cima. Nada é apagado.</div>
+                                <div class="config-note">Importar base atual para o shadow: grava a base atual do site no banco shadow. Útil para criar um snapshot global. Pode sobrescrever versões anteriores.</div>
+                                <div class="config-note">Zerar banco shadow: apaga todas as alterações e histórico global. O site volta a usar apenas a base original.</div>
+                                <div class="config-note">Sincronizar histórico: força a regravação do histórico do site no banco shadow. Não altera a base original.</div>
+                                <div class="actions" id="shadowActions">
+                                    <button class="btn" onclick="shadowPullAndReload()">Aplicar alterações do shadow agora</button>
+                                    <button class="btn btn-secondary" onclick="shadowPushSnapshot()">Importar base atual para o shadow</button>
+                                    <button class="btn btn-danger" onclick="shadowResetAll()">Resetar banco de dados (shadow)</button>
+                                    <button class="btn btn-secondary" onclick="shadowPushHistory()">Sincronizar histórico</button>
+                                </div>
                             </div>
                         </div>
                     </div>
 
                     <div id="config-pane-ft" class="config-pane hidden">
                         <div class="config-card">
-                            <div class="card-title">Configurações de FT</div>
-                            <div class="hint">Edite motivos e mantenha o padrão de lançamentos.</div>
+                            <div class="config-card-header">
+                                <div class="card-title">Configurações de FT</div>
+                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                            </div>
+                            <div class="config-card-body">
+                                <div class="hint">Edite motivos e mantenha o padrão de lançamentos.</div>
+                            </div>
                         </div>
                         <div class="config-card" id="ftReasonsCard">
-                            <div class="card-title">Motivos de FT</div>
-                            <div id="ftReasonsList" class="admin-list"></div>
-                            <div class="divider"></div>
-                            <div class="field-row">
-                                <label>Novo motivo</label>
-                                <input type="text" id="ft-reason-new" placeholder="Ex: Treinamento">
+                            <div class="config-card-header">
+                                <div class="card-title">Motivos de FT</div>
+                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
                             </div>
-                            <button class="btn btn-secondary" onclick="addFtReason()">Adicionar motivo</button>
+                            <div class="config-card-body">
+                                <div id="ftReasonsList" class="admin-list"></div>
+                                <div class="divider"></div>
+                                <div class="field-row">
+                                    <label>Novo motivo</label>
+                                    <input type="text" id="ft-reason-new" placeholder="Ex: Treinamento">
+                                </div>
+                                <button class="btn btn-secondary" onclick="addFtReason()">Adicionar motivo</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1991,6 +2399,55 @@ function renderDashboard() {
                 </div>
             </div>
         </div>
+
+        <!-- Modal Reciclagem -->
+        <div id="reciclagem-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header sticky-modal-header">
+                    <h3>${ICONS.edit} Editar Reciclagem</h3>
+                    <div class="modal-header-actions">
+                        <button class="btn btn-secondary btn-compact" onclick="closeReciclagemModal()">Fechar</button>
+                        <button class="btn btn-compact" onclick="saveReciclagemEdit()">Salvar</button>
+                    </div>
+                </div>
+                <input type="hidden" id="reciclagem-edit-key">
+                <input type="hidden" id="reciclagem-edit-target">
+                <div class="form-group">
+                    <label>Tipo</label>
+                    <input type="text" id="reciclagem-edit-type" disabled>
+                </div>
+                <div class="form-group">
+                    <label>Referência</label>
+                    <input type="text" id="reciclagem-edit-ref" disabled>
+                </div>
+                <div class="form-group">
+                    <label>Validade (dd/mm/aaaa)</label>
+                    <input type="text" id="reciclagem-edit-date" placeholder="Ex: 31/12/2026">
+                </div>
+                <div class="hint">Alteração local. Integração com planilha não configurada.</div>
+            </div>
+        </div>
+        <div id="reciclagem-note-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header sticky-modal-header">
+                    <h3>${ICONS.edit} Observação da Reciclagem</h3>
+                    <div class="modal-header-actions">
+                        <button class="btn btn-secondary btn-compact" onclick="closeReciclagemNoteModal()">Fechar</button>
+                        <button class="btn btn-compact" onclick="saveReciclagemNote()">Salvar</button>
+                    </div>
+                </div>
+                <input type="hidden" id="reciclagem-note-target">
+                <div class="form-group">
+                    <label>Colaborador</label>
+                    <input type="text" id="reciclagem-note-ref" disabled>
+                </div>
+                <div class="form-group">
+                    <label>Observação</label>
+                    <textarea id="reciclagem-note-text" rows="4" placeholder="Ex: Reciclagem já agendada para 10/02/2026. Aguardando realização."></textarea>
+                </div>
+                <div class="hint">Observação visível para todos.</div>
+            </div>
+        </div>
     `;
 
     if (SiteAuth.logged) {
@@ -2116,6 +2573,10 @@ function renderDashboard() {
 }
 
 function switchTab(tabName) {
+    if (tabName === 'avisos' && !SiteAuth.logged) {
+        showToast("Faça login para acessar os avisos.", "error");
+        return;
+    }
     currentTab = tabName;
     
     // Atualiza botões
@@ -2130,6 +2591,7 @@ function switchTab(tabName) {
     document.getElementById('tab-content-busca').classList.add('hidden');
     document.getElementById('tab-content-unidades').classList.add('hidden');
     document.getElementById('tab-content-avisos').classList.add('hidden');
+    document.getElementById('tab-content-reciclagem').classList.add('hidden');
     document.getElementById('tab-content-lancamentos')?.classList.add('hidden');
     document.getElementById('tab-content-config').classList.add('hidden');
     
@@ -2146,12 +2608,18 @@ function switchTab(tabName) {
     if (tabName === 'avisos') {
         renderAvisos();
     }
+    if (tabName === 'reciclagem') {
+        renderReciclagem();
+    }
     if (tabName === 'lancamentos') {
         renderLancamentos();
     } else if (ftSyncTimer) {
         clearInterval(ftSyncTimer);
         ftSyncTimer = null;
     }
+
+    clearContextBar();
+    updateBreadcrumb();
 }
 
 function switchConfigTab(tabName) {
@@ -2170,8 +2638,8 @@ function switchConfigTab(tabName) {
 // 5. Lógica da Busca Rápida
 function realizarBusca() {
     const termo = document.getElementById('search-input').value;
-    const filterStatus = 'all';
-    const hideAbsence = false;
+    const filterStatus = searchFilterStatus || 'all';
+    const hideAbsence = !!searchHideAbsence;
     const resultsContainer = document.getElementById('search-results');
     
     if (!termo && filterStatus === 'all') {
@@ -2209,7 +2677,11 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         resultados = resultados.filter(item => {
             const statusInfo = getStatusInfo(item);
             const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
-            return filterStatus === 'plantao' ? isPlantao : !isPlantao;
+            if (filterStatus === 'plantao') return isPlantao;
+            if (filterStatus === 'folga') return !isPlantao;
+            if (filterStatus === 'ft') return statusInfo.text.includes('FT');
+            if (filterStatus === 'afastado') return !!item.rotulo;
+            return true;
         });
     }
 
@@ -2227,6 +2699,14 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         const statusInfo = getStatusInfo(item);
         const turnoInfo = getTurnoInfo(item.escala);
         const retornoInfo = item.rotulo && item.rotuloFim ? `<span class="return-date">Retorno: ${formatDate(item.rotuloFim)}</span>` : '';
+        const ftRelation = getFtRelationInfo(item.re);
+        const ftRelationHtml = ftRelation
+            ? `<div class="ft-link ${ftRelation.type}"><strong>FT:</strong> ${ftRelation.type === 'covering' ? 'Cobrindo' : 'Coberto por'} ${ftRelation.label}${ftRelation.unit ? ` • ${ftRelation.unit}` : ''}</div>`
+            : '';
+        const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
+        const recIcon = recSummary
+            ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
+            : '';
         
         // Tratamento de Múltiplos Rótulos
         let rotulosHtml = '';
@@ -2248,11 +2728,14 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
         const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
 
+        const homenageado = isHomenageado(item);
+        const nomeDisplay = homenageado ? `${item.nome} ✨` : item.nome;
         return `
-            <div class="result-card ${bgClass}" style="border-left: 5px solid ${statusInfo.color}">
+            <div class="result-card ${bgClass} ${homenageado ? 'card-homenageado' : ''}" data-collab-re="${item.re}" style="border-left: 5px solid ${statusInfo.color}">
                 <div class="card-header">
                     <div class="header-left">
-                        <span class="colaborador-nome">${item.nome}</span>
+                        <span class="colaborador-nome ${homenageado ? 'homenageado-nome' : ''}">${nomeDisplay}</span>
+                        ${recIcon}
                         ${getPendingAvisosByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
                         ${getPendingRemindersByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                         <span class="status-badge" style="background-color: ${statusInfo.color}">${statusInfo.text}</span>
@@ -2273,6 +2756,7 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
                         <strong>Horário:</strong> ${item.escala || 'N/I'} 
                         ${turnoInfo ? `<div style="margin-top: 4px;">${turnoInfo}</div>` : ''}
                     </div>
+                    ${ftRelationHtml}
                 </div>
             </div>
         `;
@@ -2361,7 +2845,7 @@ function renderizarUnidades() {
             ? `<span class="unit-reminder-badge">${lembretesPendentes} lemb.</span>`
             : '';
         return `
-            <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}">
+            <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}" data-unit-name="${posto}">
                 <h3 class="unit-title">
                     <span>${posto} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${avisosBadge} ${lembretesBadge}</span>
                     <div class="unit-actions">
@@ -2434,7 +2918,1036 @@ function atualizarEstatisticas(dados, groupFilter) {
 
 
 function updateLastUpdatedDisplay() {
-    return;
+    updateBreadcrumb();
+}
+
+// ==========================================================================
+// 📌 RECICLAGEM
+// ==========================================================================
+
+function loadReciclagemTemplates() {
+    try {
+        const stored = localStorage.getItem('reciclagemTemplates');
+        reciclagemTemplates = stored ? JSON.parse(stored) || [] : [];
+    } catch {
+        reciclagemTemplates = [];
+    }
+    if (!reciclagemTemplates.length) {
+        reciclagemTemplates = CONFIG?.reciclagem?.renewalTemplates
+            ? JSON.parse(JSON.stringify(CONFIG.reciclagem.renewalTemplates))
+            : [];
+    }
+}
+
+function saveReciclagemTemplates(silent = false) {
+    localStorage.setItem('reciclagemTemplates', JSON.stringify(reciclagemTemplates));
+    scheduleShadowSync('reciclagem-templates', { silent, notify: !silent });
+}
+
+function loadReciclagemOverrides() {
+    try {
+        const stored = localStorage.getItem('reciclagemOverrides');
+        reciclagemOverrides = stored ? JSON.parse(stored) || {} : {};
+    } catch {
+        reciclagemOverrides = {};
+    }
+}
+
+function saveReciclagemOverrides(silent = false) {
+    localStorage.setItem('reciclagemOverrides', JSON.stringify(reciclagemOverrides));
+    scheduleShadowSync('reciclagem-overrides', { silent, notify: !silent });
+}
+
+function loadReciclagemHistory() {
+    try {
+        const stored = localStorage.getItem('reciclagemHistory');
+        reciclagemHistory = stored ? JSON.parse(stored) || [] : [];
+    } catch {
+        reciclagemHistory = [];
+    }
+}
+
+function saveReciclagemHistory(silent = false) {
+    localStorage.setItem('reciclagemHistory', JSON.stringify(reciclagemHistory));
+    scheduleShadowSync('reciclagem-history', { silent, notify: !silent });
+}
+
+function loadReciclagemNotes() {
+    try {
+        const stored = localStorage.getItem('reciclagemNotes');
+        reciclagemNotes = stored ? JSON.parse(stored) || {} : {};
+    } catch {
+        reciclagemNotes = {};
+    }
+}
+
+function saveReciclagemNotes(silent = false) {
+    localStorage.setItem('reciclagemNotes', JSON.stringify(reciclagemNotes));
+    scheduleShadowSync('reciclagem-notes', { silent, notify: !silent });
+}
+
+function buildReciclagemCsvUrl(sheetKey) {
+    const base = CONFIG?.reciclagem?.baseCsvUrl || '';
+    const sheet = CONFIG?.reciclagem?.sheets?.[sheetKey];
+    if (!sheet) return '';
+    if (sheet.csvUrl) return sheet.csvUrl;
+    if (!base) return '';
+    if (!sheet.gid) return base;
+    return `${base}${base.includes('?') ? '&' : '?'}gid=${sheet.gid}`;
+}
+
+function parseDateFlexible(value) {
+    if (!value) return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    if (raw.includes('/')) {
+        const parts = raw.split('/');
+        if (parts.length >= 3) {
+            const d = parseInt(parts[0], 10);
+            const m = parseInt(parts[1], 10);
+            const y = parseInt(parts[2], 10);
+            if (!isNaN(d) && !isNaN(m) && !isNaN(y)) {
+                if (m > 12 && d <= 12) return new Date(y, d - 1, m); // mm/dd/yyyy
+                if (d > 12 && m <= 12) return new Date(y, m - 1, d); // dd/mm/yyyy
+                return new Date(y, m - 1, d);
+            }
+        }
+    }
+    if (raw.includes('-')) {
+        const parts = raw.split('-');
+        if (parts.length >= 3) {
+            const y = parseInt(parts[0], 10);
+            const m = parseInt(parts[1], 10);
+            const d = parseInt(parts[2], 10);
+            if (!isNaN(d) && !isNaN(m) && !isNaN(y)) return new Date(y, m - 1, d);
+        }
+    }
+    const date = new Date(raw);
+    return isNaN(date.getTime()) ? null : date;
+}
+
+function addYears(date, years) {
+    const d = new Date(date.getTime());
+    d.setFullYear(d.getFullYear() + years);
+    return d;
+}
+
+function normalizeHeader(value) {
+    return String(value || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+}
+
+function findHeaderIndex(headers, terms) {
+    return headers.findIndex(h => terms.some(t => h.includes(t)));
+}
+
+function parseReciclagemCsv(csvText, sheetKey) {
+    if (!csvText) return [];
+    const rows = parseCSV(csvText);
+    if (!rows.length) return [];
+    let headerIndex = -1;
+    for (let i = 0; i < Math.min(rows.length, 5); i++) {
+        const joined = rows[i].map(h => normalizeHeader(h)).join(' ');
+        if (joined.includes('RE') && (joined.includes('COLABORADOR') || joined.includes('NOME') || joined.includes('MATRICULA'))) {
+            headerIndex = i;
+            break;
+        }
+    }
+    if (headerIndex === -1) headerIndex = 0;
+    const headers = rows[headerIndex].map(h => normalizeHeader(h));
+    const dataRows = rows.slice(headerIndex + 1);
+    const idxRe = findHeaderIndex(headers, ['RE', 'MATRICULA']);
+    const idxName = findHeaderIndex(headers, ['NOME', 'COLABORADOR', 'FUNCIONARIO']);
+    const idxUnit = findHeaderIndex(headers, ['UNIDADE', 'POSTO']);
+    const idxVenc = findHeaderIndex(headers, ['VENC', 'VALID', 'VALIDADE', 'TERMINO', 'FIM']);
+    const idxData = findHeaderIndex(headers, ['DATA', 'INICIO']);
+    const sheet = CONFIG?.reciclagem?.sheets?.[sheetKey];
+    const biennial = !!sheet?.biennial;
+
+    return dataRows.map(cols => {
+        const re = idxRe >= 0 ? String(cols[idxRe] || '').trim() : '';
+        const name = idxName >= 0 ? String(cols[idxName] || '').trim() : '';
+        const unit = idxUnit >= 0 ? String(cols[idxUnit] || '').trim() : '';
+        const vencRaw = idxVenc >= 0 ? String(cols[idxVenc] || '').trim() : '';
+        const dataRaw = idxData >= 0 ? String(cols[idxData] || '').trim() : '';
+        const vencDate = parseDateFlexible(vencRaw);
+        const dataDate = vencDate ? null : parseDateFlexible(dataRaw);
+        const baseDate = vencDate || dataDate;
+        const expiry = baseDate ? (vencDate ? baseDate : addYears(baseDate, biennial ? 2 : 1)) : null;
+        return {
+            re,
+            name,
+            unit,
+            dateRaw: vencRaw || dataRaw || '',
+            expiry,
+            expiryIso: expiry ? expiry.toISOString().slice(0, 10) : ''
+        };
+    }).filter(r => r.re || r.name || r.unit);
+}
+
+function normalizeReValueLoose(value) {
+    if (value == null) return '';
+    return String(value).replace(/[^a-zA-Z0-9]/g, '');
+}
+
+function findReciclagemEntry(entries, collabRe, collabName) {
+    const cleanRe = normalizeReValueLoose(collabRe || '');
+    const normName = (collabName || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+    const firstName = normName.split(' ')[0];
+
+    let match = entries.find(p => normalizeReValueLoose(p.re) === cleanRe);
+    if (!match && cleanRe.length >= 3) {
+        match = entries.find(p => {
+            const cleanP = normalizeReValueLoose(p.re);
+            if (!cleanP) return false;
+            const ok = cleanRe.endsWith(cleanP) || cleanP.endsWith(cleanRe) || cleanRe.includes(cleanP) || cleanP.includes(cleanRe);
+            if (!ok) return false;
+            const normPName = (p.name || '').normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+            const pFirstName = normPName.split(' ')[0];
+            return pFirstName && firstName && pFirstName === firstName;
+        });
+    }
+    return match || null;
+}
+
+function findReciclagemUnitEntry(entries, unitName) {
+    const target = normalizeUnitKey(unitName || '');
+    return entries.find(e => normalizeUnitKey(e.unit || '') === target) || null;
+}
+
+function getReciclagemOverride(sheetKey, targetKey) {
+    const bucket = reciclagemOverrides?.[sheetKey] || {};
+    return bucket[targetKey] || null;
+}
+
+function getReciclagemNote(targetKey) {
+    return reciclagemNotes?.[targetKey] || '';
+}
+
+function setReciclagemNote(targetKey, note) {
+    reciclagemNotes[targetKey] = note;
+    saveReciclagemNotes();
+}
+
+function setReciclagemOverride(sheetKey, targetKey, data) {
+    if (!reciclagemOverrides[sheetKey]) reciclagemOverrides[sheetKey] = {};
+    reciclagemOverrides[sheetKey][targetKey] = data;
+    saveReciclagemOverrides();
+}
+
+function calcReciclagemStatus(expiry) {
+    if (!expiry) return { status: 'unknown', days: null };
+    const today = new Date();
+    const diffMs = expiry.getTime() - today.getTime();
+    const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    if (days < 0) return { status: 'expired', days };
+    const alertDays = CONFIG?.reciclagem?.alertDays ?? 30;
+    if (days <= alertDays) return { status: 'due', days };
+    return { status: 'ok', days };
+}
+
+function getReciclagemSummaryForCollab(re, name) {
+    const sheets = CONFIG?.reciclagem?.sheets || {};
+    const keys = Object.keys(sheets).filter(k => sheets[k].match !== 'unit');
+    if (!reciclagemLoadedAt || !keys.length) {
+        return { status: 'unknown', title: 'Reciclagem: sem dados' };
+    }
+    let counts = { ok: 0, due: 0, expired: 0, unknown: 0 };
+    let hasAny = false;
+    const detailLines = [];
+    keys.forEach(key => {
+        const entries = reciclagemData[key]?.entries || [];
+        const entry = findReciclagemEntry(entries, re, name);
+        const override = getReciclagemOverride(key, re);
+        const expiry = entry?.expiry || (override?.expiry ? parseDateFlexible(override.expiry) : null);
+        if (!expiry && !entry) {
+            detailLines.push(`${getReciclagemSheetLabel(key)}: sem dados`);
+            return;
+        }
+        hasAny = true;
+        if (!expiry) {
+            counts.unknown += 1;
+            detailLines.push(`${getReciclagemSheetLabel(key)}: sem data`);
+            return;
+        }
+        const statusInfo = calcReciclagemStatus(expiry);
+        counts[statusInfo.status] = (counts[statusInfo.status] || 0) + 1;
+        const dateStr = formatDateOnly(expiry);
+        const statusLabel = statusInfo.status === 'expired'
+            ? 'vencido'
+            : (statusInfo.status === 'due' ? 'próximo' : 'em dia');
+        detailLines.push(`${getReciclagemSheetLabel(key)}: ${statusLabel} (${dateStr})`);
+    });
+
+    if (!hasAny) {
+        return { status: 'unknown', title: 'Reciclagem: sem dados' };
+    }
+    const parts = [];
+    if (counts.expired) parts.push(`${counts.expired} vencida(s)`);
+    if (counts.due) parts.push(`${counts.due} próxima(s)`);
+    if (counts.ok) parts.push(`${counts.ok} em dia`);
+    if (!parts.length && counts.unknown) parts.push(`sem data`);
+    const status = counts.expired ? 'expired' : (counts.due ? 'due' : (counts.ok ? 'ok' : 'unknown'));
+    return {
+        status,
+        title: detailLines.length
+            ? `Reciclagem:\n${detailLines.join('\n')}`
+            : `Reciclagem: ${parts.join(', ') || 'sem dados'}`
+    };
+}
+
+async function loadReciclagemData(force = false) {
+    if (!force && reciclagemLoadedAt) return;
+    const sheets = CONFIG?.reciclagem?.sheets || {};
+    const keys = Object.keys(sheets);
+    const results = {};
+    for (const key of keys) {
+        const url = buildReciclagemCsvUrl(key);
+        if (!url) {
+            results[key] = { entries: [], error: 'URL não configurada' };
+            continue;
+        }
+        const csv = await fetchSheetData(url);
+        if (!csv) {
+            results[key] = { entries: [], error: 'Falha ao carregar' };
+            continue;
+        }
+        results[key] = { entries: parseReciclagemCsv(csv, key), error: null };
+    }
+    reciclagemData = results;
+    reciclagemLoadedAt = new Date();
+}
+
+function getReciclagemSheetLabel(key) {
+    const map = {
+        ASO: 'ASO',
+        REQUALIFICACAO: 'RECICLAGEM',
+        NR10: 'NR 10',
+        NR20: 'NR 20',
+        NR33: 'NR 33',
+        NR35: 'NR 35',
+        DEA: 'DEA',
+        HELIPONTO: 'Heliponto',
+        UNIFORME: 'UNIFORME',
+        PCMSO: 'PCMSO',
+        PGR: 'PGR'
+    };
+    return map[key] || key;
+}
+
+function buildReciclagemMessage(templateId, item) {
+    const tmpl = reciclagemTemplates.find(t => t.id === templateId);
+    if (!tmpl) return '';
+    const dateStr = item?.expiry ? formatDateOnly(item.expiry) : (item?.expiryIso || '');
+    return tmpl.text
+        .replace(/{NOME}/g, item?.name || '')
+        .replace(/{RE}/g, item?.re || '')
+        .replace(/{TIPO}/g, item?.typeLabel || '')
+        .replace(/{VENCIMENTO}/g, dateStr || '');
+}
+
+function openReciclagemWhatsapp(templateId, item) {
+    const text = buildReciclagemMessage(templateId, item);
+    if (!text) {
+        showToast("Selecione um modelo de mensagem.", "error");
+        return;
+    }
+    const phone = item?.phone || '';
+    const url = buildWhatsUrl(phone, text);
+    window.open(url, '_blank');
+}
+
+function copyReciclagemMessage(templateId, item) {
+    const text = buildReciclagemMessage(templateId, item);
+    if (!text) {
+        showToast("Selecione um modelo de mensagem.", "error");
+        return;
+    }
+    copyTextToClipboard(text);
+}
+
+function getReciclagemSheetKeysForTab(tab) {
+    const sheets = CONFIG?.reciclagem?.sheets || {};
+    const keys = Object.keys(sheets);
+    if (tab === 'unit') return keys.filter(k => sheets[k].match === 'unit');
+    return keys.filter(k => sheets[k].match !== 'unit');
+}
+
+function applyReciclagemFilters(items, term) {
+    let list = items;
+    if (term) {
+        const up = term.toUpperCase();
+        list = list.filter(i => (i.name || '').toUpperCase().includes(up)
+            || (i.re || '').toUpperCase().includes(up)
+            || (i.unit || '').toUpperCase().includes(up));
+    }
+    return list;
+}
+
+function switchReciclagemTab(tab) {
+    reciclagemTab = tab;
+    document.querySelectorAll('.reciclagem-tab').forEach(btn => btn.classList.remove('active'));
+    document.querySelector(`.reciclagem-tab[onclick="switchReciclagemTab('${tab}')"]`)?.classList.add('active');
+    renderReciclagem();
+}
+
+function toggleReciclagemOnlyExpired() {
+    reciclagemOnlyExpired = !reciclagemOnlyExpired;
+    const btn = document.getElementById('reciclagem-only-expired');
+    if (btn) btn.classList.toggle('active', reciclagemOnlyExpired);
+    renderReciclagem();
+}
+
+function setReciclagemStatusFilter(value) {
+    const statusSelect = document.getElementById('reciclagem-status-filter');
+    if (!statusSelect) return;
+    statusSelect.value = value;
+    renderReciclagem();
+}
+
+function focusReciclagemUnit(unit) {
+    const searchInput = document.getElementById('reciclagem-search');
+    if (!searchInput) return;
+    searchInput.value = unit || '';
+    renderReciclagem();
+}
+
+function renderReciclagemSkeleton(list, count = 5) {
+    list.innerHTML = Array.from({ length: count }).map(() => `
+        <div class="reciclagem-card skeleton-card">
+            <div class="skeleton-line w-40"></div>
+            <div class="skeleton-line w-70"></div>
+            <div class="skeleton-line w-90"></div>
+            <div class="skeleton-line w-60"></div>
+        </div>
+    `).join('');
+}
+
+function bindReciclagemActions(list) {
+    if (!list || list.dataset.bound) return;
+    list.addEventListener('click', (event) => {
+        const btn = event.target.closest('.reciclagem-action');
+        if (!btn) return;
+        const idx = parseInt(btn.dataset.index, 10);
+        if (!Number.isFinite(idx)) return;
+        const item = reciclagemRenderCache[idx];
+        if (!item) return;
+        const select = document.getElementById(`reciclagem-template-${idx}`);
+        const templateId = select?.value || '';
+        if (btn.dataset.action === 'send') {
+            openReciclagemWhatsapp(templateId, item);
+        }
+        if (btn.dataset.action === 'copy') {
+            copyReciclagemMessage(templateId, item);
+        }
+    });
+    list.dataset.bound = '1';
+}
+
+function copyTextToClipboard(text) {
+    if (!text) return;
+    if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+            showToast("Mensagem copiada.", "success");
+        }).catch(() => {
+            fallbackCopy(text);
+        });
+        return;
+    }
+    fallbackCopy(text);
+}
+
+function fallbackCopy(text) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'absolute';
+    area.style.left = '-9999px';
+    document.body.appendChild(area);
+    area.select();
+    try {
+        document.execCommand('copy');
+        showToast("Mensagem copiada.", "success");
+    } catch {
+        showToast("Não foi possível copiar.", "error");
+    }
+    document.body.removeChild(area);
+}
+
+function getUniqueReciclagemCollabs(list) {
+    const map = new Map();
+    list.forEach(collab => {
+        const key = normalizeReValueLoose(collab.re) || (collab.nome || '').toUpperCase().trim();
+        if (!key) return;
+        if (!map.has(key)) {
+            map.set(key, { ...collab });
+            return;
+        }
+        const existing = map.get(key);
+        map.set(key, {
+            ...existing,
+            ...collab,
+            nome: existing.nome || collab.nome || '',
+            re: existing.re || collab.re || '',
+            telefone: existing.telefone || collab.telefone || '',
+            posto: existing.posto || collab.posto || ''
+        });
+    });
+    return Array.from(map.values());
+}
+
+function getPhoneForCollab(re) {
+    const direct = currentData.find(c => c.re === re);
+    if (direct?.telefone) return direct.telefone;
+    const all = allCollaboratorsCache?.items || [];
+    const found = all.find(c => c.re === re);
+    return found?.telefone || '';
+}
+
+function getCollabStatusFromDetails(details) {
+    if (!details || !details.length) return 'unknown';
+    if (details.some(d => d.status === 'expired')) return 'expired';
+    if (details.some(d => d.status === 'due')) return 'due';
+    if (details.some(d => d.status === 'ok')) return 'ok';
+    return 'unknown';
+}
+
+async function renderReciclagem() {
+    const list = document.getElementById('reciclagem-list');
+    if (!list) return;
+    const typeCountsEl = document.getElementById('reciclagem-type-counts');
+    if (typeCountsEl) typeCountsEl.innerHTML = '';
+    renderReciclagemSkeleton(list, 6);
+    bindReciclagemActions(list);
+    try {
+        await loadReciclagemData(false);
+    } catch (err) {
+        console.error('Erro ao carregar reciclagem:', err);
+        list.innerHTML = `<div class="empty-state">Erro ao carregar reciclagem.</div>`;
+        return;
+    }
+
+    let sheetSelect, statusSelect, searchInput, keys;
+    try {
+        sheetSelect = document.getElementById('reciclagem-sheet-filter');
+        statusSelect = document.getElementById('reciclagem-status-filter');
+        searchInput = document.getElementById('reciclagem-search');
+        keys = getReciclagemSheetKeysForTab(reciclagemTab);
+    } catch (err) {
+        console.error('Erro ao preparar filtros de reciclagem:', err);
+        list.innerHTML = `<div class="empty-state">Erro ao carregar reciclagem.</div>`;
+        return;
+    }
+    if (sheetSelect && !sheetSelect.dataset.ready) {
+        sheetSelect.addEventListener('change', renderReciclagem);
+        sheetSelect.dataset.ready = '1';
+    }
+    if (statusSelect && !statusSelect.dataset.ready) {
+        statusSelect.addEventListener('change', renderReciclagem);
+        statusSelect.dataset.ready = '1';
+    }
+    if (searchInput && !searchInput.dataset.ready) {
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchInput._timer);
+            searchInput._timer = setTimeout(renderReciclagem, 200);
+        });
+        searchInput.dataset.ready = '1';
+    }
+
+    if (sheetSelect) {
+        sheetSelect.innerHTML = `<option value="all">Todas as reciclagens</option>` +
+            keys.map(k => `<option value="${k}">${getReciclagemSheetLabel(k)}</option>`).join('');
+    }
+
+    const sheetFilter = sheetSelect?.value || 'all';
+    const statusFilter = statusSelect?.value || 'all';
+    const term = searchInput?.value.trim() || '';
+    const onlyExpiredBtn = document.getElementById('reciclagem-only-expired');
+    if (onlyExpiredBtn) onlyExpiredBtn.classList.toggle('active', reciclagemOnlyExpired);
+    document.querySelectorAll('.reciclagem-quick .filter-chip').forEach(chip => {
+        const isActive = chip.dataset.status === statusFilter;
+        chip.classList.toggle('active', isActive);
+    });
+
+    const items = [];
+    if (reciclagemTab === 'unit') {
+        const units = [...new Set(currentData.map(c => c.posto).filter(Boolean))].sort();
+        const sheetKeys = sheetFilter === 'all' ? keys : [sheetFilter];
+        units.forEach(unit => {
+            const detailItems = [];
+            sheetKeys.forEach(key => {
+                const entries = reciclagemData[key]?.entries || [];
+                const entry = findReciclagemUnitEntry(entries, unit);
+                const override = getReciclagemOverride(key, normalizeUnitKey(unit));
+                const expiry = override?.expiry ? parseDateFlexible(override.expiry) : (entry?.expiry || null);
+                if (!expiry && !entry) {
+                    detailItems.push({
+                        key,
+                        label: getReciclagemSheetLabel(key),
+                        status: 'unknown',
+                        expiry: null,
+                        dateLabel: 'Sem dados'
+                    });
+                    return;
+                }
+                if (!expiry) {
+                    detailItems.push({
+                        key,
+                        label: getReciclagemSheetLabel(key),
+                        status: 'unknown',
+                        expiry: null,
+                        dateLabel: 'sem data'
+                    });
+                    return;
+                }
+                const statusInfo = calcReciclagemStatus(expiry);
+                detailItems.push({
+                    key,
+                    label: getReciclagemSheetLabel(key),
+                    status: statusInfo.status,
+                    expiry,
+                    dateLabel: formatDateOnly(expiry)
+                });
+            });
+            items.push({
+                type: 'ALL',
+                typeLabel: 'Documentos',
+                unit,
+                status: 'mixed',
+                detailItems,
+                collabStatus: getCollabStatusFromDetails(detailItems),
+                match: 'unit'
+            });
+        });
+    } else {
+        const sheetKeys = sheetFilter === 'all' ? keys : [sheetFilter];
+        const uniqueCollabs = getUniqueReciclagemCollabs(currentData);
+        uniqueCollabs.forEach(collab => {
+            let counts = { ok: 0, due: 0, expired: 0, unknown: 0 };
+            let hasAny = false;
+            const detailItems = [];
+            sheetKeys.forEach(key => {
+                const entries = reciclagemData[key]?.entries || [];
+                const entry = findReciclagemEntry(entries, collab.re, collab.nome);
+                const override = getReciclagemOverride(key, collab.re);
+                const expiry = entry?.expiry || (override?.expiry ? parseDateFlexible(override.expiry) : null);
+                if (!expiry && !entry) {
+                    detailItems.push({
+                        key,
+                        label: getReciclagemSheetLabel(key),
+                        status: 'unknown',
+                        expiry: null,
+                        dateLabel: 'Sem dados'
+                    });
+                    return;
+                }
+                hasAny = true;
+                if (!expiry) {
+                    counts.unknown += 1;
+                    detailItems.push({
+                        key,
+                        label: getReciclagemSheetLabel(key),
+                        status: 'unknown',
+                        expiry: null,
+                        dateLabel: 'sem data'
+                    });
+                    return;
+                }
+                const statusInfo = calcReciclagemStatus(expiry);
+                counts[statusInfo.status] = (counts[statusInfo.status] || 0) + 1;
+                detailItems.push({
+                    key,
+                    label: getReciclagemSheetLabel(key),
+                    status: statusInfo.status,
+                    expiry,
+                    dateLabel: formatDateOnly(expiry)
+                });
+            });
+            if (!hasAny) {
+                items.push({
+                    type: 'ALL',
+                    typeLabel: 'Reciclagens',
+                    name: collab.nome,
+                    re: collab.re,
+                    phone: getPhoneForCollab(collab.re) || '',
+                    unit: collab.posto || '',
+                    status: 'unknown',
+                    days: null,
+                    expiry: null,
+                    expiryIso: '',
+                    summary: 'Sem dados',
+                    detailItems,
+                    collabStatus: 'unknown',
+                    match: 're'
+                });
+                return;
+            }
+            const parts = [];
+            const typeParts = [];
+            if (counts.expired) parts.push(`${counts.expired} vencida(s)`);
+            if (counts.due) parts.push(`${counts.due} próxima(s)`);
+            if (counts.ok) parts.push(`${counts.ok} em dia`);
+            if (!parts.length && counts.unknown) parts.push('sem data');
+            detailItems.forEach(item => {
+                const statusLabel = item.status === 'expired'
+                    ? 'vencido'
+                    : (item.status === 'due' ? 'próximo' : (item.status === 'ok' ? 'em dia' : 'sem data'));
+                typeParts.push(`${item.label}: ${statusLabel} (${item.dateLabel})`);
+            });
+            items.push({
+                type: 'ALL',
+                typeLabel: 'Reciclagens',
+                name: collab.nome,
+                re: collab.re,
+                phone: getPhoneForCollab(collab.re) || '',
+                unit: collab.posto || '',
+                status: 'mixed',
+                days: null,
+                expiry: null,
+                expiryIso: '',
+                summary: parts.join(', '),
+                summaryDetail: typeParts.join(' | '),
+                detailItems,
+                collabStatus: getCollabStatusFromDetails(detailItems),
+                match: 're'
+            });
+        });
+    }
+
+    const filtered = applyReciclagemFilters(items, term);
+    const filteredByDetail = filtered.filter(item => {
+        if (reciclagemTab !== 'colab') {
+            if (reciclagemOnlyExpired && item.status !== 'expired') return false;
+            if (statusFilter && statusFilter !== 'all' && item.status !== statusFilter) return false;
+            return true;
+        }
+        if (!item.detailItems || !item.detailItems.length) {
+            return !reciclagemOnlyExpired && (statusFilter === 'all' || statusFilter === 'unknown');
+        }
+        if (reciclagemOnlyExpired) {
+            return item.collabStatus === 'expired';
+        }
+        if (statusFilter && statusFilter !== 'all') {
+            return item.collabStatus === statusFilter;
+        }
+        return true;
+    });
+    const summaryEl = document.getElementById('reciclagem-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = '';
+        summaryEl.classList.add('hidden');
+    }
+    if (typeCountsEl) {
+        const typeCounts = {};
+        if (reciclagemTab === 'colab') {
+            filteredByDetail.forEach(item => {
+                (item.detailItems || []).forEach(d => {
+                    if (!typeCounts[d.label]) typeCounts[d.label] = { expired: 0, due: 0, ok: 0, unknown: 0 };
+                    typeCounts[d.label][d.status] = (typeCounts[d.label][d.status] || 0) + 1;
+                });
+            });
+        } else {
+            filteredByDetail.forEach(item => {
+                const label = item.typeLabel || item.type;
+                if (!typeCounts[label]) typeCounts[label] = { expired: 0, due: 0, ok: 0, unknown: 0 };
+                typeCounts[label][item.status] = (typeCounts[label][item.status] || 0) + 1;
+            });
+        }
+        const rows = Object.keys(typeCounts).map(label => {
+            const c = typeCounts[label];
+            return `<div class="reciclagem-type-chip">
+                <strong>${label}</strong>
+                <span class="expired">${c.expired || 0} vencidos</span>
+                <span class="due">${c.due || 0} próximos</span>
+                <span class="ok">${c.ok || 0} em dia</span>
+            </div>`;
+        }).join('');
+        typeCountsEl.innerHTML = rows ? `<div class="reciclagem-type-counts-inner">${rows}</div>` : '';
+    }
+    if (!filteredByDetail.length) {
+        list.innerHTML = `<p class="empty-state">Nenhum registro encontrado.</p>`;
+        reciclagemRenderCache = [];
+        return;
+    }
+
+    reciclagemRenderCache = filteredByDetail;
+    list.innerHTML = filteredByDetail.map((item, idx) => {
+        const statusLabel = {
+            ok: 'Em dia',
+            due: 'Próximo',
+            expired: 'Vencido',
+            unknown: 'Sem data',
+            mixed: 'Detalhado'
+        }[item.status] || 'N/I';
+        const dateLabel = item.expiry ? formatDateOnly(item.expiry) : 'N/I';
+        const canEdit = SiteAuth.mode === 'edit';
+        const actionKey = item.match === 'unit' ? normalizeUnitKey(item.unit) : item.re;
+        const selectId = `reciclagem-template-${idx}`;
+        const note = item.match === 're' ? getReciclagemNote(item.re) : '';
+        const templateSelect = item.match === 're'
+            ? `<select id="${selectId}" class="reciclagem-template">
+                    <option value="">Mensagem</option>
+                    ${reciclagemTemplates.map(t => `<option value="${t.id}">${t.label}</option>`).join('')}
+               </select>
+               <div class="reciclagem-action-buttons">
+                    <button class="btn-mini btn-secondary reciclagem-action" data-action="send" data-index="${idx}">Enviar</button>
+                    <button class="btn-mini btn-secondary reciclagem-action" data-action="copy" data-index="${idx}">Copiar</button>
+                    <button class="btn-mini btn-secondary obs-inline" title="${note ? note : 'Sem observação.'}" onclick="openReciclagemNoteModal('${item.re}', '${item.name}')">Obs</button>
+               </div>`
+            : '';
+        const canEditRec = item.match === 'unit' && canEdit && item.type !== 'ALL';
+        const badge = (item.match === 're' && (item.detailItems || []).some(d => d.status === 'expired'))
+            ? `<span class="reciclagem-badge" title="Vencido"></span>`
+            : '';
+        const detailLines = item.match === 're'
+            ? (item.detailItems || []).map(d => {
+                const statusLabel = d.status === 'expired'
+                    ? 'Vencido'
+                    : (d.status === 'due' ? 'Próximo' : (d.status === 'ok' ? 'Em dia' : 'Sem data'));
+                return `
+                    <div class="reciclagem-line status-${d.status}">
+                        <span class="reciclagem-line-label">${d.label}</span>
+                        <span class="reciclagem-line-date">${d.dateLabel}</span>
+                        <span class="reciclagem-line-status">${statusLabel}</span>
+                    </div>
+                `;
+            }).join('')
+            : '';
+        if (item.match === 'unit') {
+            const unitChips = (item.detailItems || []).map(d => {
+                return `
+                    <div class="reciclagem-chip status-${d.status}">
+                        <div class="chip-label">${d.label}</div>
+                        <div class="chip-date">${d.dateLabel}</div>
+                    </div>
+                `;
+            }).join('');
+            return `
+                <div class="reciclagem-card status-${item.status} compact thin">
+                    <div class="reciclagem-top">
+                        <div class="reciclagem-left">
+                            <div class="reciclagem-id">
+                                <div class="reciclagem-title">
+                                    <strong>${item.unit}</strong>
+                                </div>
+                                <div class="reciclagem-re">Documentação da unidade</div>
+                            </div>
+                        </div>
+                        <div class="reciclagem-right">
+                            <div class="reciclagem-chips">
+                                ${unitChips}
+                            </div>
+                            <div class="reciclagem-footer">
+                                <span>Aplicável a todos os grupos</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        const chips = (item.detailItems || []).map(d => {
+            const statusLabel = d.status === 'expired'
+                ? 'Vencido'
+                : (d.status === 'due' ? 'Próximo' : (d.status === 'ok' ? 'Em dia' : 'Sem data'));
+            return `
+                <div class="reciclagem-chip status-${d.status}">
+                    <div class="chip-label">${d.label}</div>
+                    <div class="chip-date">${d.dateLabel}</div>
+                </div>
+            `;
+        }).join('');
+        return `
+            <div class="reciclagem-card status-${item.status} compact thin">
+                <div class="reciclagem-top">
+                    <div class="reciclagem-left">
+                        <div class="reciclagem-id">
+                            <div class="reciclagem-title">
+                                <strong>${item.name}</strong>
+                            </div>
+                            <div class="reciclagem-re">RE ${item.re} ${badge}</div>
+                        </div>
+                        <div class="reciclagem-obs-text" title="${note ? note : 'Sem observação.'}">
+                            ${note ? note : 'Sem observação.'}
+                        </div>
+                        <div class="reciclagem-actions-row">
+                            ${templateSelect ? `<div class="reciclagem-actions compact">${templateSelect}</div>` : ''}
+                        </div>
+                    </div>
+                    <div class="reciclagem-right">
+                        <div class="reciclagem-chips">
+                            ${chips}
+                        </div>
+                        <div class="reciclagem-footer">
+                            <button class="reciclagem-unit-pill" onclick="focusReciclagemUnit('${item.unit || ''}')">Unidade: ${item.unit || 'N/I'}</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function openReciclagemModal(sheetKey, targetKey, matchType, label) {
+    if (!(SiteAuth.logged && SiteAuth.mode === 'edit')) {
+        showToast("Apenas admins podem editar.", "error");
+        return;
+    }
+    if (sheetKey === 'ALL') {
+        showToast("Selecione uma reciclagem específica para editar.", "info");
+        return;
+    }
+    document.getElementById('reciclagem-edit-key').value = sheetKey;
+    document.getElementById('reciclagem-edit-target').value = targetKey;
+    document.getElementById('reciclagem-edit-type').value = getReciclagemSheetLabel(sheetKey);
+    document.getElementById('reciclagem-edit-ref').value = `${label || ''}${matchType === 'unit' ? '' : ` (${targetKey})`}`;
+    const override = getReciclagemOverride(sheetKey, targetKey);
+    document.getElementById('reciclagem-edit-date').value = override?.expiry || '';
+    document.getElementById('reciclagem-modal')?.classList.remove('hidden');
+}
+
+function closeReciclagemModal() {
+    document.getElementById('reciclagem-modal')?.classList.add('hidden');
+}
+
+function openReciclagemNoteModal(targetKey, name) {
+    if (!(SiteAuth.logged && SiteAuth.mode === 'edit')) {
+        showToast("Apenas admins podem editar.", "error");
+        return;
+    }
+    document.getElementById('reciclagem-note-target').value = targetKey;
+    document.getElementById('reciclagem-note-ref').value = `${name || ''} (${targetKey})`;
+    document.getElementById('reciclagem-note-text').value = getReciclagemNote(targetKey) || '';
+    document.getElementById('reciclagem-note-modal')?.classList.remove('hidden');
+}
+
+function closeReciclagemNoteModal() {
+    document.getElementById('reciclagem-note-modal')?.classList.add('hidden');
+}
+
+function saveReciclagemNote() {
+    if (!(SiteAuth.logged && SiteAuth.mode === 'edit')) return;
+    const targetKey = document.getElementById('reciclagem-note-target').value;
+    const note = document.getElementById('reciclagem-note-text').value.trim();
+    setReciclagemNote(targetKey, note);
+    closeReciclagemNoteModal();
+    renderReciclagem();
+    showToast("Observação salva.", "success");
+}
+
+function saveReciclagemEdit() {
+    if (!(SiteAuth.logged && SiteAuth.mode === 'edit')) return;
+    const sheetKey = document.getElementById('reciclagem-edit-key').value;
+    const targetKey = document.getElementById('reciclagem-edit-target').value;
+    const dateStr = document.getElementById('reciclagem-edit-date').value.trim();
+    if (!dateStr) {
+        showToast("Informe a validade.", "error");
+        return;
+    }
+    const prev = getReciclagemOverride(sheetKey, targetKey)?.expiry || '';
+    setReciclagemOverride(sheetKey, targetKey, {
+        expiry: dateStr,
+        updatedBy: SiteAuth.user || 'Admin',
+        updatedAt: new Date().toISOString()
+    });
+    reciclagemHistory.unshift({
+        at: new Date().toISOString(),
+        by: SiteAuth.user || 'Admin',
+        sheet: sheetKey,
+        target: targetKey,
+        from: prev,
+        to: dateStr
+    });
+    saveReciclagemHistory();
+    closeReciclagemModal();
+    renderReciclagem();
+    showToast("Reciclagem atualizada (local).", "success");
+}
+
+function toggleReciclagemTemplatesPanel() {
+    if (!isAdminRole()) return;
+    const panel = document.getElementById('reciclagem-templates-panel');
+    if (!panel) return;
+    panel.classList.toggle('hidden');
+    renderReciclagemTemplatesPanel();
+}
+
+function toggleReciclagemHistory() {
+    if (!isAdminRole()) return;
+    const panel = document.getElementById('reciclagem-history-panel');
+    if (!panel) return;
+    panel.classList.toggle('hidden');
+    const list = document.getElementById('reciclagem-list');
+    if (list) list.classList.toggle('hidden', !panel.classList.contains('hidden'));
+    const counts = document.getElementById('reciclagem-type-counts');
+    if (counts) counts.classList.toggle('hidden', !panel.classList.contains('hidden'));
+    renderReciclagemHistory();
+}
+
+function renderReciclagemHistory() {
+    const list = document.getElementById('reciclagem-history-list');
+    if (!list) return;
+    if (!reciclagemHistory.length) {
+        list.innerHTML = `<div class="admin-empty">Nenhuma alteração registrada.</div>`;
+        return;
+    }
+    const rows = reciclagemHistory.slice(0, 40).map(h => `
+        <div class="reciclagem-template-row">
+            <div>
+                <strong>${getReciclagemSheetLabel(h.sheet)} • ${h.target}</strong>
+                <div class="hint">${formatAvisoDate(h.at)} — ${h.by}</div>
+                <div class="hint">De: ${h.from || 'N/I'} → Para: ${h.to}</div>
+            </div>
+        </div>
+    `).join('');
+    list.innerHTML = rows;
+}
+
+function renderReciclagemTemplatesPanel() {
+    const list = document.getElementById('reciclagem-templates-list');
+    if (!list) return;
+    if (!reciclagemTemplates.length) {
+        list.innerHTML = `<div class="admin-empty">Nenhum modelo cadastrado.</div>`;
+        return;
+    }
+    list.innerHTML = reciclagemTemplates.map((t, idx) => `
+        <div class="reciclagem-template-row">
+            <div>
+                <strong>${t.label}</strong>
+                <div class="hint">${t.text}</div>
+            </div>
+            <button class="btn-mini btn-secondary" onclick="removeReciclagemTemplate(${idx})">Excluir</button>
+        </div>
+    `).join('');
+}
+
+function addReciclagemTemplate() {
+    if (!isAdminRole()) return;
+    const id = document.getElementById('reciclagem-template-id')?.value.trim();
+    const label = document.getElementById('reciclagem-template-label')?.value.trim();
+    const text = document.getElementById('reciclagem-template-text')?.value.trim();
+    if (!id || !label || !text) {
+        showToast("Preencha ID, título e mensagem.", "error");
+        return;
+    }
+    if (reciclagemTemplates.some(t => t.id === id)) {
+        showToast("ID já existe.", "error");
+        return;
+    }
+    reciclagemTemplates.push({ id, label, text });
+    saveReciclagemTemplates();
+    document.getElementById('reciclagem-template-id').value = '';
+    document.getElementById('reciclagem-template-label').value = '';
+    document.getElementById('reciclagem-template-text').value = '';
+    renderReciclagemTemplatesPanel();
+    renderReciclagem();
+}
+
+function removeReciclagemTemplate(idx) {
+    if (!isAdminRole()) return;
+    if (!confirm('Remover modelo?')) return;
+    reciclagemTemplates.splice(idx, 1);
+    saveReciclagemTemplates();
+    renderReciclagemTemplatesPanel();
+    renderReciclagem();
 }
 
 function printCurrentView() {
@@ -2589,11 +4102,18 @@ function renderUnitTable(lista) {
                 </thead>
                 <tbody>
                     ${lista.map(p => {
+                        const homenageado = isHomenageado(p);
+                        const nomeDisplay = homenageado ? `${p.nome} ✨` : p.nome;
+                        const recSummary = getReciclagemSummaryForCollab(p.re, p.nome);
+                        const recIcon = recSummary
+                            ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
+                            : '';
                         return `
-                            <tr>
+                            <tr class="${homenageado ? 'homenageado-row' : ''}">
                                 <td>
                                     <div class="colab-cell">
-                                        <strong>${p.nome}</strong>
+                                        <strong class="${homenageado ? 'homenageado-nome' : ''}">${nomeDisplay}</strong>
+                                        ${recIcon}
                                         ${getPendingAvisosByCollaborator(p.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
                                         ${getPendingRemindersByCollaborator(p.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                                         ${p.rotulo ? `
@@ -2989,7 +4509,18 @@ function renderAiFallbackResponse(query, container, note) {
             <p>Dica: informe RE, nome ou unidade para respostas mais precisas.</p>
         </div>
     `;
+
+    updateSearchFilterUI();
+    updateBreadcrumb();
+    bindContextSelection();
+    renderContextBar();
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (localStorage.getItem('compactMode') === '1') {
+        document.body.classList.add('compact-mode');
+    }
+});
 
 function extractUnitName(text) {
     const patterns = [
@@ -3175,6 +4706,7 @@ async function getCoordsForAddress(address) {
         if (!Number.isFinite(coords.lat) || !Number.isFinite(coords.lon)) return null;
         unitGeoCache[address] = coords;
         localStorage.setItem('unitGeoCache', JSON.stringify(unitGeoCache));
+        scheduleShadowSync('unit-geo-cache', { silent: true });
         return coords;
     } catch {
         return null;
@@ -3271,6 +4803,10 @@ function applyAiFilters(list, filterStatus, hideAbsence) {
         filtered = filtered.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT'));
     } else if (filterStatus === 'folga') {
         filtered = filtered.filter(d => getStatusInfo(d).text.includes('FOLGA'));
+    } else if (filterStatus === 'ft') {
+        filtered = filtered.filter(d => getStatusInfo(d).text.includes('FT'));
+    } else if (filterStatus === 'afastado') {
+        filtered = filtered.filter(d => !!d.rotulo);
     }
     if (hideAbsence) {
         filtered = filtered.filter(d => !d.rotulo);
@@ -3294,10 +4830,51 @@ function buildAiReason(candidate, target) {
     return `Motivo: ${parts.join(' e ')}.`;
 }
 
+function isHomenageado(item) {
+    const re = String(item?.re || '').replace(/\\D/g, '');
+    if (re === '8204341') return true;
+    const nome = String(item?.nome || item?.name || '').toUpperCase();
+    return nome.includes('ADRIANO ANTUONO');
+}
+
+function getFtRelationInfo(re) {
+    if (!re) return null;
+    const active = ftLaunches.filter(item => item.status === 'submitted' || item.status === 'launched');
+    const covering = active.find(item => item.collabRe === re);
+    if (covering) {
+        const targetName = covering.coveringName ||
+            (covering.coveringOther && covering.coveringOther !== 'Não se aplica' ? covering.coveringOther : '') ||
+            (covering.coveringRe ? `RE ${covering.coveringRe}` : '');
+        return {
+            type: 'covering',
+            label: targetName || 'N/I',
+            unit: covering.unitTarget || covering.unitCurrent || ''
+        };
+    }
+    const covered = active.find(item => item.coveringRe === re);
+    if (covered) {
+        const covererName = covered.collabName || (covered.collabRe ? `RE ${covered.collabRe}` : '');
+        return {
+            type: 'covered',
+            label: covererName || 'N/I',
+            unit: covered.unitTarget || covered.unitCurrent || ''
+        };
+    }
+    return null;
+}
+
 function renderAiResultCard(item, target) {
     const statusInfo = getStatusInfo(item);
     const turnoInfo = getTurnoInfo(item.escala);
     const retornoInfo = item.rotulo && item.rotuloFim ? `<span class="return-date">Retorno: ${formatDate(item.rotuloFim)}</span>` : '';
+    const ftRelation = getFtRelationInfo(item.re);
+    const ftRelationHtml = ftRelation
+        ? `<div class="ft-link ${ftRelation.type}"><strong>FT:</strong> ${ftRelation.type === 'covering' ? 'Cobrindo' : 'Coberto por'} ${ftRelation.label}${ftRelation.unit ? ` • ${ftRelation.unit}` : ''}</div>`
+        : '';
+    const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
+    const recIcon = recSummary
+        ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
+        : '';
     let rotulosHtml = '';
     if (item.rotulo) {
         const rotulos = item.rotulo.split(',');
@@ -3315,11 +4892,14 @@ function renderAiResultCard(item, target) {
     const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
     const reason = buildAiReason(item, target);
 
+    const homenageado = isHomenageado(item);
+    const nomeDisplay = homenageado ? `${item.nome} ✨` : item.nome;
     return `
-        <div class="result-card ${bgClass}" style="border-left: 5px solid ${statusInfo.color}">
+        <div class="result-card ${bgClass} ${homenageado ? 'card-homenageado' : ''}" data-collab-re="${item.re}" style="border-left: 5px solid ${statusInfo.color}">
             <div class="card-header">
                 <div class="header-left">
-                    <span class="colaborador-nome">${item.nome}</span>
+                    <span class="colaborador-nome ${homenageado ? 'homenageado-nome' : ''}">${nomeDisplay}</span>
+                    ${recIcon}
                     ${getPendingAvisosByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
                     ${getPendingRemindersByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                     <span class="status-badge" style="background-color: ${statusInfo.color}">${statusInfo.text}</span>
@@ -3339,6 +4919,7 @@ function renderAiResultCard(item, target) {
                     <strong>Horário:</strong> ${item.escala || 'N/I'}
                     ${turnoInfo ? `<div style="margin-top: 4px;">${turnoInfo}</div>` : ''}
                 </div>
+                ${ftRelationHtml}
                 <div class="ai-reason">${reason}</div>
             </div>
         </div>
@@ -3759,15 +5340,6 @@ function adicionarColaboradorNaUnidade() {
     saveLocalState();
 }
 
-// ==========================================================================
-// 📌 MODO NOTURNO
-// ==========================================================================
-function toggleDarkMode() {
-    document.body.classList.toggle('dark-mode');
-    const isDark = document.body.classList.contains('dark-mode');
-    localStorage.setItem('darkMode', isDark);
-}
-
 function scrollToTop() {
     window.scrollTo({top: 0, behavior: 'smooth'});
 }
@@ -4080,6 +5652,10 @@ function undoLastChange() {
 // ==========================================================================
 
 function openAvisosTab() {
+    if (!SiteAuth.logged) {
+        showToast("Faça login para acessar os avisos.", "error");
+        return;
+    }
     if (!appContainer || appContainer.style.display === 'none') return;
     closeAvisosMini();
     switchTab('avisos');
@@ -4090,22 +5666,23 @@ function updateAvisosUI() {
     const badge = document.getElementById('avisos-badge');
     const tabBadge = document.getElementById('avisos-tab-badge');
     const pendingCount = getAvisosPendingCount(currentGroup);
+    const alertCount = getAvisosAlertCount(currentGroup);
 
     if (bell) {
-        bell.classList.toggle('hidden', !SiteAuth.logged && avisos.length === 0);
-        bell.classList.toggle('has-pending', pendingCount > 0);
+        bell.classList.toggle('hidden', !SiteAuth.logged);
+        bell.classList.toggle('has-pending', alertCount > 0);
     }
     if (badge) {
-        if (pendingCount > 0) {
-            badge.textContent = pendingCount;
+        if (alertCount > 0) {
+            badge.textContent = alertCount;
             badge.classList.remove('hidden');
         } else {
             badge.classList.add('hidden');
         }
     }
     if (tabBadge) {
-        if (pendingCount > 0) {
-            tabBadge.textContent = pendingCount;
+        if (alertCount > 0) {
+            tabBadge.textContent = alertCount;
             tabBadge.classList.remove('hidden');
         } else {
             tabBadge.classList.add('hidden');
@@ -4125,9 +5702,19 @@ function getAvisosPendingCount(groupKey) {
     return items.length;
 }
 
+function getAvisosAlertCount(groupKey) {
+    if (!SiteAuth.logged || !SiteAuth.re) return 0;
+    const items = getAvisosByGroup(groupKey)
+        .filter(a => a.status === 'pending' && a.assignedToRe === SiteAuth.re);
+    return items.length;
+}
+
 function getAvisosByGroup(groupKey) {
-    if (!groupKey || groupKey === 'todos' || groupKey === 'all') return avisos;
-    return avisos.filter(a => a.group === groupKey);
+    let base = avisos;
+    if (groupKey && groupKey !== 'todos' && groupKey !== 'all') {
+        base = base.filter(a => a.group === groupKey);
+    }
+    return filterAvisosByVisibility(base);
 }
 
 function getPendingAvisosByUnit(unitName, groupKey) {
@@ -4162,8 +5749,14 @@ function initAvisosFilters() {
     const unitFilter = document.getElementById('aviso-unit-filter');
     const groupFilter = document.getElementById('aviso-group-filter');
     const assigneeFilter = document.getElementById('aviso-assignee-filter');
-    if (groupFilter && currentGroup !== 'todos') {
-        groupFilter.value = currentGroup;
+    if (groupFilter) {
+        if (!isAdminRole()) {
+            const userGroup = getUserGroupKey();
+            if (userGroup && userGroup !== 'todos') groupFilter.value = userGroup;
+            groupFilter.disabled = true;
+        } else if (currentGroup !== 'todos') {
+            groupFilter.value = currentGroup;
+        }
     }
     if (unitFilter) {
         unitFilter.innerHTML = `<option value="all">Todas as Unidades</option>`;
@@ -4176,6 +5769,13 @@ function initAvisosFilters() {
 function updateAvisoAssigneeFilter() {
     const assigneeFilter = document.getElementById('aviso-assignee-filter');
     if (!assigneeFilter) return;
+    if (!isAdminRole() && SiteAuth.re) {
+        assigneeFilter.innerHTML = `<option value="${SiteAuth.re}">Somente meus</option>`;
+        assigneeFilter.value = SiteAuth.re;
+        assigneeFilter.disabled = true;
+        return;
+    }
+    assigneeFilter.disabled = false;
     assigneeFilter.innerHTML = `<option value="all">Todos os responsáveis</option>` +
         SiteAuth.admins.map(a => `<option value="${a.re}">${a.name}</option>`).join('');
 }
@@ -4191,10 +5791,58 @@ function refreshAvisoUnitFilterOptions() {
     unitFilter.innerHTML = `<option value="all">Todas as Unidades</option>` + units.map(u => `<option value="${u}">${u}</option>`).join('');
 }
 
+function renderAvisoCard(a) {
+    return `
+        <div class="aviso-card ${a.status === 'pending' ? 'pending' : 'done'} ${isAvisoOverdue(a) ? 'overdue' : ''}" data-aviso-id="${a.id}">
+            <div class="aviso-meta">
+                <span class="aviso-priority ${a.priority}">${a.priority.toUpperCase()}</span>
+                <span>${formatAvisoDate(a.createdAt)}</span>
+                <span>${a.group?.toUpperCase() || 'GERAL'}</span>
+            </div>
+            <div class="aviso-scope">
+                ${a.unit ? `<strong>Unidade:</strong> ${a.unit}` : ''}
+                ${a.collabName ? `<span> • <strong>Colaborador:</strong> ${a.collabName} (${a.collabRe})</span>` : ''}
+            </div>
+            <div class="aviso-flags">
+                ${a.simple ? `<span class="aviso-flag simple">Mensagem</span>` : ''}
+                ${a.collabRe ? `<span class="aviso-flag">Colaborador</span>` : ''}
+                ${a.reminderEnabled ? `<span class="aviso-flag reminder">Lembrete</span>` : ''}
+                ${a.assignedToName ? `<span class="aviso-flag assigned">Destinado: ${a.assignedToName}</span>` : ''}
+            </div>
+            <div class="aviso-title">${a.title || 'Aviso'}</div>
+            ${a.reminderEnabled && a.reminderNextAt ? `<div class="aviso-reminder-meta">Lembrete: ${formatAvisoDate(a.reminderNextAt)}</div>` : ''}
+            <div class="aviso-message">${a.message}</div>
+            <div class="aviso-footer">
+                <span>Por ${a.createdBy || 'Sistema'}</span>
+                <div class="aviso-actions">
+                    ${a.reminderEnabled ? `
+                        <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 30)">+30m</button>
+                        <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 120)">+2h</button>
+                        <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 1440)">+1d</button>
+                    ` : ''}
+                    <select class="aviso-status-select" onchange="setAvisoStatus('${a.id}', this.value)">
+                        <option value="pending" ${a.status === 'pending' ? 'selected' : ''}>Pendente</option>
+                        <option value="done" ${a.status === 'done' ? 'selected' : ''}>Concluído</option>
+                    </select>
+                </div>
+            </div>
+            <div class="aviso-timeline">
+                <span>Criado: ${formatAvisoDate(a.createdAt)}</span>
+                ${a.status === 'done' && a.doneAt ? `<span>• Concluído: ${formatAvisoDate(a.doneAt)} (${a.doneBy || 'Sistema'})</span>` : ''}
+            </div>
+        </div>
+    `;
+}
+
 function renderAvisos() {
     const list = document.getElementById('avisos-list');
     const summary = document.getElementById('avisos-assignee-summary');
     if (!list) return;
+    if (!SiteAuth.logged) {
+        list.innerHTML = `<p class="empty-state">Faça login para ver os avisos.</p>`;
+        if (summary) summary.textContent = '';
+        return;
+    }
     refreshAvisoUnitFilterOptions();
 
     const groupFilter = document.getElementById('aviso-group-filter')?.value || currentGroup || 'todos';
@@ -4219,42 +5867,27 @@ function renderAvisos() {
         return;
     }
 
-    list.innerHTML = items
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-        .map(a => `
-            <div class="aviso-card ${a.status === 'pending' ? 'pending' : 'done'} ${isAvisoOverdue(a) ? 'overdue' : ''}">
-                <div class="aviso-meta">
-                    <span class="aviso-priority ${a.priority}">${a.priority.toUpperCase()}</span>
-                    <span>${formatAvisoDate(a.createdAt)}</span>
-                    <span>${a.group?.toUpperCase() || 'GERAL'}</span>
-                </div>
-                <div class="aviso-title">${a.title || 'Aviso'}</div>
-                <div class="aviso-scope">
-                    ${a.unit ? `<strong>Unidade:</strong> ${a.unit}` : ''}
-                    ${a.collabName ? `<span> • <strong>Colaborador:</strong> ${a.collabName} (${a.collabRe})</span>` : ''}
-                </div>
-                <div class="aviso-flags">
-                    ${a.collabRe ? `<span class="aviso-flag">Colaborador</span>` : ''}
-                    ${a.reminderEnabled ? `<span class="aviso-flag reminder">Lembrete</span>` : ''}
-                    ${a.assignedToName ? `<span class="aviso-flag assigned">Destinado: ${a.assignedToName}</span>` : ''}
-                </div>
-                ${a.reminderEnabled && a.reminderNextAt ? `<div class="aviso-reminder-meta">Lembrete: ${formatAvisoDate(a.reminderNextAt)}</div>` : ''}
-                <div class="aviso-message">${a.message}</div>
-                <div class="aviso-footer">
-                    <span>Por ${a.createdBy || 'Sistema'}</span>
-                    <div class="aviso-actions">
-                        ${a.reminderEnabled ? `
-                            <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 30)">+30m</button>
-                            <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 120)">+2h</button>
-                            <button class="btn-mini btn-secondary" onclick="snoozeAviso('${a.id}', 1440)">+1d</button>
-                        ` : ''}
-                        <button class="btn-mini ${a.status === 'pending' ? 'btn-ok' : 'btn-secondary'}" onclick="toggleAvisoStatus('${a.id}')">
-                            ${a.status === 'pending' ? 'Dar baixa' : 'Reabrir'}
-                        </button>
-                    </div>
+    const sorted = items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    if (statusFilter === 'all') {
+        const pendingItems = sorted.filter(a => a.status === 'pending');
+        const doneItems = sorted.filter(a => a.status !== 'pending');
+        list.innerHTML = `
+            <div class="avisos-section">
+                <div class="avisos-section-title">Pendentes (${pendingItems.length})</div>
+                <div class="avisos-section-body">
+                    ${pendingItems.length ? pendingItems.map(renderAvisoCard).join('') : `<p class="empty-state">Nenhum aviso pendente.</p>`}
                 </div>
             </div>
-        `).join('');
+            <div class="avisos-section">
+                <div class="avisos-section-title">Concluídos (${doneItems.length})</div>
+                <div class="avisos-section-body">
+                    ${doneItems.length ? doneItems.map(renderAvisoCard).join('') : `<p class="empty-state">Nenhum aviso concluído.</p>`}
+                </div>
+            </div>
+        `;
+        return;
+    }
+    list.innerHTML = sorted.map(renderAvisoCard).join('');
 }
 
 function isAvisoOverdue(aviso) {
@@ -4278,7 +5911,19 @@ function formatAvisoDate(value) {
     }
 }
 
+function formatDateOnly(value) {
+    try {
+        return new Date(value).toLocaleDateString();
+    } catch {
+        return value || '';
+    }
+}
+
 function openAvisoForm() {
+    if (!isAdminRole()) {
+        showToast("Apenas admins podem criar avisos.", "error");
+        return;
+    }
     const form = document.getElementById('aviso-form');
     if (!form) return;
     form.classList.remove('hidden');
@@ -4293,6 +5938,10 @@ function closeAvisoForm() {
 }
 
 function openLembreteForm() {
+    if (!SiteAuth.logged) {
+        showToast("Faça login para criar lembretes.", "error");
+        return;
+    }
     const form = document.getElementById('lembrete-form');
     if (!form) return;
     form.classList.remove('hidden');
@@ -4314,7 +5963,7 @@ function hydrateAvisoForm() {
     const assigneeSelect = document.getElementById('aviso-assignee-select');
 
     if (groupSelect) {
-        if (currentGroup === 'todos') {
+        if (isAdminRole()) {
             groupSelect.innerHTML = `
                 <option value="bombeiros">Bombeiros</option>
                 <option value="servicos">Serviços</option>
@@ -4322,8 +5971,10 @@ function hydrateAvisoForm() {
                 <option value="rb">RB Facilities</option>
             `;
         } else {
-            groupSelect.innerHTML = `<option value="${currentGroup}">${currentGroup.toUpperCase()}</option>`;
+            const userGroup = getUserGroupKey();
+            groupSelect.innerHTML = `<option value="${userGroup}">${userGroup.toUpperCase()}</option>`;
         }
+        groupSelect.disabled = !isAdminRole();
     }
 
     const groupValue = groupSelect?.value || currentGroup;
@@ -4342,7 +5993,9 @@ function hydrateAvisoForm() {
             <option value="${a.re}">${a.name} (${a.role === 'supervisor' ? 'Supervisor' : 'Admin'})</option>
         `).join('');
         if (SiteAuth.re) assigneeSelect.value = SiteAuth.re;
+        assigneeSelect.disabled = !isAdminRole();
     }
+    updateAvisoType();
 }
 
 function updateAvisoScope() {
@@ -4353,12 +6006,31 @@ function updateAvisoScope() {
     if (scope === 'collab') syncAvisoUnitWithCollab();
 }
 
+function updateAvisoType() {
+    const type = document.getElementById('aviso-type')?.value || 'full';
+    const advancedBlocks = document.querySelectorAll('.aviso-advanced');
+    advancedBlocks.forEach(el => {
+        if (type === 'simple') {
+            el.classList.add('hidden');
+        } else if (el.id !== 'aviso-collab-group') {
+            el.classList.remove('hidden');
+        }
+    });
+    if (type === 'simple') {
+        const scope = document.getElementById('aviso-scope-select');
+        if (scope) scope.value = 'unit';
+    }
+    if (type !== 'simple') updateAvisoScope();
+}
+
 function updateAvisoAssignees() {
     const select = document.getElementById('aviso-assignee-select');
     if (!select) return;
     select.innerHTML = SiteAuth.admins.map(a => `
         <option value="${a.re}">${a.name} (${a.role === 'supervisor' ? 'Supervisor' : 'Admin'})</option>
     `).join('');
+    if (SiteAuth.re) select.value = SiteAuth.re;
+    select.disabled = !isAdminRole();
 }
 
 function hydrateLembreteForm() {
@@ -4368,7 +6040,7 @@ function hydrateLembreteForm() {
     const assigneeSelect = document.getElementById('reminder-assignee-select');
 
     if (groupSelect) {
-        if (currentGroup === 'todos') {
+        if (isAdminRole()) {
             groupSelect.innerHTML = `
                 <option value="bombeiros">Bombeiros</option>
                 <option value="servicos">Serviços</option>
@@ -4376,8 +6048,10 @@ function hydrateLembreteForm() {
                 <option value="rb">RB Facilities</option>
             `;
         } else {
-            groupSelect.innerHTML = `<option value="${currentGroup}">${currentGroup.toUpperCase()}</option>`;
+            const userGroup = getUserGroupKey();
+            groupSelect.innerHTML = `<option value="${userGroup}">${userGroup.toUpperCase()}</option>`;
         }
+        groupSelect.disabled = !isAdminRole();
     }
 
     const groupValue = groupSelect?.value || currentGroup;
@@ -4396,6 +6070,7 @@ function hydrateLembreteForm() {
             <option value="${a.re}">${a.name} (${a.role === 'supervisor' ? 'Supervisor' : 'Admin'})</option>
         `).join('');
         if (SiteAuth.re) assigneeSelect.value = SiteAuth.re;
+        assigneeSelect.disabled = !isAdminRole();
     }
 }
 
@@ -4474,14 +6149,29 @@ function createAviso() {
         showToast("Faça login para criar avisos.", "error");
         return;
     }
+    if (!isAdminRole()) {
+        showToast("Apenas admins podem criar avisos.", "error");
+        return;
+    }
+    const avisoType = document.getElementById('aviso-type')?.value || 'full';
     const assigneeRe = document.getElementById('aviso-assignee-select')?.value || '';
     const assignee = SiteAuth.admins.find(a => a.re === assigneeRe);
-    const group = document.getElementById('aviso-group-select')?.value || currentGroup;
-    const scope = document.getElementById('aviso-scope-select')?.value || 'unit';
-    const unit = document.getElementById('aviso-unit-select')?.value || '';
-    const collabRe = document.getElementById('aviso-collab-select')?.value || '';
+    const group = avisoType === 'simple'
+        ? (currentGroup || 'todos')
+        : (document.getElementById('aviso-group-select')?.value || currentGroup);
+    const scope = avisoType === 'simple'
+        ? 'unit'
+        : (document.getElementById('aviso-scope-select')?.value || 'unit');
+    const unit = avisoType === 'simple'
+        ? ''
+        : (document.getElementById('aviso-unit-select')?.value || '');
+    const collabRe = avisoType === 'simple'
+        ? ''
+        : (document.getElementById('aviso-collab-select')?.value || '');
     const collab = currentData.find(c => c.re === collabRe);
-    const priority = document.getElementById('aviso-priority-select')?.value || 'normal';
+    const priority = avisoType === 'simple'
+        ? 'normal'
+        : (document.getElementById('aviso-priority-select')?.value || 'normal');
     const title = document.getElementById('aviso-title')?.value.trim();
     const message = document.getElementById('aviso-message')?.value.trim();
     const reminderEnabled = false;
@@ -4505,6 +6195,7 @@ function createAviso() {
         priority,
         title,
         message,
+        simple: avisoType === 'simple',
         status: 'pending',
         createdAt: new Date().toISOString(),
         createdBy: SiteAuth.user || 'Sistema',
@@ -4518,6 +6209,7 @@ function createAviso() {
     avisosSeenIds.add(item.id);
     saveAvisos();
     renderAvisos();
+    flashAvisoCard(item.id);
     closeAvisoForm();
     showToast("Aviso registrado.", "success");
     playAvisoSound(priority);
@@ -4528,7 +6220,12 @@ function createReminder() {
         showToast("Faça login para criar lembretes.", "error");
         return;
     }
-    const assigneeRe = document.getElementById('reminder-assignee-select')?.value || '';
+    const assigneeReRaw = document.getElementById('reminder-assignee-select')?.value || '';
+    const assigneeRe = isAdminRole() ? assigneeReRaw : (SiteAuth.re || assigneeReRaw);
+    if (!assigneeRe) {
+        showToast("Selecione um responsável.", "error");
+        return;
+    }
     const assignee = SiteAuth.admins.find(a => a.re === assigneeRe);
     const group = document.getElementById('reminder-group-select')?.value || currentGroup;
     const scope = document.getElementById('reminder-scope-select')?.value || 'unit';
@@ -4579,6 +6276,7 @@ function createReminder() {
     avisosSeenIds.add(item.id);
     saveAvisos();
     renderAvisos();
+    flashAvisoCard(item.id);
     closeLembreteForm();
     showToast("Lembrete registrado.", "success");
     playAvisoSound(priority);
@@ -4587,7 +6285,14 @@ function createReminder() {
 function toggleAvisoStatus(id) {
     const item = avisos.find(a => a.id === id);
     if (!item) return;
-    item.status = item.status === 'pending' ? 'done' : 'pending';
+    const next = item.status === 'pending' ? 'done' : 'pending';
+    setAvisoStatus(id, next);
+}
+
+function setAvisoStatus(id, status) {
+    const item = avisos.find(a => a.id === id);
+    if (!item) return;
+    item.status = status === 'done' ? 'done' : 'pending';
     item.doneAt = item.status === 'done' ? new Date().toISOString() : null;
     item.doneBy = item.status === 'done' ? (SiteAuth.user || 'Admin') : null;
     if (item.status === 'done') {
@@ -4595,6 +6300,7 @@ function toggleAvisoStatus(id) {
     }
     saveAvisos();
     renderAvisos();
+    flashAvisoCard(item.id);
 }
 
 function snoozeAviso(id, minutes) {
@@ -4647,8 +6353,16 @@ function closeAvisosMini() {
 function renderAvisosMini() {
     const list = document.getElementById('avisos-mini-list');
     if (!list) return;
+    if (!SiteAuth.logged) {
+        list.innerHTML = `<div class="avisos-mini-empty">Faça login para ver avisos.</div>`;
+        return;
+    }
     const groupKey = currentGroup || 'todos';
-    const items = getAvisosByGroup(groupKey).filter(a => a.status === 'pending')
+    let items = getAvisosByGroup(groupKey).filter(a => a.status === 'pending');
+    if (SiteAuth.re) {
+        items = items.filter(a => a.assignedToRe === SiteAuth.re);
+    }
+    items = items
         .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
         .slice(0, 5);
     if (!items.length) {
@@ -4717,7 +6431,7 @@ function mergeAvisosFromShadow(remoteAvisos) {
         avisosSeenIds.add(a.id);
         playAvisoSound(a.priority);
     });
-    saveAvisos();
+    saveAvisos(true);
 }
 
 function mergeFtLaunchesFromShadow(remoteLaunches) {
@@ -4734,7 +6448,7 @@ function mergeFtLaunchesFromShadow(remoteLaunches) {
         byId[a.id] = aTime >= eTime ? a : existing;
     });
     ftLaunches = Object.values(byId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    saveFtLaunches();
+    saveFtLaunches(true);
 }
 
 function playAvisoSound(priority) {
@@ -4769,6 +6483,10 @@ function playAvisoSound(priority) {
 // ==========================================================================
 
 function switchLancamentosTab(tab) {
+    if (tab === 'novo' && !isAdminRole()) {
+        showToast("Apenas admins podem criar lançamentos.", "error");
+        tab = 'dashboard';
+    }
     currentLancamentosTab = tab;
     renderLancamentos();
 }
@@ -5167,18 +6885,18 @@ function renderLancamentosHistorico() {
             const statusText = item.status === 'launched'
                 ? 'LANÇADO NO NEXTI'
                 : (item.status === 'submitted' ? 'CONFIRMADO (Forms)' : 'AGUARDANDO CONFIRMAÇÃO');
-            const canLaunch = item.status === 'submitted';
+            const canLaunch = item.status === 'submitted' && isAdminRole();
             const launched = item.status === 'launched';
             return `
-        <div class="lancamento-card">
+        <div class="lancamento-card" data-ft-id="${item.id}">
             <div class="lancamento-meta">
-                <span>${formatFtDate(item.createdAt)}</span>
-                <span>${statusText}</span>
+                <span class="lancamento-date">${formatFtDate(item.createdAt)}</span>
+                <span class="lancamento-status status-${item.status}">${statusText}</span>
             </div>
             <div class="lancamento-steps">
-                <span class="step ${item.createdAt ? 'done' : ''}">Lançada</span>
+                <span class="step ${item.createdAt ? 'done' : ''}">Criada</span>
                 <span class="step ${item.linkSentAt ? 'done' : ''}">Link enviado</span>
-                <span class="step ${item.status === 'submitted' || item.status === 'launched' ? 'done' : ''}">Colaborador enviou</span>
+                <span class="step ${item.status === 'submitted' || item.status === 'launched' ? 'done' : ''}">Confirmado pelo colaborador</span>
                 <span class="step ${item.status === 'launched' ? 'done' : ''}">Lançado no Nexti</span>
             </div>
             <div class="lancamento-title">${item.collabName || 'Colaborador'} (${item.collabRe})</div>
@@ -5192,7 +6910,7 @@ function renderLancamentosHistorico() {
                 <button class="btn-mini btn-secondary" onclick="copyFtLinkById('${item.id}')">Copiar link</button>
                 <button class="btn-mini btn-secondary" onclick="sendFtWhatsappById('${item.id}')">WhatsApp</button>
                 <button class="btn-mini ${launched ? 'btn-ok' : 'btn-secondary'}" onclick="markFtLaunched('${item.id}')" ${canLaunch ? '' : 'disabled'}>${launched ? 'Lançado no Nexti' : 'Marcar Lançado no Nexti'}</button>
-                <button class="btn-mini btn-danger" onclick="deleteFtLaunch('${item.id}')">Remover</button>
+                <button class="btn-mini btn-danger" onclick="deleteFtLaunch('${item.id}')" ${isAdminRole() ? '' : 'disabled'}>Remover</button>
             </div>
         </div>
     `;
@@ -5294,6 +7012,7 @@ function createFtLaunch() {
     showToast("FT lançada com sucesso.", "success");
     lastFtCreatedId = item.id;
     updateFtPostActions();
+    setTimeout(() => flashLancamentoCard(item.id), 100);
 }
 
 function updateFtPostActions() {
@@ -5416,12 +7135,13 @@ function setFtStatus(item, status) {
     }
 }
 
-function markFtLaunched(id) {
+async function markFtLaunched(id) {
     const item = ftLaunches.find(i => i.id === id);
     if (!item || item.status !== 'submitted') return;
     setFtStatus(item, 'launched');
     saveFtLaunches();
     renderLancamentosHistorico();
+    setTimeout(() => flashLancamentoCard(item.id), 100);
     showToast("FT marcada como lançada no Nexti.", "success");
 }
 
@@ -6146,16 +7866,21 @@ function renderAdminList() {
     const admins = SiteAuth.admins.filter(a => a.role !== 'supervisor');
     const supervisors = SiteAuth.admins.filter(a => a.role === 'supervisor');
 
-    const adminRows = admins.map(a => `
+    const adminRows = admins.map(a => {
+        const roleLabel = a.master ? 'Master' : (ROLE_LABELS[a.role] || 'Admin');
+        return `
         <div class="admin-row">
             <span class="admin-name gold">${ICONS.crown} ${a.name}</span>
+            <span class="admin-role">${roleLabel}</span>
             <button onclick="removeAdmin('${a.hash}')" class="btn-mini btn-danger">X</button>
         </div>
-    `).join('');
+    `;
+    }).join('');
 
     const supervisorRows = supervisors.map(a => `
         <div class="admin-row supervisor">
             <span class="admin-name gold">${a.name}</span>
+            <span class="admin-role">${ROLE_LABELS[a.role] || 'Supervisor'}</span>
             <button onclick="removeAdmin('${a.hash}')" class="btn-mini btn-danger">X</button>
         </div>
     `).join('');
@@ -6451,9 +8176,9 @@ function getLocalCollaborators() {
     try { return JSON.parse(stored) || []; } catch { return []; }
 }
 
-function saveLocalCollaborators(list) {
+function saveLocalCollaborators(list, silent = false) {
     localStorage.setItem('localCollaborators', JSON.stringify(list));
-    scheduleShadowSync('local-collaborators');
+    scheduleShadowSync('local-collaborators', { silent });
 }
 
 function mergeLocalCollaborators(items, groupKey) {
