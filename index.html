@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gerenciamento de Efetivos v3.5 - Grupo Dunamis</title>
+    <title>Gerenciamento de Efetivos v3.6 - Grupo Dunamis</title>
     <link rel="icon" href="images/logo-dunamis-servicos.png">
     <link rel="stylesheet" href="main.css">
 </head>
@@ -19,7 +19,7 @@
                     <path d="M9 21V14h6v7"></path>
                 </svg>
             </button>
-            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.5</span></h1>
+            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.6</span></h1>
             <button id="avisos-bell" class="avisos-bell hidden" onclick="toggleAvisosMini()" title="Avisos">
                 <span class="bell-icon" aria-hidden="true">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -59,6 +59,14 @@
         <button class="btn btn-small" onclick="openAvisosTab()">Ver todos</button>
     </div>
 
+    <div id="reminder-alerts" class="reminder-alerts hidden">
+        <div class="reminder-alerts-header">
+            <strong>Lembretes ativos</strong>
+            <button class="btn-mini btn-secondary" onclick="dismissReminderAlerts()">Ocultar</button>
+        </div>
+        <div id="reminder-alerts-list" class="reminder-alerts-list"></div>
+    </div>
+
     <!-- Botão Toggle Ações -->
     <button id="utility-toggle-btn" onclick="toggleUtilityButtons()" title="Ações rápidas" aria-label="Ações rápidas">
         <span class="utility-arrow">›</span>
@@ -88,6 +96,14 @@
             <path d="M4 4h16v14H7l-3 3z"></path>
             <line x1="8" y1="8" x2="16" y2="8"></line>
             <line x1="8" y1="12" x2="14" y2="12"></line>
+        </svg>
+    </button>
+
+    <!-- Botão Guia -->
+    <button id="guide-btn" class="utility-btn" onclick="openGuideModal()" title="Guia completo" aria-label="Guia completo">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5V4.5A2.5 2.5 0 0 1 6.5 2z"></path>
         </svg>
     </button>
 

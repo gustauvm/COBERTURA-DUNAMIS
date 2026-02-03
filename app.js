@@ -16,6 +16,8 @@ let shadowSyncTimer = null;
 let shadowAutoPullTimer = null;
 let shadowAutoPullBound = false;
 let shadowDirty = false;
+let autoEscalaTimer = null;
+let autoEscalaBound = false;
 let shadowStatus = {
     available: false,
     lastPull: null,
@@ -27,6 +29,7 @@ let lastShadowToastAt = 0;
 let avisos = [];
 let avisosSeenIds = new Set();
 let allCollaboratorsCache = { items: null, updatedAt: 0 };
+const RECICLAGEM_CACHE_TTL_MS = 30 * 60 * 1000;
 let exportUnitTarget = null;
 let ftLaunches = [];
 let currentLancamentosTab = 'dashboard';
@@ -35,6 +38,8 @@ let ftReasons = [];
 let lastFtCreatedId = null;
 let ftSyncTimer = null;
 let ftLastSyncAt = null;
+let reminderCheckTimer = null;
+let reminderAlertsHidden = false;
 let searchFilterStatus = 'all'; // all | plantao | folga | ft | afastado
 let searchHideAbsence = false;
 let currentContext = null;
@@ -48,6 +53,9 @@ let reciclagemHistory = [];
 let reciclagemNotes = {};
 let reciclagemOnlyExpired = false;
 let reciclagemRenderCache = [];
+let escalaInvertida = false;
+let escalaInvertidaAutoMonth = null;
+let reciclagemSyncTimer = null;
 
 // ==========================================================================
 // 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
@@ -300,6 +308,17 @@ function loadLocalState() {
         if (units) unitMetadata = JSON.parse(units) || {};
         if (history) changeHistory = JSON.parse(history) || [];
     } catch {}
+    try {
+        const storedInvert = localStorage.getItem('escalaInvertida');
+        if (storedInvert !== null) escalaInvertida = storedInvert === '1';
+    } catch {}
+    try {
+        const storedAutoMonth = localStorage.getItem('escalaInvertidaAutoMonth');
+        if (storedAutoMonth !== null && storedAutoMonth !== '') {
+            const parsed = parseInt(storedAutoMonth, 10);
+            if (!Number.isNaN(parsed)) escalaInvertidaAutoMonth = parsed;
+        }
+    } catch {}
 }
 
 function loadAvisos() {
@@ -369,6 +388,16 @@ function saveLocalState(silent = false) {
     scheduleShadowSync('local-save', { silent, notify: !silent });
 }
 
+function saveEscalaInvertida(silent = false) {
+    localStorage.setItem('escalaInvertida', escalaInvertida ? '1' : '0');
+    if (typeof escalaInvertidaAutoMonth === 'number') {
+        localStorage.setItem('escalaInvertidaAutoMonth', String(escalaInvertidaAutoMonth));
+    } else {
+        localStorage.removeItem('escalaInvertidaAutoMonth');
+    }
+    scheduleShadowSync('escala-invertida', { silent, notify: !silent });
+}
+
 function clearLocalState() {
     collaboratorEdits = {};
     unitMetadata = {};
@@ -435,6 +464,8 @@ function buildShadowState() {
         reciclagemHistory,
         reciclagemNotes,
         unitGeoCache,
+        escalaInvertida,
+        escalaInvertidaAutoMonth,
         updatedAt: new Date().toISOString()
     };
 }
@@ -451,6 +482,9 @@ function applyShadowState(state) {
     if (Array.isArray(state.adminUsers)) {
         SiteAuth.admins = normalizeAdmins(state.adminUsers);
         saveAdmins(true);
+        renderAdminList();
+        updateAvisoAssigneeFilter();
+        updateAvisoAssignees();
     }
     if (Array.isArray(state.reciclagemTemplates)) {
         reciclagemTemplates = state.reciclagemTemplates;
@@ -465,13 +499,23 @@ function applyShadowState(state) {
         saveReciclagemHistory(true);
     }
     if (state.reciclagemNotes && typeof state.reciclagemNotes === 'object') {
-        reciclagemNotes = state.reciclagemNotes;
+        reciclagemNotes = { ...reciclagemNotes, ...state.reciclagemNotes };
         saveReciclagemNotes(true);
     }
     if (state.unitGeoCache && typeof state.unitGeoCache === 'object') {
         unitGeoCache = state.unitGeoCache;
         localStorage.setItem('unitGeoCache', JSON.stringify(unitGeoCache));
     }
+    let shouldSaveEscala = false;
+    if (typeof state.escalaInvertida === 'boolean') {
+        escalaInvertida = state.escalaInvertida;
+        shouldSaveEscala = true;
+    }
+    if (typeof state.escalaInvertidaAutoMonth === 'number') {
+        escalaInvertidaAutoMonth = state.escalaInvertidaAutoMonth;
+        shouldSaveEscala = true;
+    }
+    if (shouldSaveEscala) saveEscalaInvertida(true);
     if (Array.isArray(state.avisos)) {
         mergeAvisosFromShadow(state.avisos);
     }
@@ -480,6 +524,13 @@ function applyShadowState(state) {
     }
     if (Array.isArray(state.localCollaborators)) {
         saveLocalCollaborators(state.localCollaborators, true);
+    }
+    renderEscalaInvertidaUI();
+    if (document.getElementById('units-list')) {
+        renderizarUnidades();
+    }
+    if (currentTab === 'busca' && document.getElementById('search-input')) {
+        realizarBusca();
     }
     saveLocalState(true);
     renderAuditList();
@@ -517,6 +568,7 @@ async function shadowPullState(showToastOnFail = false) {
         const result = await shadowRequest('pull');
         if (!result || !result.ok) throw new Error('Shadow pull failed');
         applyShadowState(result.state || {});
+        applyAutoEscalaInvertida({ silent: true, notify: false });
         shadowStatus.available = true;
         shadowStatus.lastPull = new Date();
         shadowStatus.error = null;
@@ -527,6 +579,7 @@ async function shadowPullState(showToastOnFail = false) {
         shadowStatus.error = 'Falha ao carregar shadow';
         updateShadowStatusUI();
         if (showToastOnFail) showToast("Falha ao carregar o banco shadow.", "error");
+        applyAutoEscalaInvertida({ silent: true, notify: false });
         return false;
     }
 }
@@ -542,11 +595,6 @@ async function shadowPushAll(reason = '') {
         shadowStatus.pending = false;
         shadowStatus.error = null;
         updateShadowStatusUI();
-        const now = Date.now();
-        if (shadowDirty && now - lastShadowToastAt > 5000) {
-            showToast("Alteração salva.", "success");
-            lastShadowToastAt = now;
-        }
         shadowDirty = false;
         return true;
     } catch {
@@ -737,7 +785,7 @@ function initAdmins() {
     const stored = localStorage.getItem('adminUsers');
     if (stored) {
         SiteAuth.admins = normalizeAdmins(JSON.parse(stored));
-        saveAdmins();
+        saveAdmins(true, { skipShadow: true });
         return;
     }
 
@@ -747,11 +795,13 @@ function initAdmins() {
         { hash: btoa('3935:1288'), name: 'WAGNER MONTEIRO', re: '3935', role: 'admin' }
     ];
 
-    saveAdmins();
+    saveAdmins(true);
 }
 
-function saveAdmins(silent = false) {
+function saveAdmins(silent = false, options = {}) {
     localStorage.setItem('adminUsers', JSON.stringify(SiteAuth.admins));
+    if (options.skipShadow) return;
+    if (shadowEnabled() && !shadowReady && !options.force) return;
     scheduleShadowSync('admin-users', { silent, notify: !silent });
 }
 
@@ -797,6 +847,7 @@ const ICONS = {
     history: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`,
     chevronUp: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`,
     chevronDown: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`,
+    mapPin: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.686-6-11a6 6 0 1 1 12 0c0 5.314-6 11-6 11z"></path><circle cx="12" cy="10" r="2.5"></circle></svg>`,
     arrowUp: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>`,
     crown: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7l4 4 4-6 4 6 4-4 4 5-2 8H4l-2-8z"></path><path d="M5 20h14"></path></svg>`,
     bell: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5"/><path d="M9.5 17a2.5 2.5 0 0 0 5 0"/></svg>`,
@@ -876,6 +927,7 @@ const SEARCH_TOKENS = [
 const gateway = document.getElementById('gateway');
 const appContainer = document.getElementById('app-container');
 const appTitle = document.getElementById('app-title');
+const APP_VERSION = 'v3.6';
 const contentArea = document.getElementById('content-area');
 
 // Inicialização
@@ -883,6 +935,7 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem('aiSearchEnabled', '0'); // Modo IA sempre inicia desativado
     initAdmins();
     loadLocalState();
+    startAutoEscalaMonitor();
     loadAvisos();
     loadFtLaunches();
     loadFtReasons();
@@ -892,6 +945,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadReciclagemNotes();
     loadReciclagemData(false);
     loadAuthFromStorage();
+    startReminderMonitor();
+    startReciclagemAutoRefresh();
     loadUnitAddressDb();
     shadowPullState(false);
     startShadowAutoPull();
@@ -947,6 +1002,12 @@ function createCard(title, imgPath, key) {
     `;
 }
 
+function setAppTitle(title, suffix = '') {
+    if (!appTitle) return;
+    const extra = suffix ? ` ${suffix}` : '';
+    appTitle.innerHTML = `${title} <span class="app-version">${APP_VERSION}</span>${extra}`;
+}
+
 function openDunamisProjects() {
     const page = `
         <html>
@@ -955,19 +1016,111 @@ function openDunamisProjects() {
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <style>
-                    body { font-family: Arial, sans-serif; background:#f6f7fb; margin:0; padding:30px; }
-                    h1 { color:#002d72; margin-bottom:10px; }
-                    .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
-                    a { color:#0b4fb3; text-decoration:none; font-weight:bold; }
-                    a:hover { text-decoration:underline; }
+                    :root {
+                        --blue: #0b4fb3;
+                        --deep: #002d72;
+                        --bg: #eef2f8;
+                        --card: #ffffff;
+                        --shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+                    }
+                    * { box-sizing: border-box; }
+                    body {
+                        font-family: "Segoe UI", "Poppins", Arial, sans-serif;
+                        background: radial-gradient(1200px 600px at 10% -10%, #dbe7ff, transparent 60%),
+                                    radial-gradient(900px 500px at 90% 0%, #f0f7ff, transparent 60%),
+                                    var(--bg);
+                        margin: 0;
+                        color: #0f172a;
+                    }
+                    .wrap {
+                        max-width: 980px;
+                        margin: 0 auto;
+                        padding: 32px 20px 48px;
+                    }
+                    .hero {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 8px;
+                        margin-bottom: 22px;
+                    }
+                    h1 {
+                        font-size: clamp(1.6rem, 2.8vw, 2.4rem);
+                        color: var(--deep);
+                        margin: 0;
+                    }
+                    .subtitle {
+                        font-size: clamp(0.95rem, 2vw, 1.1rem);
+                        color: #475569;
+                    }
+                    .grid {
+                        display: grid;
+                        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                        gap: 14px;
+                    }
+                    .card {
+                        background: var(--card);
+                        border: 1px solid #e2e8f0;
+                        border-radius: 16px;
+                        padding: 18px;
+                        box-shadow: var(--shadow);
+                        display: flex;
+                        flex-direction: column;
+                        gap: 8px;
+                        min-height: 140px;
+                    }
+                    .card h2 {
+                        font-size: 1.05rem;
+                        margin: 0;
+                        color: #0f172a;
+                    }
+                    .card p {
+                        margin: 0;
+                        color: #64748b;
+                        font-size: 0.92rem;
+                    }
+                    .card a {
+                        margin-top: auto;
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 6px;
+                        color: var(--blue);
+                        font-weight: 700;
+                        text-decoration: none;
+                    }
+                    .card a:hover {
+                        text-decoration: underline;
+                    }
                 </style>
             </head>
             <body>
-                <h1>Dunamis IA - Projetos</h1>
-                <div class="card"><a href="https://gustauvm.github.io/PORTAL-DE-TROCA/gateway.html" target="_blank">Portal de Trocas</a></div>
-                <div class="card"><a href="https://gustauvm.pythonanywhere.com/" target="_blank">Organizador de Relatório Nexti por RE</a></div>
-                <div class="card"><a href="https://dunamis.squareweb.app/" target="_blank">Conversor de Planilhas - Movimentação Diária</a></div>
-                <div class="card"><a href="https://gustauvm.github.io/ENDERECOS-DUNAMIS/" target="_blank">Endereços das Unidades</a></div>
+                <div class="wrap">
+                    <div class="hero">
+                        <h1>Dunamis IA - Projetos</h1>
+                        <div class="subtitle">Acesse rapidamente as ferramentas e painéis disponíveis.</div>
+                    </div>
+                    <div class="grid">
+                        <div class="card">
+                            <h2>Portal de Trocas</h2>
+                            <p>Gestão de trocas e coberturas com fluxo organizado.</p>
+                            <a href="https://gustauvm.github.io/PORTAL-DE-TROCA/gateway.html" target="_blank">Abrir projeto →</a>
+                        </div>
+                        <div class="card">
+                            <h2>Relatório Nexti por RE</h2>
+                            <p>Organizador de relatório Nexti com foco em RE.</p>
+                            <a href="https://gustauvm.pythonanywhere.com/" target="_blank">Abrir projeto →</a>
+                        </div>
+                        <div class="card">
+                            <h2>Conversor de Planilhas</h2>
+                            <p>Converta planilhas de movimentação diária com rapidez.</p>
+                            <a href="https://dunamis.squareweb.app/" target="_blank">Abrir projeto →</a>
+                        </div>
+                        <div class="card">
+                            <h2>Endereços das Unidades</h2>
+                            <p>Consulte endereços oficiais das unidades Dunamis.</p>
+                            <a href="https://gustauvm.github.io/ENDERECOS-DUNAMIS/" target="_blank">Abrir projeto →</a>
+                        </div>
+                    </div>
+                </div>
             </body>
         </html>
     `;
@@ -1033,7 +1186,7 @@ async function loadGroup(groupKey) {
             currentData = items.map((item, idx) => ({ ...item, id: idx }));
             lastUpdatedAt = new Date();
             
-            appTitle.innerText = `Gerenciamento de Efetivos - ${groupKey === 'todos' ? 'Geral' : groupKey.toUpperCase()} (API)`;
+            setAppTitle(`Gerenciamento de Efetivos - ${groupKey === 'todos' ? 'Geral' : groupKey.toUpperCase()}`, '(API)');
             renderDashboard();
             updateLastUpdatedDisplay();
             return;
@@ -1077,7 +1230,7 @@ async function loadGroup(groupKey) {
         
         currentData = allItems.map((item, idx) => ({ ...item, id: idx }));
         lastUpdatedAt = new Date();
-        appTitle.innerText = 'Gerenciamento de Efetivos - Geral';
+        setAppTitle('Gerenciamento de Efetivos - Geral');
     } else {
         const csv = await fetchSheetData(CONFIG.sheets[groupKey]);
         if (csv) {
@@ -1089,7 +1242,7 @@ async function loadGroup(groupKey) {
             currentData = items.map((item, idx) => ({ ...item, id: idx }));
             lastUpdatedAt = new Date();
         }
-        appTitle.innerText = `Gerenciamento de Efetivos - ${groupKey.toUpperCase()}`;
+        setAppTitle(`Gerenciamento de Efetivos - ${groupKey.toUpperCase()}`);
     }
 
     renderDashboard();
@@ -1587,6 +1740,15 @@ function renderDashboard() {
                     <button class="filter-chip" data-filter="afastado" onclick="setSearchFilterStatus('afastado')">Afastados</button>
                     <button class="filter-chip" data-hide="1" onclick="toggleSearchHideAbsence()">Sem afastamento</button>
                 </div>
+                <div class="search-coverage">
+                    <div class="search-coverage-row">
+                        <input type="text" id="search-unit-target" class="search-input search-input-compact" list="search-unit-list"
+                               placeholder="Unidade alvo para cobertura..." autocomplete="off">
+                        <datalist id="search-unit-list"></datalist>
+                        <button class="btn btn-secondary btn-small" onclick="suggestCoverageFromSearch()">Sugerir por proximidade</button>
+                    </div>
+                    <div class="hint">Sugere colaboradores de folga por proximidade, priorizando quem já atua na unidade.</div>
+                </div>
             </div>
             <div id="search-results" class="results-grid"></div>
         </div>
@@ -1886,6 +2048,13 @@ function renderDashboard() {
                         <select id="ft-unit-target"></select>
                     </div>
                     <div class="form-group">
+                        <div class="ft-coverage-actions">
+                            <button class="btn btn-secondary btn-small" onclick="suggestFtCoverageByUnit()">Sugerir por proximidade</button>
+                            <div class="hint">Sugere colaboradores de folga, priorizando quem já trabalha na unidade selecionada.</div>
+                        </div>
+                    </div>
+                    <div id="ft-coverage-suggestions" class="results-grid"></div>
+                    <div class="form-group">
                         <label>Data da FT</label>
                         <input type="date" id="ft-date">
                     </div>
@@ -2074,6 +2243,24 @@ function renderDashboard() {
                             <div class="config-card-body">
                                 <div id="sourceStatus" class="source-status"></div>
                                 <div id="dataSourceList" class="source-list"></div>
+                            </div>
+                        </div>
+
+                        <div class="config-card">
+                            <div class="config-card-header">
+                                <div class="card-title">Escala de Plantão</div>
+                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                            </div>
+                            <div class="config-card-body">
+                                <div class="field-row">
+                                    <label>Inversão manual</label>
+                                    <div class="actions">
+                                        <button class="btn btn-secondary" onclick="toggleEscalaInvertida()">Inverter plantão</button>
+                                        <span id="escala-invertida-status" class="status-badge-menu view">Padrão</span>
+                                    </div>
+                                </div>
+                                <div class="config-note">Ajuste automático: o sistema aplica a inversão no início de meses pares. O botão serve como correção manual quando necessário.</div>
+                                <div class="config-note">Quando ativado, a turma 1 passa a trabalhar nos dias pares e a turma 2 nos dias ímpares. Afeta busca rápida, dashboards e exportações.</div>
                             </div>
                         </div>
 
@@ -2400,6 +2587,74 @@ function renderDashboard() {
             </div>
         </div>
 
+        <!-- Modal Endereços -->
+        <div id="address-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 760px;">
+                <div class="modal-header sticky-modal-header">
+                    <h3>Endereços das Unidades</h3>
+                    <button class="close-modal" onclick="closeAddressModal()">${ICONS.close}</button>
+                </div>
+                <div class="help-content">
+                    <div class="form-group">
+                        <label>Buscar unidade</label>
+                        <input type="text" id="address-search" class="search-input" placeholder="Digite a unidade...">
+                    </div>
+                    <div id="address-list" class="address-list"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal Guia Completo -->
+        <div id="guide-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 860px;">
+                <div class="modal-header sticky-modal-header">
+                    <h3>Guia completo do sistema</h3>
+                    <button class="close-modal" onclick="closeGuideModal()">${ICONS.close}</button>
+                </div>
+                <div class="help-content">
+                    <div class="help-section">
+                        <h4>Busca Rápida</h4>
+                        <ul>
+                            <li>Digite nome, RE ou unidade para localizar colaboradores.</li>
+                            <li>Use os filtros Plantão/Folga/FT/Afastados para refinar.</li>
+                            <li>Atalho de cobertura: selecione a unidade e clique em “Sugerir por proximidade”.</li>
+                        </ul>
+                    </div>
+                    <div class="help-section">
+                        <h4>Unidades</h4>
+                        <ul>
+                            <li>Lista por posto com times separados (Plantão x Folga).</li>
+                            <li>Histórico mostra alterações locais e globais (shadow).</li>
+                            <li>Exportar gera XLSX/CSV por unidade ou base completa.</li>
+                        </ul>
+                    </div>
+                    <div class="help-section">
+                        <h4>Avisos e Lembretes</h4>
+                        <ul>
+                            <li>Admins podem criar avisos gerais e lembretes direcionados.</li>
+                            <li>Colaboradores veem apenas avisos atribuídos ao próprio RE.</li>
+                        </ul>
+                    </div>
+                    <div class="help-section">
+                        <h4>Lançamentos de FT</h4>
+                        <ul>
+                            <li>Crie lançamentos com unidade alvo, data, escala e motivo.</li>
+                            <li>Use “Sugerir por proximidade” para escolher quem está de folga.</li>
+                            <li>Após salvar, copie ou envie o link de confirmação.</li>
+                        </ul>
+                    </div>
+                    <div class="help-section">
+                        <h4>Configurações</h4>
+                        <ul>
+                            <li>Controle de admins/supervisores e modo edição.</li>
+                            <li>Shadow sincroniza alterações globais entre todos.</li>
+                            <li>Escala de Plantão: inversão automática em meses pares + botão manual.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Modal Reciclagem -->
         <div id="reciclagem-modal" class="modal hidden">
             <div class="modal-content">
@@ -2472,6 +2727,17 @@ function renderDashboard() {
     searchInput.addEventListener('input', () => handleSearchTokenSuggest());
     searchInput.addEventListener('click', () => handleSearchTokenSuggest());
     searchInput.addEventListener('keyup', () => handleSearchTokenSuggest());
+
+    const searchUnitInput = document.getElementById('search-unit-target');
+    if (searchUnitInput) {
+        searchUnitInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                suggestCoverageFromSearch();
+            }
+        });
+    }
+    hydrateSearchUnits();
     
     // Configurar eventos dos filtros
     document.querySelectorAll('input[name="filterStatus"]').forEach(radio => {
@@ -2559,6 +2825,8 @@ function renderDashboard() {
         ftUnitTarget.dataset.auto = '1';
         ftUnitTarget.addEventListener('change', () => {
             ftUnitTarget.dataset.auto = '0';
+            const sugg = document.getElementById('ft-coverage-suggestions');
+            if (sugg) sugg.innerHTML = '';
         });
     }
     const ftShift = document.getElementById('ft-shift');
@@ -2620,6 +2888,69 @@ function switchTab(tabName) {
 
     clearContextBar();
     updateBreadcrumb();
+}
+
+function renderEscalaInvertidaUI() {
+    const statusEl = document.getElementById('escala-invertida-status');
+    if (!statusEl) return;
+    statusEl.textContent = escalaInvertida ? 'Invertido' : 'Padrão';
+    statusEl.className = `status-badge-menu ${escalaInvertida ? 'edit' : 'view'}`;
+}
+
+function getCurrentMonthNumber() {
+    return new Date().getMonth() + 1; // 1-12
+}
+
+function getDesiredEscalaInvertida(monthNumber) {
+    return monthNumber % 2 === 0; // meses pares invertem
+}
+
+function applyAutoEscalaInvertida(options = {}) {
+    const month = getCurrentMonthNumber();
+    if (escalaInvertidaAutoMonth === month) return;
+    const desired = getDesiredEscalaInvertida(month);
+    escalaInvertida = desired;
+    escalaInvertidaAutoMonth = month;
+    saveEscalaInvertida(options.silent);
+    renderEscalaInvertidaUI();
+    if (document.getElementById('units-list')) {
+        renderizarUnidades();
+    }
+    if (currentTab === 'busca' && document.getElementById('search-input')) {
+        realizarBusca();
+    }
+    if (options.notify) {
+        showToast(`Escala ajustada automaticamente para ${desired ? 'invertida' : 'padrão'}.`, 'success');
+    }
+}
+
+function startAutoEscalaMonitor() {
+    if (!shadowEnabled() || shadowReady) {
+        applyAutoEscalaInvertida({ silent: true, notify: false });
+    }
+    if (autoEscalaTimer) clearInterval(autoEscalaTimer);
+    autoEscalaTimer = setInterval(() => {
+        applyAutoEscalaInvertida({ silent: true, notify: false });
+    }, 60 * 60 * 1000);
+
+    if (autoEscalaBound) return;
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            applyAutoEscalaInvertida({ silent: true, notify: false });
+        }
+    });
+    autoEscalaBound = true;
+}
+
+function toggleEscalaInvertida() {
+    if (!isAdminRole()) return;
+    escalaInvertida = !escalaInvertida;
+    escalaInvertidaAutoMonth = getCurrentMonthNumber();
+    saveEscalaInvertida();
+    renderEscalaInvertidaUI();
+    renderizarUnidades();
+    if (currentTab === 'busca') realizarBusca(document.getElementById('search-input')?.value || '');
+    showToast(escalaInvertida ? 'Escala invertida ativada.' : 'Escala invertida desativada.', 'success');
 }
 
 function switchConfigTab(tabName) {
@@ -2844,11 +3175,15 @@ function renderizarUnidades() {
         const lembretesBadge = lembretesPendentes > 0
             ? `<span class="unit-reminder-badge">${lembretesPendentes} lemb.</span>`
             : '';
+        const postoJs = JSON.stringify(posto);
         return `
             <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}" data-unit-name="${posto}">
                 <h3 class="unit-title">
                     <span>${posto} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${avisosBadge} ${lembretesBadge}</span>
                     <div class="unit-actions">
+                        <button class="action-btn" onclick="openAddressModal(${postoJs})" title="Endereço">
+                            ${ICONS.mapPin}
+                        </button>
                         <button class="action-btn" onclick="openAvisosForUnit('${posto}')" title="Avisos da unidade">
                             ${ICONS.bell}
                         </button>
@@ -3196,7 +3531,10 @@ function getReciclagemSummaryForCollab(re, name) {
 }
 
 async function loadReciclagemData(force = false) {
-    if (!force && reciclagemLoadedAt) return;
+    if (!force && reciclagemLoadedAt) {
+        const age = Date.now() - reciclagemLoadedAt.getTime();
+        if (age < RECICLAGEM_CACHE_TTL_MS) return;
+    }
     const sheets = CONFIG?.reciclagem?.sheets || {};
     const keys = Object.keys(sheets);
     const results = {};
@@ -3217,6 +3555,21 @@ async function loadReciclagemData(force = false) {
     reciclagemLoadedAt = new Date();
 }
 
+async function refreshReciclagemIfNeeded() {
+    const before = reciclagemLoadedAt ? reciclagemLoadedAt.getTime() : 0;
+    await loadReciclagemData(false);
+    const after = reciclagemLoadedAt ? reciclagemLoadedAt.getTime() : 0;
+    if (after > before && currentTab === 'reciclagem') {
+        renderReciclagem();
+    }
+}
+
+function startReciclagemAutoRefresh() {
+    refreshReciclagemIfNeeded();
+    if (reciclagemSyncTimer) clearInterval(reciclagemSyncTimer);
+    reciclagemSyncTimer = setInterval(refreshReciclagemIfNeeded, 10 * 60 * 1000);
+}
+
 function getReciclagemSheetLabel(key) {
     const map = {
         ASO: 'ASO',
@@ -3226,7 +3579,7 @@ function getReciclagemSheetLabel(key) {
         NR33: 'NR 33',
         NR35: 'NR 35',
         DEA: 'DEA',
-        HELIPONTO: 'Heliponto',
+        HELIPONTO: 'HELIPONTO',
         UNIFORME: 'UNIFORME',
         PCMSO: 'PCMSO',
         PGR: 'PGR'
@@ -3454,8 +3807,10 @@ async function renderReciclagem() {
     }
 
     if (sheetSelect) {
+        const previousValue = sheetSelect.value || 'all';
         sheetSelect.innerHTML = `<option value="all">Todas as reciclagens</option>` +
             keys.map(k => `<option value="${k}">${getReciclagemSheetLabel(k)}</option>`).join('');
+        sheetSelect.value = keys.includes(previousValue) ? previousValue : 'all';
     }
 
     const sheetFilter = sheetSelect?.value || 'all';
@@ -3695,11 +4050,14 @@ async function renderReciclagem() {
                </div>`
             : '';
         const canEditRec = item.match === 'unit' && canEdit && item.type !== 'ALL';
-        const badge = (item.match === 're' && (item.detailItems || []).some(d => d.status === 'expired'))
+        const displayItems = sheetFilter !== 'all'
+            ? (item.detailItems || []).filter(d => d.key === sheetFilter)
+            : (item.detailItems || []);
+        const badge = (item.match === 're' && displayItems.some(d => d.status === 'expired'))
             ? `<span class="reciclagem-badge" title="Vencido"></span>`
             : '';
         const detailLines = item.match === 're'
-            ? (item.detailItems || []).map(d => {
+            ? displayItems.map(d => {
                 const statusLabel = d.status === 'expired'
                     ? 'Vencido'
                     : (d.status === 'due' ? 'Próximo' : (d.status === 'ok' ? 'Em dia' : 'Sem data'));
@@ -3713,7 +4071,7 @@ async function renderReciclagem() {
             }).join('')
             : '';
         if (item.match === 'unit') {
-            const unitChips = (item.detailItems || []).map(d => {
+            const unitChips = displayItems.map(d => {
                 return `
                     <div class="reciclagem-chip status-${d.status}">
                         <div class="chip-label">${d.label}</div>
@@ -3744,7 +4102,7 @@ async function renderReciclagem() {
                 </div>
             `;
         }
-        const chips = (item.detailItems || []).map(d => {
+        const chips = displayItems.map(d => {
             const statusLabel = d.status === 'expired'
                 ? 'Vencido'
                 : (d.status === 'due' ? 'Próximo' : (d.status === 'ok' ? 'Em dia' : 'Sem data'));
@@ -3962,6 +4320,102 @@ function closeHelpModal() {
     document.getElementById('help-modal')?.classList.add('hidden');
 }
 
+function openAddressModal(unitName = '') {
+    const modal = document.getElementById('address-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    const input = document.getElementById('address-search');
+    if (input) {
+        input.value = unitName || '';
+        if (!input.dataset.bound) {
+            input.addEventListener('input', () => renderAddressList(input.value));
+            input.dataset.bound = '1';
+        }
+        setTimeout(() => input.focus(), 0);
+    }
+    renderAddressList(unitName || '');
+}
+
+function closeAddressModal() {
+    document.getElementById('address-modal')?.classList.add('hidden');
+}
+
+function buildAddressEntries() {
+    const units = [...new Set(currentData.map(d => d.posto).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    return units.map(unit => {
+        const address = getAddressForUnit(unit) || '';
+        return { unit, address };
+    });
+}
+
+function renderAddressList(term = '') {
+    const list = document.getElementById('address-list');
+    if (!list) return;
+    const entries = buildAddressEntries();
+    const filter = normalizeUnitKey(term || '');
+    const filtered = filter
+        ? entries.filter(e => normalizeUnitKey(e.unit).includes(filter) || normalizeUnitKey(e.address || '').includes(filter))
+        : entries;
+    if (!filtered.length) {
+        list.innerHTML = `<p class="empty-state">Nenhuma unidade encontrada.</p>`;
+        return;
+    }
+    list.innerHTML = filtered.map(e => {
+        const addr = e.address || '';
+        const addrHtml = addr ? addr : 'Endereço não encontrado.';
+        const addrJs = JSON.stringify(addr);
+        const unitJs = JSON.stringify(e.unit);
+        const hasAddress = !!addr;
+        return `
+            <div class="address-card">
+                <div class="address-header">
+                    <div class="address-title">${e.unit}</div>
+                    ${hasAddress ? `<span class="address-badge">OK</span>` : `<span class="address-badge missing">Sem endereço</span>`}
+                </div>
+                <div class="address-text">${addrHtml}</div>
+                <div class="address-actions">
+                    <button class="btn btn-secondary btn-small" onclick="copyAddressText(${addrJs})" ${hasAddress ? '' : 'disabled'}>Copiar</button>
+                    <button class="btn btn-secondary btn-small" onclick="openAddressInMaps(${addrJs}, ${unitJs})">Ver no mapa</button>
+                    <button class="btn btn-secondary btn-small" onclick="openAddressPortal(${unitJs})">Portal</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function copyAddressText(text) {
+    if (!text) return;
+    if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+            showToast("Endereço copiado.", "success");
+        }).catch(() => fallbackCopy(text));
+        return;
+    }
+    fallbackCopy(text);
+}
+
+function openAddressInMaps(address, unitName) {
+    const query = address || unitName;
+    if (!query) return;
+    const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+    window.open(url, '_blank');
+}
+
+function openAddressPortal(unitName) {
+    const base = 'https://gustauvm.github.io/ENDERECOS-DUNAMIS/';
+    const url = unitName ? `${base}?q=${encodeURIComponent(unitName)}` : base;
+    window.open(url, '_blank');
+}
+
+function openGuideModal() {
+    document.getElementById('guide-modal')?.classList.remove('hidden');
+}
+
+function closeGuideModal() {
+    document.getElementById('guide-modal')?.classList.add('hidden');
+}
+
 function openPromptsModal() {
     document.getElementById('prompts-modal')?.classList.remove('hidden');
 }
@@ -4065,6 +4519,31 @@ function getNameSuggestions(fragment) {
         .sort((a, b) => a.localeCompare(b, 'pt-BR'))
         .slice(0, 8)
         .map(n => ({ value: n, label: 'Nome' }));
+}
+
+function hydrateSearchUnits() {
+    const list = document.getElementById('search-unit-list');
+    if (!list) return;
+    const units = [...new Set(currentData.map(d => d.posto).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    list.innerHTML = units.map(u => `<option value="${u}"></option>`).join('');
+}
+
+async function suggestCoverageFromSearch() {
+    const input = document.getElementById('search-unit-target');
+    const container = document.getElementById('search-results');
+    if (!input || !container) return;
+    const raw = (input.value || '').trim();
+    if (!raw) {
+        showToast("Informe a unidade para sugerir cobertura.", "error");
+        return;
+    }
+    const matched = findUnitByName(raw);
+    if (!matched) {
+        showToast("Unidade não encontrada na base.", "error");
+        return;
+    }
+    input.value = matched;
+    await renderCoverageSuggestionsByUnit(matched, container);
 }
 
 function toggleUnitVisibility(posto) {
@@ -4713,6 +5192,16 @@ async function getCoordsForAddress(address) {
     }
 }
 
+function getAddressOrNameForUnit(unitName) {
+    if (!unitName) return null;
+    return getAddressForUnit(unitName) || unitName;
+}
+
+async function getCoordsForUnit(unitName) {
+    const address = getAddressOrNameForUnit(unitName);
+    return await getCoordsForAddress(address);
+}
+
 function calcDistanceKm(a, b) {
     const toRad = (d) => (d * Math.PI) / 180;
     const R = 6371;
@@ -4726,10 +5215,16 @@ function calcDistanceKm(a, b) {
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+function formatDistanceKm(value) {
+    if (value == null || !Number.isFinite(value)) return null;
+    const rounded = Math.round(value * 10) / 10;
+    return String(rounded).replace('.', ',');
+}
+
 async function handleCoverageProximityAsync(target, container) {
     container.innerHTML = '<p class="empty-state">Calculando proximidade por endereços...</p>';
 
-    const targetAddress = getAddressForUnit(target.posto);
+    const targetAddress = getAddressOrNameForUnit(target.posto);
     const targetCoords = await getCoordsForAddress(targetAddress);
 
     let candidates = currentData.filter(d => d.re !== target.re && isDisponivelParaCobrir(d));
@@ -4753,7 +5248,7 @@ async function handleCoverageProximityAsync(target, container) {
 
     const enriched = [];
     for (const cand of candidates) {
-        const addr = getAddressForUnit(cand.posto);
+        const addr = getAddressOrNameForUnit(cand.posto);
         const coords = await getCoordsForAddress(addr);
         if (!coords) continue;
         const dist = calcDistanceKm(targetCoords, coords);
@@ -4783,6 +5278,93 @@ async function handleCoverageProximityAsync(target, container) {
             <div class="meta">Colaborador alvo (RE ${target.re}): ${target.nome} — Unidade: ${target.posto}. Distância estimada entre postos.</div>
         </div>
         ${list.map(p => renderAiResultCard(p, target)).join('')}
+    `;
+}
+
+function buildUnitCoverageReason(candidate, unitName) {
+    const status = getStatusInfo(candidate).text;
+    const parts = [];
+    if (status.includes('FOLGA')) parts.push('está de folga hoje');
+    if (candidate.posto && unitName && normalizeUnitKey(candidate.posto) === normalizeUnitKey(unitName)) {
+        parts.push(`atua na mesma unidade (${candidate.posto})`);
+    }
+    const dist = formatDistanceKm(candidate._distanceKm);
+    if (dist && unitName) parts.push(`está a ~${dist} km da unidade ${unitName}`);
+    if (!parts.length) parts.push('disponibilidade verificada pela escala e status atual');
+    return `Motivo: ${parts.join(' e ')}.`;
+}
+
+async function buildCoverageSuggestionsByUnit(unitName, limit = 6) {
+    const normalizedTarget = normalizeUnitKey(unitName);
+    const candidates = currentData.filter(d => isDisponivelParaCobrir(d));
+    if (!candidates.length) return { list: [], note: 'none' };
+
+    const sameUnit = candidates.filter(d => normalizeUnitKey(d.posto) === normalizedTarget);
+    const others = candidates.filter(d => normalizeUnitKey(d.posto) !== normalizedTarget);
+
+    const targetCoords = await getCoordsForUnit(unitName);
+    if (!targetCoords) {
+        return { list: sameUnit.concat(others).slice(0, limit), note: 'no_target_coords' };
+    }
+
+    const unitDistances = {};
+    const seen = new Set();
+    for (const cand of others) {
+        const unit = cand.posto;
+        const key = normalizeUnitKey(unit);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        const coords = await getCoordsForUnit(unit);
+        if (coords) unitDistances[key] = calcDistanceKm(targetCoords, coords);
+    }
+
+    const withDistance = [];
+    const withoutDistance = [];
+    others.forEach(c => {
+        const key = normalizeUnitKey(c.posto);
+        const dist = unitDistances[key];
+        if (typeof dist === 'number') withDistance.push({ ...c, _distanceKm: dist });
+        else withoutDistance.push(c);
+    });
+
+    withDistance.sort((a, b) => a._distanceKm - b._distanceKm);
+    const list = sameUnit.concat(withDistance, withoutDistance).slice(0, limit);
+    list.forEach(p => {
+        if (p._distanceKm != null) p._distanceKm = Math.round(p._distanceKm * 10) / 10;
+    });
+    return { list, note: withDistance.length ? 'ok' : 'no_candidates_distance' };
+}
+
+async function renderCoverageSuggestionsByUnit(unitName, container, options = {}) {
+    if (!container) return;
+    container.innerHTML = '<p class="empty-state">Calculando proximidade por endereços...</p>';
+
+    const { list, note } = await buildCoverageSuggestionsByUnit(unitName, options.limit || 6);
+    if (!list.length) {
+        container.innerHTML = `<div class="result-card"><h4>Sugestões de cobertura</h4><p>Não encontrei colaboradores de folga no momento.</p></div>`;
+        return;
+    }
+
+    let meta = `Unidade alvo: ${unitName}. Priorizando quem já atua no posto.`;
+    if (note === 'no_target_coords') meta = `Unidade alvo: ${unitName}. Endereço indisponível; usando apenas disponibilidade e unidade.`;
+    if (note === 'no_candidates_distance') meta = `Unidade alvo: ${unitName}. Não consegui geocodificar endereços suficientes; mostrando disponíveis.`;
+
+    const targetStub = { posto: unitName, re: '', nome: '' };
+    const actionBuilder = options.actionBuilder;
+    const cards = list.map(p => {
+        const actionHtml = actionBuilder ? actionBuilder(p) : '';
+        return renderAiResultCard(p, targetStub, {
+            reasonOverride: buildUnitCoverageReason(p, unitName),
+            actionHtml
+        });
+    }).join('');
+
+    container.innerHTML = `
+        <div class="result-card">
+            <h4>Sugestões de cobertura por proximidade</h4>
+            <div class="meta">${meta}</div>
+        </div>
+        ${cards}
     `;
 }
 
@@ -4825,7 +5407,8 @@ function buildAiReason(candidate, target) {
     const parts = [];
     if (status.includes('FOLGA')) parts.push('está de folga hoje');
     if (candidate.posto === target.posto) parts.push(`atua na mesma unidade (${candidate.posto})`);
-    if (candidate._distanceKm != null) parts.push(`está a ~${candidate._distanceKm} km da unidade do colaborador RE ${target.re}`);
+    const dist = formatDistanceKm(candidate._distanceKm);
+    if (dist) parts.push(`está a ~${dist} km da unidade do colaborador RE ${target.re}`);
     if (!parts.length) parts.push('disponibilidade verificada pela escala e status atual');
     return `Motivo: ${parts.join(' e ')}.`;
 }
@@ -4863,7 +5446,7 @@ function getFtRelationInfo(re) {
     return null;
 }
 
-function renderAiResultCard(item, target) {
+function renderAiResultCard(item, target, options = {}) {
     const statusInfo = getStatusInfo(item);
     const turnoInfo = getTurnoInfo(item.escala);
     const retornoInfo = item.rotulo && item.rotuloFim ? `<span class="return-date">Retorno: ${formatDate(item.rotuloFim)}</span>` : '';
@@ -4890,7 +5473,10 @@ function renderAiResultCard(item, target) {
     const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
     const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
     const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
-    const reason = buildAiReason(item, target);
+    const reason = options.reasonOverride || buildAiReason(item, target);
+    const actionHtml = options.actionHtml || '';
+    const distanceLabel = formatDistanceKm(item._distanceKm);
+    const distanceBadge = distanceLabel ? `<span class="distance-badge">≈ ${distanceLabel} km</span>` : '';
 
     const homenageado = isHomenageado(item);
     const nomeDisplay = homenageado ? `${item.nome} ✨` : item.nome;
@@ -4907,6 +5493,7 @@ function renderAiResultCard(item, target) {
                     ${retornoInfo}
                 </div>
                 <div class="header-right">
+                    ${distanceBadge}
                     <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal('${item.nome}', '${item.telefone || ''}')" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                 </div>
             </div>
@@ -4922,6 +5509,7 @@ function renderAiResultCard(item, target) {
                 ${ftRelationHtml}
                 <div class="ai-reason">${reason}</div>
             </div>
+            ${actionHtml ? `<div class="result-actions">${actionHtml}</div>` : ''}
         </div>
     `;
 }
@@ -6432,6 +7020,7 @@ function mergeAvisosFromShadow(remoteAvisos) {
         playAvisoSound(a.priority);
     });
     saveAvisos(true);
+    checkReminderAlerts();
 }
 
 function mergeFtLaunchesFromShadow(remoteLaunches) {
@@ -6476,6 +7065,94 @@ function playAvisoSound(priority) {
             beep(0, 600);
         }
     } catch {}
+}
+
+function playReminderSound() {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const chime = (delayMs, freq, duration = 0.35) => {
+            const o = ctx.createOscillator();
+            const g = ctx.createGain();
+            o.frequency.value = freq;
+            o.type = 'sine';
+            o.connect(g);
+            g.connect(ctx.destination);
+            const now = ctx.currentTime + delayMs / 1000;
+            g.gain.setValueAtTime(0.001, now);
+            g.gain.exponentialRampToValueAtTime(0.12, now + 0.03);
+            g.gain.exponentialRampToValueAtTime(0.001, now + duration);
+            o.start(now);
+            o.stop(now + duration + 0.05);
+        };
+        chime(0, 523);
+        chime(380, 659);
+    } catch {}
+}
+
+function dismissReminderAlerts() {
+    reminderAlertsHidden = true;
+    document.getElementById('reminder-alerts')?.classList.add('hidden');
+}
+
+function renderReminderAlerts(items) {
+    const box = document.getElementById('reminder-alerts');
+    const list = document.getElementById('reminder-alerts-list');
+    if (!box || !list) return;
+    if (!items.length || reminderAlertsHidden) {
+        box.classList.add('hidden');
+        return;
+    }
+    list.innerHTML = items.map(a => `
+        <div class="reminder-alert-item">
+            <strong>${a.title || 'Lembrete'}</strong>
+            <div class="reminder-alert-meta">${a.unit ? `${a.unit} • ` : ''}${formatAvisoDate(a.reminderNextAt)}</div>
+            <div class="reminder-alert-meta">${a.message || ''}</div>
+        </div>
+    `).join('');
+    box.classList.remove('hidden');
+}
+
+function checkReminderAlerts() {
+    if (!SiteAuth.logged) {
+        renderReminderAlerts([]);
+        return;
+    }
+    const visible = filterAvisosByVisibility(avisos);
+    const now = Date.now();
+    const due = visible.filter(a => a.status === 'pending' && a.reminderEnabled && a.reminderNextAt)
+        .filter(a => new Date(a.reminderNextAt).getTime() <= now);
+
+    if (!due.length) {
+        renderReminderAlerts([]);
+        return;
+    }
+
+    let shouldSave = false;
+    let played = false;
+    due.forEach(a => {
+        if (a.reminderLastAlertAt !== a.reminderNextAt) {
+            a.reminderLastAlertAt = a.reminderNextAt;
+            shouldSave = true;
+            played = true;
+        }
+    });
+    if (shouldSave) saveAvisos(true);
+    if (played) {
+        playReminderSound();
+        reminderAlertsHidden = false;
+    }
+    renderReminderAlerts(due);
+}
+
+function startReminderMonitor() {
+    checkReminderAlerts();
+    if (reminderCheckTimer) clearInterval(reminderCheckTimer);
+    reminderCheckTimer = setInterval(checkReminderAlerts, 60000);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            checkReminderAlerts();
+        }
+    });
 }
 
 // ==========================================================================
@@ -6607,6 +7284,35 @@ function syncFtUnitWithCollab() {
         const autoShift = shiftSelect.dataset.auto !== '0';
         if (autoShift) shiftSelect.value = collab.escala;
     }
+}
+
+function selectFtCollabByRe(re) {
+    const select = document.getElementById('ft-collab-select');
+    const input = document.getElementById('ft-search');
+    if (!select) return;
+    const unitTarget = document.getElementById('ft-unit-target');
+    if (unitTarget && unitTarget.value) unitTarget.dataset.auto = '0';
+    select.value = re;
+    const candidate = (allCollaboratorsCache.items || currentData).find(c => c.re === re || c.re?.endsWith(re));
+    if (input && candidate?.nome) input.value = candidate.nome;
+    syncFtUnitWithCollab();
+}
+
+async function suggestFtCoverageByUnit() {
+    const unitTarget = document.getElementById('ft-unit-target');
+    const container = document.getElementById('ft-coverage-suggestions');
+    if (!unitTarget || !container) return;
+    const unitName = unitTarget.value?.trim();
+    if (!unitName) {
+        showToast("Selecione a unidade FT.", "error");
+        return;
+    }
+    await renderCoverageSuggestionsByUnit(unitName, container, {
+        actionBuilder: (cand) => {
+            const re = cand?.re ? JSON.stringify(cand.re) : "''";
+            return `<button class="btn btn-secondary btn-small" onclick="selectFtCollabByRe(${re})">Usar no lançamento</button>`;
+        }
+    });
 }
 
 function getFtFormConfig(data) {
@@ -7235,11 +7941,15 @@ function verificarEscala(turma) {
     // 🔴 REGRA ABSOLUTA: Lógica de escala (turma 1 = dias ímpares / turma 2 = dias pares)
     const hoje = new Date().getDate();
     const isImpar = hoje % 2 !== 0;
-    
+    let trabalha = null;
+
     // Compara com número (já convertido no parse) ou string
-    if (turma == 1) return isImpar;
-    if (turma == 2) return !isImpar;
-    return false; // Padrão se não for 1 ou 2
+    if (turma == 1) trabalha = isImpar;
+    if (turma == 2) trabalha = !isImpar;
+
+    if (trabalha === null) return false; // Padrão se não for 1 ou 2
+    if (escalaInvertida) trabalha = !trabalha;
+    return trabalha;
 }
 
 // ==========================================================================
@@ -8088,6 +8798,7 @@ function updateMenuStatus() {
     if (keepLoggedEl) {
         keepLoggedEl.checked = localStorage.getItem('keepLogged') === '1';
     }
+    renderEscalaInvertidaUI();
 
     if (adminToolsEl) {
         adminToolsEl.classList.toggle('hidden', !(SiteAuth.logged && SiteAuth.mode === 'edit' && SiteAuth.role !== 'supervisor'));
