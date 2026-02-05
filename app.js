@@ -11,6 +11,12 @@ let lastUpdatedAt = null; // Timestamp da última carga de dados
 const NEXTI_AVAILABLE = false; // Nesta fase, a API Nexti NÃO deve ser chamada
 let unitAddressDb = { entries: [], address_map: {}, address_map_norm: {} };
 let unitGeoCache = {};
+let collaboratorAddressMap = {};
+let collaboratorAddressLoaded = false;
+let collaboratorAddressUpdatedAt = null;
+let substituteTargetRe = '';
+let substituteProximityMode = 'posto'; // off | posto | endereco
+let substituteSearchSeq = 0;
 let shadowReady = false;
 let shadowSyncTimer = null;
 let shadowAutoPullTimer = null;
@@ -32,12 +38,17 @@ let allCollaboratorsCache = { items: null, updatedAt: 0 };
 const RECICLAGEM_CACHE_TTL_MS = 30 * 60 * 1000;
 let exportUnitTarget = null;
 let ftLaunches = [];
+let ftRemovedIds = new Set();
 let currentLancamentosTab = 'dashboard';
 let ftFilter = { from: '', to: '', status: 'all' };
+let ftHistoryFilter = { search: '', unit: '', collab: '', sort: 'date_desc', grouped: true };
+let ftHistoryExpanded = new Set();
 let ftReasons = [];
 let lastFtCreatedId = null;
 let ftSyncTimer = null;
 let ftLastSyncAt = null;
+let ftSheetSyncInProgress = false;
+let ftAutoSyncBound = false;
 let reminderCheckTimer = null;
 let reminderAlertsHidden = false;
 let searchFilterStatus = 'all'; // all | plantao | folga | ft | afastado
@@ -168,6 +179,111 @@ function toggleSearchHideAbsence() {
     realizarBusca();
 }
 
+function toggleSubstituteSearchButton() {
+    const enabled = !isSubstituteSearchEnabled();
+    if (enabled && isAiSearchEnabled()) {
+        localStorage.setItem('aiSearchEnabled', '0');
+        updateAiSearchButton();
+    }
+    localStorage.setItem('substituteSearchEnabled', enabled ? '1' : '0');
+    if (!enabled) {
+        substituteTargetRe = '';
+    } else if (substituteProximityMode === 'off') {
+        substituteProximityMode = 'posto';
+        try { localStorage.setItem('substituteProximityMode', substituteProximityMode); } catch {}
+    } else if (searchFilterStatus === 'all') {
+        searchFilterStatus = 'folga';
+        updateSearchFilterUI();
+    }
+    updateSubstituteSearchButton();
+    updateSubstitutePanel();
+    realizarBusca();
+}
+
+function isSubstituteSearchEnabled() {
+    return localStorage.getItem('substituteSearchEnabled') === '1';
+}
+
+function updateSubstituteSearchButton() {
+    const btn = document.getElementById('substitute-search-btn');
+    if (!btn) return;
+    const enabled = isSubstituteSearchEnabled();
+    btn.textContent = enabled ? 'Buscar substituto: ON' : 'Buscar substituto: OFF';
+    btn.classList.toggle('active', enabled);
+    btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+}
+
+function getSubstituteTarget() {
+    if (!substituteTargetRe) return null;
+    return currentData.find(c => c.re === substituteTargetRe || c.re?.endsWith(substituteTargetRe))
+        || (allCollaboratorsCache.items || []).find(c => c.re === substituteTargetRe || c.re?.endsWith(substituteTargetRe))
+        || null;
+}
+
+function setSubstituteTarget(re) {
+    if (!re) return;
+    const target = currentData.find(c => c.re === re || c.re?.endsWith(re))
+        || (allCollaboratorsCache.items || []).find(c => c.re === re || c.re?.endsWith(re));
+    if (!target) {
+        showToast("Colaborador não encontrado.", "error");
+        return;
+    }
+    substituteTargetRe = target.re;
+    if (substituteProximityMode === 'off') {
+        substituteProximityMode = 'posto';
+        try { localStorage.setItem('substituteProximityMode', substituteProximityMode); } catch {}
+    }
+    if (searchFilterStatus === 'all') {
+        searchFilterStatus = 'folga';
+        updateSearchFilterUI();
+    }
+    const input = document.getElementById('search-input');
+    if (input) {
+        input.value = '';
+        input.focus();
+    }
+    updateSubstitutePanel();
+    showToast(`Alvo fixado: ${target.nome} (RE ${target.re}).`, "success");
+    realizarBusca();
+}
+
+function clearSubstituteTarget() {
+    substituteTargetRe = '';
+    updateSubstitutePanel();
+    realizarBusca();
+}
+
+function setSubstituteProximity(mode) {
+    substituteProximityMode = mode || 'off';
+    try {
+        localStorage.setItem('substituteProximityMode', substituteProximityMode);
+    } catch {}
+    updateSubstitutePanel();
+    realizarBusca();
+}
+
+function updateSubstitutePanel() {
+    const panel = document.getElementById('substitute-panel');
+    if (!panel) return;
+    const enabled = isSubstituteSearchEnabled();
+    panel.classList.toggle('hidden', !enabled);
+    const target = getSubstituteTarget();
+    const nameEl = document.getElementById('substitute-target-name');
+    const metaEl = document.getElementById('substitute-target-meta');
+    const clearBtn = document.getElementById('substitute-clear-btn');
+    if (nameEl) nameEl.textContent = target ? target.nome : 'Nenhum alvo fixado';
+    if (metaEl) metaEl.textContent = target ? `RE ${target.re}${target.posto ? ` • ${target.posto}` : ''}` : '';
+    if (clearBtn) clearBtn.disabled = !target;
+    panel.classList.toggle('no-target', !target);
+    panel.querySelectorAll('[data-prox]').forEach(btn => {
+        const mode = btn.getAttribute('data-prox');
+        const active = mode === substituteProximityMode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        btn.disabled = !target;
+    });
+}
+
 function toggleConfigCard(btn) {
     const card = btn?.closest('.config-card');
     if (!card) return;
@@ -266,6 +382,10 @@ function bindContextSelection() {
         const card = e.target.closest('.result-card');
         if (card && !e.target.closest('button') && !e.target.closest('a') && !e.target.closest('select')) {
             const re = card.getAttribute('data-collab-re');
+            if (re && isSubstituteSearchEnabled() && !getSubstituteTarget()) {
+                setSubstituteTarget(re);
+                return;
+            }
             if (re) setContextCollab(re);
         }
     });
@@ -356,12 +476,30 @@ function loadFtLaunches() {
         if (item.status === 'confirmed') item.status = 'submitted';
         if (!item.updatedAt) item.updatedAt = item.createdAt || new Date().toISOString();
     });
+    if (ftRemovedIds.size) {
+        ftLaunches = ftLaunches.filter(item => !ftRemovedIds.has(item.id));
+    }
 }
 
 function saveFtLaunches(silent = false) {
     localStorage.setItem('ftLaunches', JSON.stringify(ftLaunches));
     scheduleShadowSync('ft', { silent, notify: !silent });
     updateLancamentosUI();
+}
+
+function loadFtRemovedIds() {
+    try {
+        const stored = localStorage.getItem('ftRemovedIds');
+        const list = stored ? JSON.parse(stored) || [] : [];
+        ftRemovedIds = new Set(list.filter(Boolean));
+    } catch {
+        ftRemovedIds = new Set();
+    }
+}
+
+function saveFtRemovedIds(silent = false) {
+    localStorage.setItem('ftRemovedIds', JSON.stringify(Array.from(ftRemovedIds)));
+    scheduleShadowSync('ft-removed', { silent, notify: !silent });
 }
 
 function loadFtReasons() {
@@ -457,6 +595,7 @@ function buildShadowState() {
         localCollaborators: getLocalCollaborators(),
         avisos,
         ftLaunches,
+        ftRemovedIds: Array.from(ftRemovedIds),
         ftReasons,
         adminUsers: SiteAuth.admins,
         reciclagemTemplates,
@@ -478,6 +617,10 @@ function applyShadowState(state) {
     if (Array.isArray(state.ftReasons)) {
         ftReasons = state.ftReasons;
         saveFtReasons(true);
+    }
+    if (Array.isArray(state.ftRemovedIds)) {
+        state.ftRemovedIds.forEach(id => ftRemovedIds.add(id));
+        saveFtRemovedIds(true);
     }
     if (Array.isArray(state.adminUsers)) {
         SiteAuth.admins = normalizeAdmins(state.adminUsers);
@@ -927,17 +1070,26 @@ const SEARCH_TOKENS = [
 const gateway = document.getElementById('gateway');
 const appContainer = document.getElementById('app-container');
 const appTitle = document.getElementById('app-title');
-const APP_VERSION = 'v3.6';
+const APP_VERSION = 'v3.7';
 const contentArea = document.getElementById('content-area');
 
 // Inicialização
 document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem('aiSearchEnabled', '0'); // Modo IA sempre inicia desativado
+    localStorage.setItem('substituteSearchEnabled', '0'); // Busca de substituto inicia desativada
+    try {
+        const storedProx = localStorage.getItem('substituteProximityMode');
+        if (storedProx === 'off' || storedProx === 'posto' || storedProx === 'endereco') {
+            substituteProximityMode = storedProx;
+        }
+    } catch {}
     initAdmins();
     loadLocalState();
     startAutoEscalaMonitor();
     loadAvisos();
+    loadFtRemovedIds();
     loadFtLaunches();
+    refreshFtLabelsForToday();
     loadFtReasons();
     loadReciclagemTemplates();
     loadReciclagemOverrides();
@@ -948,6 +1100,8 @@ document.addEventListener('DOMContentLoaded', () => {
     startReminderMonitor();
     startReciclagemAutoRefresh();
     loadUnitAddressDb();
+    loadCollaboratorAddressDb();
+    startFtAutoSync();
     shadowPullState(false);
     startShadowAutoPull();
     document.body.classList.add('on-gateway');
@@ -1142,6 +1296,7 @@ async function loadGroup(groupKey) {
     contentArea.innerHTML = '<div class="loading">Carregando dados do Google Sheets...</div>';
 
     await shadowPullState(false);
+    await loadCollaboratorAddressDb();
     
     // Verificar se existem edições locais
     let keepChanges = false;
@@ -1203,8 +1358,11 @@ async function loadGroup(groupKey) {
     // ----------------------------------------------------------------------
     // 📄 MODO PLANILHA CSV (LEGADO)
     // ----------------------------------------------------------------------
-    // Carregar dados de telefones
-    const phoneCsv = await fetchSheetData(CONFIG.sheets.phones);
+    // Carregar dados de telefones e endereços
+    const [phoneCsv, addressMap] = await Promise.all([
+        fetchSheetData(CONFIG.sheets.phones),
+        loadCollaboratorAddressDb()
+    ]);
     const phoneMap = processPhoneData(phoneCsv);
 
     currentData = [];
@@ -1217,7 +1375,7 @@ async function loadGroup(groupKey) {
                 const rows = parseCSV(csv);
                 if (rows.length > 0) rows.shift();
                 // Vincula telefones automáticos para todos os grupos
-                return mapRowsToObjects(rows, key, keepChanges, phoneMap);
+                return mapRowsToObjects(rows, key, keepChanges, phoneMap, addressMap);
             }
             return [];
         });
@@ -1237,7 +1395,7 @@ async function loadGroup(groupKey) {
             const rows = parseCSV(csv);
             if (rows.length > 0) rows.shift();
             // Vincula telefones automáticos para todos os grupos
-            let items = mapRowsToObjects(rows, groupKey, keepChanges, phoneMap);
+            let items = mapRowsToObjects(rows, groupKey, keepChanges, phoneMap, addressMap);
             items = mergeLocalCollaborators(items, groupKey);
             currentData = items.map((item, idx) => ({ ...item, id: idx }));
             lastUpdatedAt = new Date();
@@ -1268,7 +1426,10 @@ async function getAllCollaborators() {
         return allCollaboratorsCache.items;
     }
     try {
-        const phoneCsv = await fetchSheetData(CONFIG.sheets.phones);
+        const [phoneCsv, addressMap] = await Promise.all([
+            fetchSheetData(CONFIG.sheets.phones),
+            loadCollaboratorAddressDb()
+        ]);
         const phoneMap = processPhoneData(phoneCsv);
         const keys = Object.keys(CONFIG.sheets).filter(k => k !== 'phones');
         const results = await Promise.all(keys.map(async (key) => {
@@ -1276,7 +1437,7 @@ async function getAllCollaborators() {
             if (!csv) return [];
             const rows = parseCSV(csv);
             if (rows.length > 0) rows.shift();
-            return mapRowsToObjects(rows, key, false, phoneMap);
+            return mapRowsToObjects(rows, key, false, phoneMap, addressMap);
         }));
         let allItems = [];
         results.forEach(items => allItems = allItems.concat(items));
@@ -1355,12 +1516,13 @@ function mapNextiToAppFormat(nextiPersons, groupTag, keepChanges) {
             grupo: groupTag,
             // API já fornece telefone, não precisa de map externo
             telefone: (p.phone || p.phone2 || '').replace(/\D/g, ''),
+            endereco: getCollaboratorAddressByRe(re),
             _nextiId: p.id // ID interno para busca de afastamentos
         };
     }).filter(item => item && item.nome && item.re);
 }
 
-function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap) {
+function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap, addressMap) {
     return rows.map((cols) => {
         if (cols.length < 6) return null; // Garante mínimo de colunas
 
@@ -1376,6 +1538,7 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap) {
         }
 
         const telefone = findPhone(re, nome, phoneMap);
+        const endereco = findCollaboratorAddress(re, addressMap);
         const grupoLabel = (cols[0] || '').trim().toUpperCase();
 
         // Extração de Tipo de Escala (12x36, 5x2, etc)
@@ -1396,7 +1559,8 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap) {
             rotuloFim: '',
             rotuloDetalhe: '', // Descrição para 'Outros'
             grupo: groupTag,
-            telefone: telefone
+            telefone: telefone,
+            endereco: endereco
         };
 
         return obj;
@@ -1627,9 +1791,22 @@ function mapNextiData(persons, groupTag, keepChanges) {
             rotuloFim: '',
             rotuloDetalhe: '',
             grupo: groupTag, // Atribui o grupo selecionado
-            telefone: (p.phone || p.phone2 || '').replace(/\D/g, '') // Usa telefone da API
+            telefone: (p.phone || p.phone2 || '').replace(/\D/g, ''), // Usa telefone da API
+            endereco: getCollaboratorAddressByRe(re)
         };
     }).filter(item => item && item.nome && item.re);
+}
+
+function normalizeHeaderValue(value) {
+    return (value || '')
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toUpperCase();
+}
+
+function normalizeReKey(value) {
+    if (value == null) return '';
+    return String(value).replace(/[^a-zA-Z0-9]/g, '');
 }
 
 function processPhoneData(csvText) {
@@ -1638,7 +1815,7 @@ function processPhoneData(csvText) {
     if (rows.length === 0) return [];
 
     // Tenta identificar colunas pelo cabeçalho
-    const headers = rows[0].map(h => h.toUpperCase());
+    const headers = rows[0].map(h => normalizeHeaderValue(h));
     let idxRE = headers.findIndex(h => h.includes('RE') || h.includes('MATRICULA'));
     let idxPhone = headers.findIndex(h => h.includes('TELEFONE') || h.includes('CELULAR') || h.includes('WHATSAPP') || h.includes('CONTATO'));
     let idxName = headers.findIndex(h => h.includes('NOME') || h.includes('COLABORADOR') || h.includes('FUNCIONARIO'));
@@ -1698,6 +1875,67 @@ function findPhone(colabRE, colabName, phoneList) {
     return match ? match.phone : '';
 }
 
+function processCollaboratorAddressData(csvText) {
+    if (!csvText) return {};
+    const rows = parseCSV(csvText);
+    if (!rows.length) return {};
+
+    let headerIndex = rows.findIndex(row => {
+        const normalized = row.map(normalizeHeaderValue);
+        const hasRe = normalized.some(h => h.includes('MATRICULA') || h === 'RE');
+        const hasAddress = normalized.some(h => h.includes('ENDERECO'));
+        return hasRe && hasAddress;
+    });
+    if (headerIndex < 0) headerIndex = 0;
+
+    const headers = rows[headerIndex].map(normalizeHeaderValue);
+    let idxRE = headers.findIndex(h => h.includes('MATRICULA') || h === 'RE');
+    let idxAddress = headers.findIndex(h => h.includes('ENDERECO'));
+
+    if (idxRE === -1) idxRE = 8;
+    if (idxAddress === -1) idxAddress = 10;
+
+    const map = {};
+    rows.slice(headerIndex + 1).forEach(cols => {
+        const reRaw = cols[idxRE] || '';
+        const address = (cols[idxAddress] || '').trim();
+        const key = normalizeReKey(reRaw);
+        if (key && address) map[key] = address;
+    });
+    return map;
+}
+
+async function loadCollaboratorAddressDb(force = false) {
+    if (collaboratorAddressLoaded && !force) return collaboratorAddressMap;
+    const url = CONFIG?.addressSheets?.collaborators;
+    if (!url) return collaboratorAddressMap;
+    try {
+        const csv = await fetchSheetData(url);
+        if (csv) {
+            collaboratorAddressMap = processCollaboratorAddressData(csv);
+            collaboratorAddressLoaded = true;
+            collaboratorAddressUpdatedAt = new Date();
+        }
+    } catch {}
+    return collaboratorAddressMap;
+}
+
+function findCollaboratorAddress(re, addressMap) {
+    if (!re) return '';
+    const map = addressMap || collaboratorAddressMap || {};
+    const key = normalizeReKey(re);
+    return map[key] || '';
+}
+
+function getCollaboratorAddressByRe(re) {
+    return findCollaboratorAddress(re, collaboratorAddressMap);
+}
+
+function getAddressForCollaborator(collab) {
+    if (!collab) return '';
+    return collab.endereco || getCollaboratorAddressByRe(collab.re);
+}
+
 // 4. Renderizar Dashboard (Sistema de Abas)
 function renderDashboard() {
     const canManageLancamentos = isAdminRole();
@@ -1730,6 +1968,7 @@ function renderDashboard() {
                     <button id="ai-search-btn" class="ai-toggle" onclick="toggleAiSearchButton()">IA: OFF</button>
                     <input type="text" id="search-input" class="search-input" 
                            placeholder="Digite nome, RE ou unidade..." autocomplete="off">
+                    <button id="substitute-search-btn" class="ai-toggle" onclick="toggleSubstituteSearchButton()">Buscar substituto: OFF</button>
                 </div>
                 <div id="search-suggestions" class="search-suggestions hidden"></div>
                 <div class="search-filters">
@@ -1740,14 +1979,22 @@ function renderDashboard() {
                     <button class="filter-chip" data-filter="afastado" onclick="setSearchFilterStatus('afastado')">Afastados</button>
                     <button class="filter-chip" data-hide="1" onclick="toggleSearchHideAbsence()">Sem afastamento</button>
                 </div>
-                <div class="search-coverage">
-                    <div class="search-coverage-row">
-                        <input type="text" id="search-unit-target" class="search-input search-input-compact" list="search-unit-list"
-                               placeholder="Unidade alvo para cobertura..." autocomplete="off">
-                        <datalist id="search-unit-list"></datalist>
-                        <button class="btn btn-secondary btn-small" onclick="suggestCoverageFromSearch()">Sugerir por proximidade</button>
+                <div id="substitute-panel" class="substitute-panel hidden">
+                    <div class="substitute-target-row">
+                        <div class="substitute-target-info">
+                            <span class="substitute-label">Alvo</span>
+                            <strong id="substitute-target-name">Nenhum alvo fixado</strong>
+                            <span id="substitute-target-meta" class="substitute-target-meta"></span>
+                        </div>
+                        <button id="substitute-clear-btn" class="btn btn-secondary btn-small" onclick="clearSubstituteTarget()">Trocar alvo</button>
                     </div>
-                    <div class="hint">Sugere colaboradores de folga por proximidade, priorizando quem já atua na unidade.</div>
+                    <div class="substitute-options">
+                        <span class="substitute-label">Proximidade</span>
+                        <button class="filter-chip" data-prox="off" onclick="setSubstituteProximity('off')">Sem</button>
+                        <button class="filter-chip" data-prox="posto" onclick="setSubstituteProximity('posto')">Posto</button>
+                        <button class="filter-chip" data-prox="endereco" onclick="setSubstituteProximity('endereco')">Endereço</button>
+                    </div>
+                    <div class="hint">Busque o colaborador, clique para fixar o alvo e use os filtros para encontrar cobertura.</div>
                 </div>
             </div>
             <div id="search-results" class="results-grid"></div>
@@ -1967,6 +2214,7 @@ function renderDashboard() {
                     <h3>Reciclagem</h3>
                     <div class="reciclagem-actions">
                         <button class="btn btn-secondary btn-small" onclick="loadReciclagemData(true); renderReciclagem();">Atualizar</button>
+                        <button class="btn btn-secondary btn-small" onclick="exportReciclagemReport()">Exportar relatório</button>
                         ${isAdminRole() ? `<button class="btn btn-secondary btn-small" onclick="toggleReciclagemTemplatesPanel()">Editar mensagens</button>` : ''}
                         ${isAdminRole() ? `<button class="btn btn-secondary btn-small" onclick="toggleReciclagemHistory()">Histórico</button>` : ''}
                     </div>
@@ -2022,15 +2270,26 @@ function renderDashboard() {
 
         <div id="tab-content-lancamentos" class="tab-content hidden">
             <div class="lancamentos-shell">
-                <div class="lancamentos-header">
-                    <h3>Lançamentos de FT</h3>
+                <div class="lancamentos-top">
+                    <div class="lancamentos-title">
+                        <h3>Lançamentos de FT</h3>
+                        <div class="lancamentos-meta">
+                            <span id="lancamentos-sync-status" class="lancamentos-sync-pill">Auto sync ativa</span>
+                            <span class="lancamentos-last-sync">Última sync: <span id="lancamentos-last-sync">—</span></span>
+                        </div>
+                    </div>
                     <div class="lancamentos-actions">
+                        <button class="btn btn-secondary btn-small" onclick="syncFtSheetLaunches()" ${canManageLancamentos ? '' : 'disabled'}>Sincronizar planilha</button>
                         <button class="btn btn-secondary btn-small" onclick="syncFtFormResponses()" ${canManageLancamentos ? '' : 'disabled'}>Sincronizar confirmações</button>
-                        <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Dashboard</button>
-                        <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico</button>
                         <button class="btn btn-small" onclick="switchLancamentosTab('novo')" ${canManageLancamentos ? '' : 'disabled'}>Novo Lançamento</button>
                     </div>
                 </div>
+                <div class="lancamentos-tabs">
+                    <button class="lancamentos-tab" data-tab="dashboard" onclick="switchLancamentosTab('dashboard')">Dashboard <span class="tab-badge" id="lancamentos-tab-total">0</span></button>
+                    <button class="lancamentos-tab" data-tab="historico" onclick="switchLancamentosTab('historico')">Histórico <span class="tab-badge" id="lancamentos-tab-pending">0</span></button>
+                    <button class="lancamentos-tab" data-tab="novo" onclick="switchLancamentosTab('novo')">Novo</button>
+                </div>
+                <div id="lancamentos-filters-wrap" class="lancamentos-filters-wrap"></div>
                 <div id="lancamentos-panel-dashboard" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-historico" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-novo" class="lancamentos-panel hidden">
@@ -2124,190 +2383,274 @@ function renderDashboard() {
                         </div>
 
                     <div id="config-pane-access" class="config-pane">
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <div class="card-title">Login</div>
-                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
-                            </div>
-                            <div class="config-card-body">
-                                <div id="statusSection">
-                                    <div class="status-block">
-                                        <div class="status-row"><span>Usuário</span><span id="userRe"></span></div>
-                                        <div class="status-row"><span>Modo</span><span id="siteMode"></span></div>
+                        <div class="config-section">
+                            <div class="config-section-title">Acesso e permissões</div>
+                            <div class="config-grid">
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Login</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
                                     </div>
-                                    <div class="actions">
-                                        <button class="btn" onclick="toggleEditMode()">Alternar Modo Edição</button>
-                                        <button class="btn btn-secondary" onclick="logoutSite()">Sair</button>
+                                    <div class="config-card-body">
+                                        <div id="statusSection">
+                                            <div class="status-block">
+                                                <div class="status-row"><span>Usuário</span><span id="userRe"></span></div>
+                                                <div class="status-row"><span>Modo</span><span id="siteMode"></span></div>
+                                            </div>
+                                            <div class="actions">
+                                                <button class="btn" onclick="toggleEditMode()">Alternar Modo Edição</button>
+                                                <button class="btn btn-secondary" onclick="logoutSite()">Sair</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card hidden" id="adminTools">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Admin</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="sub-title">Administradores</div>
+                                        <div id="adminList" class="admin-list"></div>
+
+                                        <div class="divider"></div>
+                                        <div class="sub-title">Adicionar administrador</div>
+                                        <div class="field-row">
+                                            <label>RE</label>
+                                            <input type="text" id="cfg-admin-re" placeholder="0000">
+                                        </div>
+                                        <div class="field-row">
+                                            <label>CPF (4 primeiros)</label>
+                                            <input type="password" id="cfg-admin-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                                        </div>
+                                        <button class="btn" onclick="addAdminFromConfig()">Adicionar Admin</button>
+
+                                        <div class="divider"></div>
+                                        <div class="sub-title">Adicionar supervisor (somente avisos)</div>
+                                        <div class="field-row">
+                                            <label>RE</label>
+                                            <input type="text" id="cfg-supervisor-re" placeholder="0000">
+                                        </div>
+                                        <div class="field-row">
+                                            <label>CPF (4 primeiros)</label>
+                                            <input type="password" id="cfg-supervisor-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                                        </div>
+                                        <button class="btn" onclick="addSupervisorFromConfig()">Adicionar Supervisor</button>
+
+                                        <div class="divider"></div>
+                                        <div class="sub-title">Alterar senha de outro usuário (Admin Master)</div>
+                                        <div class="field-row">
+                                            <label>Usuário</label>
+                                            <select id="cfg-reset-user"></select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label>Nova senha (4 dígitos)</label>
+                                            <input type="password" id="cfg-reset-pass" maxlength="4" inputmode="numeric" placeholder="0000">
+                                        </div>
+                                        <div class="field-row">
+                                            <label>Confirmar nova senha</label>
+                                            <input type="password" id="cfg-reset-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
+                                        </div>
+                                        <button class="btn" onclick="changeOtherAdminPassword()">Alterar Senha</button>
+
+                                        <div class="divider"></div>
+                                        <div class="sub-title">Adicionar colaborador (local)</div>
+                                        <div class="field-row">
+                                            <label>RE</label>
+                                            <input type="text" id="cfg-re" placeholder="0000">
+                                        </div>
+                                        <button class="btn" onclick="addLocalCollaboratorFromConfig()">Adicionar Colaborador</button>
+                                        <div class="hint">Senha padrão do colaborador: 4 primeiros dígitos do CPF (sem pontuação).</div>
+
+                                        <div class="divider"></div>
+
+                                        <div class="sub-title">Alterar senha (local)</div>
+                                        <div class="field-row">
+                                            <label>Nova senha (4 dígitos)</label>
+                                            <input type="password" id="cfg-new-pass" maxlength="4" inputmode="numeric" placeholder="0000">
+                                        </div>
+                                        <div class="field-row">
+                                            <label>Confirmar nova senha</label>
+                                            <input type="password" id="cfg-new-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
+                                        </div>
+                                        <button class="btn" onclick="changeLocalAdminPassword()">Alterar Senha</button>
+                                        <div class="hint">Senha local é usada apenas no site.</div>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
-                    <div class="config-card hidden" id="adminTools">
-                        <div class="config-card-header">
-                            <div class="card-title">Admin</div>
-                            <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
-                        </div>
-                        <div class="config-card-body">
-                            <div class="sub-title">Administradores</div>
-                            <div id="adminList" class="admin-list"></div>
-
-                            <div class="divider"></div>
-                            <div class="sub-title">Adicionar administrador</div>
-                            <div class="field-row">
-                                <label>RE</label>
-                                <input type="text" id="cfg-admin-re" placeholder="0000">
-                            </div>
-                            <div class="field-row">
-                                <label>CPF (4 primeiros)</label>
-                                <input type="password" id="cfg-admin-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
-                            </div>
-                            <button class="btn" onclick="addAdminFromConfig()">Adicionar Admin</button>
-
-                            <div class="divider"></div>
-                            <div class="sub-title">Adicionar supervisor (somente avisos)</div>
-                            <div class="field-row">
-                                <label>RE</label>
-                                <input type="text" id="cfg-supervisor-re" placeholder="0000">
-                            </div>
-                            <div class="field-row">
-                                <label>CPF (4 primeiros)</label>
-                                <input type="password" id="cfg-supervisor-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
-                            </div>
-                            <button class="btn" onclick="addSupervisorFromConfig()">Adicionar Supervisor</button>
-
-                            <div class="divider"></div>
-                            <div class="sub-title">Alterar senha de outro usuário (Admin Master)</div>
-                            <div class="field-row">
-                                <label>Usuário</label>
-                                <select id="cfg-reset-user"></select>
-                            </div>
-                            <div class="field-row">
-                                <label>Nova senha (4 dígitos)</label>
-                                <input type="password" id="cfg-reset-pass" maxlength="4" inputmode="numeric" placeholder="0000">
-                            </div>
-                            <div class="field-row">
-                                <label>Confirmar nova senha</label>
-                                <input type="password" id="cfg-reset-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
-                            </div>
-                            <button class="btn" onclick="changeOtherAdminPassword()">Alterar Senha</button>
-
-                            <div class="divider"></div>
-                            <div class="sub-title">Adicionar colaborador (local)</div>
-                            <div class="field-row">
-                                <label>RE</label>
-                                <input type="text" id="cfg-re" placeholder="0000">
-                            </div>
-                            <button class="btn" onclick="addLocalCollaboratorFromConfig()">Adicionar Colaborador</button>
-                            <div class="hint">Senha padrão do colaborador: 4 primeiros dígitos do CPF (sem pontuação).</div>
-
-                            <div class="divider"></div>
-
-                            <div class="sub-title">Alterar senha (local)</div>
-                            <div class="field-row">
-                                <label>Nova senha (4 dígitos)</label>
-                                <input type="password" id="cfg-new-pass" maxlength="4" inputmode="numeric" placeholder="0000">
-                            </div>
-                            <div class="field-row">
-                                <label>Confirmar nova senha</label>
-                                <input type="password" id="cfg-new-pass-confirm" maxlength="4" inputmode="numeric" placeholder="0000">
-                            </div>
-                            <button class="btn" onclick="changeLocalAdminPassword()">Alterar Senha</button>
-                            <div class="hint">Senha local é usada apenas no site.</div>
-                        </div>
                     </div>
 
-                </div>
-
                     <div id="config-pane-datasource" class="config-pane hidden">
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <div class="card-title">Modo de Banco de Dados</div>
-                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
-                            </div>
-                            <div class="config-card-body">
-                                <div class="field-row">
-                                    <label><input type="checkbox" id="useNextiToggle" onchange="toggleSource('nexti')"> Fonte principal: Nexti</label>
-                                </div>
-                                <div class="field-row">
-                                    <label><input type="checkbox" id="disableCsvToggle" onchange="toggleSource('csv')"> Fallback: usar Planilhas (CSV) se Nexti falhar</label>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <div class="card-title">Status das Fontes</div>
-                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
-                            </div>
-                            <div class="config-card-body">
-                                <div id="sourceStatus" class="source-status"></div>
-                                <div id="dataSourceList" class="source-list"></div>
-                            </div>
-                        </div>
-
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <div class="card-title">Escala de Plantão</div>
-                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
-                            </div>
-                            <div class="config-card-body">
-                                <div class="field-row">
-                                    <label>Inversão manual</label>
-                                    <div class="actions">
-                                        <button class="btn btn-secondary" onclick="toggleEscalaInvertida()">Inverter plantão</button>
-                                        <span id="escala-invertida-status" class="status-badge-menu view">Padrão</span>
+                        <div class="config-section">
+                            <div class="config-section-title">Visão geral</div>
+                            <div class="config-grid">
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Resumo da Base</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div id="config-summary" class="config-summary"></div>
                                     </div>
                                 </div>
-                                <div class="config-note">Ajuste automático: o sistema aplica a inversão no início de meses pares. O botão serve como correção manual quando necessário.</div>
-                                <div class="config-note">Quando ativado, a turma 1 passa a trabalhar nos dias pares e a turma 2 nos dias ímpares. Afeta busca rápida, dashboards e exportações.</div>
+
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Ações rápidas</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="actions">
+                                            <button class="btn btn-secondary" onclick="reloadCurrentGroupData()">Recarregar dados</button>
+                                            <button class="btn btn-secondary" onclick="openExportModal()">Exportar base</button>
+                                            <button class="btn btn-secondary" onclick="shadowPullAndReload()">Aplicar shadow agora</button>
+                                        </div>
+                                        <div class="config-note">Use estes atalhos para atualizar a base, exportar relatórios e aplicar alterações do shadow rapidamente.</div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <div class="card-title">Sincronização (Shadow)</div>
-                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                        <div class="config-section">
+                            <div class="config-section-title">Fontes e validação</div>
+                            <div class="config-grid">
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Status das Fontes</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div id="sourceStatus" class="source-status"></div>
+                                        <div id="dataSourceList" class="source-list"></div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Validador de planilhas</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="validator-controls">
+                                            <div class="form-group">
+                                                <label>Fonte</label>
+                                                <select id="sheet-validator-select"></select>
+                                            </div>
+                                            <div class="form-group">
+                                                <label>Ações</label>
+                                                <div class="actions">
+                                                    <button class="btn btn-secondary" onclick="validateSelectedSheet()">Validar</button>
+                                                    <button class="btn btn-secondary" onclick="clearSheetValidator()">Limpar</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div id="sheet-validator-status" class="validator-status"></div>
+                                        <div id="sheet-validator-preview" class="validator-preview"></div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Modo de Banco de Dados</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="field-row">
+                                            <label><input type="checkbox" id="useNextiToggle" onchange="toggleSource('nexti')"> Fonte principal: Nexti</label>
+                                        </div>
+                                        <div class="field-row">
+                                            <label><input type="checkbox" id="disableCsvToggle" onchange="toggleSource('csv')"> Fallback: usar Planilhas (CSV) se Nexti falhar</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="config-card-body">
-                                <div id="shadowStatus" class="shadow-status-block"></div>
-                                <div class="config-note">Manter alterações (padrão): carrega a base original e aplica as alterações do shadow por cima. Nada é apagado.</div>
-                                <div class="config-note">Importar base atual para o shadow: grava a base atual do site no banco shadow. Útil para criar um snapshot global. Pode sobrescrever versões anteriores.</div>
-                                <div class="config-note">Zerar banco shadow: apaga todas as alterações e histórico global. O site volta a usar apenas a base original.</div>
-                                <div class="config-note">Sincronizar histórico: força a regravação do histórico do site no banco shadow. Não altera a base original.</div>
-                                <div class="actions" id="shadowActions">
-                                    <button class="btn" onclick="shadowPullAndReload()">Aplicar alterações do shadow agora</button>
-                                    <button class="btn btn-secondary" onclick="shadowPushSnapshot()">Importar base atual para o shadow</button>
-                                    <button class="btn btn-danger" onclick="shadowResetAll()">Resetar banco de dados (shadow)</button>
-                                    <button class="btn btn-secondary" onclick="shadowPushHistory()">Sincronizar histórico</button>
+                        </div>
+
+                        <div class="config-section">
+                            <div class="config-section-title">Operação</div>
+                            <div class="config-grid">
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Sincronização (Shadow)</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div id="shadowStatus" class="shadow-status-block"></div>
+                                        <div class="config-note">Manter alterações (padrão): carrega a base original e aplica as alterações do shadow por cima. Nada é apagado.</div>
+                                        <div class="config-note">Importar base atual para o shadow: grava a base atual do site no banco shadow. Útil para criar um snapshot global. Pode sobrescrever versões anteriores.</div>
+                                        <div class="config-note">Zerar banco shadow: apaga todas as alterações e histórico global. O site volta a usar apenas a base original.</div>
+                                        <div class="config-note">Sincronizar histórico: força a regravação do histórico do site no banco shadow. Não altera a base original.</div>
+                                        <div class="actions" id="shadowActions">
+                                            <button class="btn" onclick="shadowPullAndReload()">Aplicar alterações do shadow agora</button>
+                                            <button class="btn btn-secondary" onclick="shadowPushSnapshot()">Importar base atual para o shadow</button>
+                                            <button class="btn btn-danger" onclick="shadowResetAll()">Resetar banco de dados (shadow)</button>
+                                            <button class="btn btn-secondary" onclick="shadowPushHistory()">Sincronizar histórico</button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Escala de Plantão</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="field-row">
+                                            <label>Inversão manual</label>
+                                            <div class="actions">
+                                                <button class="btn btn-secondary" onclick="toggleEscalaInvertida()">Inverter plantão</button>
+                                                <span id="escala-invertida-status" class="status-badge-menu view">Padrão</span>
+                                            </div>
+                                        </div>
+                                        <div class="config-note">Ajuste automático: o sistema aplica a inversão no início de meses pares. O botão serve como correção manual quando necessário.</div>
+                                        <div class="config-note">Quando ativado, a turma 1 passa a trabalhar nos dias pares e a turma 2 nos dias ímpares. Afeta busca rápida, dashboards e exportações.</div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Histórico recente</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div id="auditList" class="audit-list"></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
 
                     <div id="config-pane-ft" class="config-pane hidden">
-                        <div class="config-card">
-                            <div class="config-card-header">
-                                <div class="card-title">Configurações de FT</div>
-                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
-                            </div>
-                            <div class="config-card-body">
-                                <div class="hint">Edite motivos e mantenha o padrão de lançamentos.</div>
-                            </div>
-                        </div>
-                        <div class="config-card" id="ftReasonsCard">
-                            <div class="config-card-header">
-                                <div class="card-title">Motivos de FT</div>
-                                <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
-                            </div>
-                            <div class="config-card-body">
-                                <div id="ftReasonsList" class="admin-list"></div>
-                                <div class="divider"></div>
-                                <div class="field-row">
-                                    <label>Novo motivo</label>
-                                    <input type="text" id="ft-reason-new" placeholder="Ex: Treinamento">
+                        <div class="config-section">
+                            <div class="config-section-title">Padrões de FT</div>
+                            <div class="config-grid">
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Configurações de FT</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="hint">Edite motivos e mantenha o padrão de lançamentos.</div>
+                                    </div>
                                 </div>
-                                <button class="btn btn-secondary" onclick="addFtReason()">Adicionar motivo</button>
+                                <div class="config-card" id="ftReasonsCard">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Motivos de FT</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div id="ftReasonsList" class="admin-list"></div>
+                                        <div class="divider"></div>
+                                        <div class="field-row">
+                                            <label>Novo motivo</label>
+                                            <input type="text" id="ft-reason-new" placeholder="Ex: Treinamento">
+                                        </div>
+                                        <button class="btn btn-secondary" onclick="addFtReason()">Adicionar motivo</button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2548,6 +2891,7 @@ function renderDashboard() {
                         <ul>
                             <li>Digite nome, RE ou unidade para localizar colaboradores.</li>
                             <li>Os resultados aparecem instantaneamente conforme você digita.</li>
+                            <li>Use “Buscar substituto” para fixar um alvo e filtrar cobertura (proximidade por posto/endereço).</li>
                             <li>Use o botão de WhatsApp para contato rápido quando disponível.</li>
                         </ul>
                     </div>
@@ -2612,45 +2956,108 @@ function renderDashboard() {
                     <button class="close-modal" onclick="closeGuideModal()">${ICONS.close}</button>
                 </div>
                 <div class="help-content">
-                    <div class="help-section">
-                        <h4>Busca Rápida</h4>
-                        <ul>
-                            <li>Digite nome, RE ou unidade para localizar colaboradores.</li>
-                            <li>Use os filtros Plantão/Folga/FT/Afastados para refinar.</li>
-                            <li>Atalho de cobertura: selecione a unidade e clique em “Sugerir por proximidade”.</li>
-                        </ul>
-                    </div>
-                    <div class="help-section">
-                        <h4>Unidades</h4>
-                        <ul>
-                            <li>Lista por posto com times separados (Plantão x Folga).</li>
-                            <li>Histórico mostra alterações locais e globais (shadow).</li>
-                            <li>Exportar gera XLSX/CSV por unidade ou base completa.</li>
-                        </ul>
-                    </div>
-                    <div class="help-section">
-                        <h4>Avisos e Lembretes</h4>
-                        <ul>
-                            <li>Admins podem criar avisos gerais e lembretes direcionados.</li>
-                            <li>Colaboradores veem apenas avisos atribuídos ao próprio RE.</li>
-                        </ul>
-                    </div>
-                    <div class="help-section">
-                        <h4>Lançamentos de FT</h4>
-                        <ul>
-                            <li>Crie lançamentos com unidade alvo, data, escala e motivo.</li>
-                            <li>Use “Sugerir por proximidade” para escolher quem está de folga.</li>
-                            <li>Após salvar, copie ou envie o link de confirmação.</li>
-                        </ul>
-                    </div>
-                    <div class="help-section">
-                        <h4>Configurações</h4>
-                        <ul>
-                            <li>Controle de admins/supervisores e modo edição.</li>
-                            <li>Shadow sincroniza alterações globais entre todos.</li>
-                            <li>Escala de Plantão: inversão automática em meses pares + botão manual.</li>
-                        </ul>
-                    </div>
+                    <details class="guide-item">
+                        <summary>Guia completo (clique para abrir)</summary>
+                        <div class="guide-body">
+                            <div class="help-section">
+                                <h4>1. Visão geral e acesso</h4>
+                                <ol>
+                                    <li>Use o sistema para visualizar escalas, unidades, avisos, reciclagem e lançamentos de FT.</li>
+                                    <li>Perfis com permissão (admin/supervisor) liberam ações de edição e lançamentos.</li>
+                                    <li>Se estiver em modo visualização, você poderá navegar e consultar, mas não salvar alterações.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>2. Navegação principal</h4>
+                                <ol>
+                                    <li>Use as abas superiores para trocar entre Busca Rápida, Unidades, Avisos, Reciclagem, Lançamentos e Configuração.</li>
+                                    <li>O breadcrumb no topo mostra o grupo atual e a aba ativa.</li>
+                                    <li>Os botões utilitários (Imprimir, Ajuda, Prompts e Guia) ficam no canto superior.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>3. Busca rápida</h4>
+                                <ol>
+                                    <li>Digite nome, RE ou unidade para localizar colaboradores rapidamente.</li>
+                                    <li>Use os filtros Plantão, Folga, FT e Afastados para refinar resultados.</li>
+                                    <li>Ative "Buscar substituto" para fixar um alvo e comparar disponibilidade de cobertura.</li>
+                                    <li>Escolha o tipo de proximidade (posto ou endereço) quando for buscar substituto.</li>
+                                    <li>Os cartões exibem rótulos de FT e detalhes de quem cobre ou quem foi coberto.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>4. Unidades</h4>
+                                <ol>
+                                    <li>Use o filtro de grupo (quando disponível) e o status Plantão/Folga para organizar a visão.</li>
+                                    <li>Clique no nome da unidade para expandir ou recolher a lista.</li>
+                                    <li>Os rótulos e detalhes de unidade refletem o shadow e o histórico local.</li>
+                                    <li>Quando houver FT no dia, a unidade mostra um rótulo "FT hoje".</li>
+                                    <li>Use os botões de exportação para gerar XLSX/CSV por unidade ou a base completa.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>5. Avisos e lembretes</h4>
+                                <ol>
+                                    <li>Admins podem criar avisos gerais e lembretes direcionados por grupo ou RE.</li>
+                                    <li>Colaboradores visualizam apenas avisos atribuídos ao próprio RE.</li>
+                                    <li>Use filtros por status e grupo para localizar comunicados com rapidez.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>6. Lançamentos de FT – Dashboard</h4>
+                                <ol>
+                                    <li>Use o filtro de período e status no topo para ajustar os indicadores.</li>
+                                    <li>Consulte os KPIs de pendências, confirmadas e lançadas.</li>
+                                    <li>Analise os relatórios por unidade, colaborador, motivo, turno e dia da semana.</li>
+                                    <li>Verifique pendências recentes e qualidade dos dados para correções rápidas.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>7. Lançamentos de FT – Histórico</h4>
+                                <ol>
+                                    <li>Use busca local, filtros por unidade e colaborador e ordenação para encontrar o lançamento certo.</li>
+                                    <li>Ative "Agrupar por dia" para organizar por data da FT.</li>
+                                    <li>Clique em "Ver detalhes" para ver datas, motivo detalhado, solicitação e responsável.</li>
+                                    <li>Use Copiar link, WhatsApp, Marcar lançado e Remover conforme o status do lançamento.</li>
+                                    <li>Exportar histórico gera um XLSX com os filtros aplicados.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>8. Lançamentos de FT – Novo</h4>
+                                <ol>
+                                    <li>Busque o colaborador, confirme a unidade atual e selecione a unidade da FT.</li>
+                                    <li>Use "Sugerir por proximidade" para indicar quem está de folga.</li>
+                                    <li>Informe data, escala, motivo e o colaborador coberto.</li>
+                                    <li>Após salvar, copie ou envie o link de confirmação ao colaborador.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>9. Reciclagem</h4>
+                                <ol>
+                                    <li>Use filtros por planilha, status e pesquisa para localizar colaboradores.</li>
+                                    <li>O resumo mostra vencidos, a vencer, em dia e sem informação.</li>
+                                    <li>Edite registros quando necessário e use o relatório exportável.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>10. Configuração e Shadow</h4>
+                                <ol>
+                                    <li>Verifique as fontes de dados (planilhas, forms e reciclagem) e mantenha as URLs atualizadas.</li>
+                                    <li>O shadow mantém as alterações globais; aplique e sincronize sempre que necessário.</li>
+                                    <li>Use os atalhos rápidos para recarregar base, exportar dados e aplicar shadow.</li>
+                                    <li>Em FT, revise motivos e permissões de lançamento.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>11. Exportações e relatórios</h4>
+                                <ol>
+                                    <li>Use o menu de exportação para baixar base atualizada, resumos, históricos e PDFs.</li>
+                                    <li>Relatórios de FT e reciclagem podem ser exportados com filtros aplicados.</li>
+                                    <li>Antes de enviar, valide se o shadow está sincronizado e com status OK.</li>
+                                </ol>
+                            </div>
+                        </div>
+                    </details>
                 </div>
             </div>
         </div>
@@ -2715,7 +3122,10 @@ function renderDashboard() {
 
     updateMenuStatus();
     updateAiSearchButton();
+    updateSubstituteSearchButton();
+    updateSubstitutePanel();
     renderPromptTemplates();
+    bindContextSelection();
 
     // Configurar evento de busca
     const searchInput = document.getElementById('search-input');
@@ -2972,6 +3382,11 @@ function realizarBusca() {
     const filterStatus = searchFilterStatus || 'all';
     const hideAbsence = !!searchHideAbsence;
     const resultsContainer = document.getElementById('search-results');
+
+    if (isSubstituteSearchEnabled()) {
+        runSubstituteSearch(termo, resultsContainer, filterStatus, hideAbsence);
+        return;
+    }
     
     if (!termo && filterStatus === 'all') {
         resultsContainer.innerHTML = '<p class="empty-state">Digite para buscar ou selecione um filtro...</p>';
@@ -3034,6 +3449,7 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         const ftRelationHtml = ftRelation
             ? `<div class="ft-link ${ftRelation.type}"><strong>FT:</strong> ${ftRelation.type === 'covering' ? 'Cobrindo' : 'Coberto por'} ${ftRelation.label}${ftRelation.unit ? ` • ${ftRelation.unit}` : ''}</div>`
             : '';
+        const ftDetailHtml = buildFtDetailsHtml(item.re);
         const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
         const recIcon = recSummary
             ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
@@ -3088,13 +3504,268 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
                         ${turnoInfo ? `<div style="margin-top: 4px;">${turnoInfo}</div>` : ''}
                     </div>
                     ${ftRelationHtml}
+                    ${ftDetailHtml}
                 </div>
             </div>
         `;
     }).join('');
 }
 
+function buildSubstituteReason(candidate, target, options = {}) {
+    const statusInfo = options.statusInfoOverride || getStatusInfo(candidate);
+    const status = statusInfo.text;
+    const parts = [];
+    if (status.includes('FOLGA')) parts.push('está de folga hoje');
+    if (candidate.posto && target.posto && normalizeUnitKey(candidate.posto) === normalizeUnitKey(target.posto)) {
+        parts.push(`atua na mesma unidade (${candidate.posto})`);
+    }
+    const dist = formatDistanceKm(candidate._distanceKm);
+    if (dist) {
+        const mode = options.proximityMode || 'posto';
+        const label = mode === 'endereco'
+            ? `endereço do colaborador RE ${target.re}`
+            : `unidade do colaborador RE ${target.re}`;
+        parts.push(`está a ~${dist} km da ${label}`);
+    }
+    if (!parts.length) parts.push('disponibilidade verificada pela escala e status atual');
+    return `Motivo: ${parts.join(' e ')}.`;
+}
+
+function getMapsLocationForCollab(collab, modeUsed) {
+    if (!collab) return '';
+    if (modeUsed === 'endereco') {
+        const addr = getAddressForCollaborator(collab);
+        if (addr) return addr;
+    }
+    const unitAddr = getAddressForUnit(collab.posto);
+    if (unitAddr) return unitAddr;
+    return collab.posto || '';
+}
+
+function buildSubstituteActionHtml(candidate, target, modeUsed) {
+    const origin = getMapsLocationForCollab(candidate, modeUsed);
+    const destination = getMapsLocationForCollab(target, modeUsed);
+    const originJs = JSON.stringify(origin);
+    const destinationJs = JSON.stringify(destination);
+    return `
+        <button class="btn btn-secondary btn-small" onclick="openMapsRoute(${originJs}, ${destinationJs})">
+            Ver rota
+        </button>
+    `;
+}
+
+async function getProximityTargetCoords(target, mode) {
+    if (mode === 'posto') {
+        const coords = await getCoordsForUnit(target.posto);
+        if (coords) return { coords, modeUsed: 'posto', note: null };
+        const fallbackAddress = getAddressForCollaborator(target);
+        const fallbackCoords = await getCoordsForAddress(fallbackAddress);
+        if (fallbackCoords) return { coords: fallbackCoords, modeUsed: 'posto', note: 'fallback_endereco' };
+        return { coords: null, modeUsed: 'posto', note: 'no_target_coords' };
+    }
+    if (mode === 'endereco') {
+        const address = getAddressForCollaborator(target);
+        const coords = await getCoordsForAddress(address);
+        if (coords) return { coords, modeUsed: 'endereco', note: null };
+        const fallback = await getCoordsForUnit(target.posto);
+        if (fallback) return { coords: fallback, modeUsed: 'posto', note: 'fallback_unit' };
+        return { coords: null, modeUsed: 'endereco', note: 'no_target_coords' };
+    }
+    return { coords: null, modeUsed: 'off', note: 'off' };
+}
+
+async function sortCandidatesByProximity(list, target, mode) {
+    const targetInfo = await getProximityTargetCoords(target, mode);
+    if (!targetInfo.coords) {
+        list.forEach(item => { if (item._distanceKm != null) delete item._distanceKm; });
+        return { list, note: targetInfo.note || 'no_target_coords', modeUsed: targetInfo.modeUsed };
+    }
+
+    const withDistance = [];
+    const withoutDistance = [];
+    for (const cand of list) {
+        let coords = null;
+        if (targetInfo.modeUsed === 'posto') {
+            coords = await getCoordsForUnit(cand.posto);
+            if (coords) {
+                cand._distanceSource = 'posto';
+            } else {
+                const fallbackAddr = getAddressForCollaborator(cand);
+                if (fallbackAddr) {
+                    coords = await getCoordsForAddress(fallbackAddr);
+                    if (coords) cand._distanceSource = 'endereco';
+                }
+            }
+        } else {
+            const address = getAddressForCollaborator(cand);
+            if (address) {
+                coords = await getCoordsForAddress(address);
+                if (coords) {
+                    cand._distanceSource = 'endereco';
+                }
+            }
+            if (!coords) {
+                coords = await getCoordsForUnit(cand.posto);
+                if (coords) cand._distanceSource = 'posto';
+            }
+        }
+        if (!coords) {
+            if (cand._distanceKm != null) delete cand._distanceKm;
+            if (cand._distanceSource) delete cand._distanceSource;
+            withoutDistance.push(cand);
+            continue;
+        }
+        cand._distanceKm = calcDistanceKm(targetInfo.coords, coords);
+        withDistance.push(cand);
+    }
+
+    withDistance.sort((a, b) => a._distanceKm - b._distanceKm);
+    const note = withDistance.length
+        ? (withoutDistance.length ? 'partial' : (targetInfo.note || 'ok'))
+        : 'no_candidates_coords';
+    return { list: withDistance.concat(withoutDistance), note, modeUsed: targetInfo.modeUsed };
+}
+
+function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hideAbsence) {
+    let proximityLabel = 'Desligada';
+    if (modeUsed === 'posto') proximityLabel = 'Posto de trabalho';
+    if (modeUsed === 'endereco') proximityLabel = 'Endereço do colaborador';
+
+    let noteText = '';
+    if (note === 'fallback_unit') noteText = 'Endereço do alvo indisponível; usando posto de trabalho.';
+    if (note === 'fallback_endereco') noteText = 'Posto do alvo indisponível; usando endereço do colaborador.';
+    if (note === 'no_target_coords') noteText = 'Não consegui localizar o alvo para calcular distância; exibindo sem distância.';
+    if (note === 'no_candidates_coords') noteText = 'Não consegui geocodificar candidatos; exibindo sem distância.';
+    if (note === 'partial') noteText = 'Alguns candidatos sem endereço/geo; listados por último.';
+
+    const unitInfo = target.posto ? ` • ${target.posto}` : '';
+    const filterLabelMap = {
+        all: 'Todos',
+        plantao: 'Plantão',
+        folga: 'Folga',
+        ft: 'FT',
+        afastado: 'Afastados'
+    };
+    const filterLabel = filterLabelMap[filterStatus] || 'Todos';
+    const hideLabel = hideAbsence ? ' | Sem afastamento' : '';
+    return `
+        <div class="result-card">
+            <h4>Buscar substituto</h4>
+            <div class="meta">Alvo: ${target.nome} (RE ${target.re})${unitInfo}. Proximidade: ${proximityLabel}.</div>
+            ${noteText ? `<div class="meta">${noteText}</div>` : ''}
+            <div class="meta">Filtro: ${filterLabel}${hideLabel}.</div>
+            <div class="meta">Resultados: ${total}</div>
+        </div>
+    `;
+}
+
+async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAbsence) {
+    if (!resultsContainer) return;
+    const seq = ++substituteSearchSeq;
+    const termUpper = (termo || '').trim().toUpperCase();
+    const target = getSubstituteTarget();
+
+    if (!target) {
+        if (!termUpper) {
+            resultsContainer.innerHTML = '<p class="empty-state">Digite o nome ou RE e clique no colaborador para fixar o alvo.</p>';
+            return;
+        }
+        let results = currentData.filter(item => {
+            if (hiddenUnits.has(item.posto)) return false;
+            return (item.nome && item.nome.includes(termUpper)) ||
+                (item.re && item.re.includes(termUpper)) ||
+                (item.posto && item.posto.includes(termUpper));
+        });
+        if (!results.length) {
+            resultsContainer.innerHTML = '<p class="empty-state">Nenhum colaborador encontrado para fixar o alvo.</p>';
+            return;
+        }
+        results = results.slice(0, 20);
+        resultsContainer.innerHTML = results.map(item => renderAiResultCard(item, item, {
+            reasonOverride: 'Clique em "Fixar alvo" para iniciar a busca por substituto.',
+            actionHtml: `<button class="btn btn-secondary btn-small" onclick="setSubstituteTarget('${item.re}')">Fixar alvo</button>`
+        })).join('');
+        return;
+    }
+
+    let list = currentData.filter(item => item.re !== target.re && !hiddenUnits.has(item.posto));
+    if (termUpper) {
+        list = list.filter(item => (
+            (item.nome && item.nome.includes(termUpper)) ||
+            (item.re && item.re.includes(termUpper)) ||
+            (item.posto && item.posto.includes(termUpper))
+        ));
+    }
+    list = list.map(item => ({ ...item, _statusInfoSnapshot: getStatusInfo(item) }));
+    list = applyAiFilters(list, filterStatus, hideAbsence);
+
+    if (!list.length) {
+        resultsContainer.innerHTML = '<p class="empty-state">Nenhum resultado com os filtros atuais.</p>';
+        return;
+    }
+
+    let proximityNote = 'ok';
+    let modeUsed = substituteProximityMode || 'off';
+    if (modeUsed !== 'off') {
+        await loadUnitAddressDb();
+        await loadCollaboratorAddressDb();
+        resultsContainer.innerHTML = '<p class="empty-state">Calculando proximidade por endereços...</p>';
+        const sorted = await sortCandidatesByProximity(list, target, modeUsed);
+        if (seq !== substituteSearchSeq) return;
+        list = sorted.list;
+        proximityNote = sorted.note;
+        modeUsed = sorted.modeUsed;
+    } else {
+        list.forEach(item => {
+            if (item._distanceKm != null) delete item._distanceKm;
+            if (item._distanceSource) delete item._distanceSource;
+        });
+    }
+
+    const metaCard = buildSubstituteMetaCard(target, modeUsed, proximityNote, list.length, filterStatus, hideAbsence);
+    resultsContainer.innerHTML = metaCard + list.map(item => {
+        const statusInfo = item._statusInfoSnapshot || getStatusInfo(item);
+        const addressOk = !!getAddressForCollaborator(item);
+        const badgeHtml = `<span class="address-status-badge ${addressOk ? 'ok' : 'missing'}">${addressOk ? 'Endereço OK' : 'Sem endereço'}</span>`;
+        let sourceText = 'desligada';
+        if (modeUsed !== 'off') {
+            const source = item._distanceSource || modeUsed;
+            if (source === 'endereco' && modeUsed === 'endereco') {
+                sourceText = 'endereço';
+            } else if (source === 'posto' && modeUsed === 'endereco') {
+                sourceText = 'posto (fallback)';
+            } else if (source === 'endereco' && modeUsed === 'posto') {
+                sourceText = 'endereço (fallback)';
+            } else if (source === 'posto') {
+                sourceText = 'posto';
+            } else {
+                sourceText = modeUsed === 'endereco' ? 'endereço' : 'posto';
+            }
+        }
+        const reasonNote = `Fonte da proximidade: ${sourceText}.`;
+        return renderAiResultCard(item, target, {
+            statusInfoOverride: statusInfo,
+            reasonOverride: buildSubstituteReason(item, target, { proximityMode: modeUsed, statusInfoOverride: statusInfo }),
+            reasonNote,
+            headerBadgesHtml: badgeHtml,
+            actionHtml: buildSubstituteActionHtml(item, target, modeUsed)
+        });
+    }).join('');
+}
+
 // 6. Lógica de Unidades
+function getFtTodayByUnit(unitName, groupKey) {
+    const today = getTodayKey();
+    const target = normalizeUnitKey(unitName);
+    return ftLaunches.filter(item => {
+        if (!isFtActive(item)) return false;
+        if (!item.date || item.date !== today) return false;
+        if (groupKey && groupKey !== 'all' && item.group && item.group !== groupKey) return false;
+        const unit = normalizeUnitKey(item.unitTarget || item.unitCurrent || '');
+        return unit && unit === target;
+    });
+}
+
 function renderizarUnidades() {
     const unitsContainer = document.getElementById('units-list');
     const filterTerm = document.getElementById('unit-search-input')?.value.toUpperCase() || '';
@@ -3175,11 +3846,15 @@ function renderizarUnidades() {
         const lembretesBadge = lembretesPendentes > 0
             ? `<span class="unit-reminder-badge">${lembretesPendentes} lemb.</span>`
             : '';
+        const ftTodayItems = getFtTodayByUnit(posto, groupFilter === 'all' ? '' : groupFilter);
+        const ftBadge = ftTodayItems.length
+            ? `<span class="unit-ft-badge">FT hoje: ${ftTodayItems.length}</span>`
+            : '';
         const postoJs = JSON.stringify(posto);
         return `
             <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}" data-unit-name="${posto}">
                 <h3 class="unit-title">
-                    <span>${posto} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${avisosBadge} ${lembretesBadge}</span>
+                    <span>${posto} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${ftBadge} ${avisosBadge} ${lembretesBadge}</span>
                     <div class="unit-actions">
                         <button class="action-btn" onclick="openAddressModal(${postoJs})" title="Endereço">
                             ${ICONS.mapPin}
@@ -3764,6 +4439,56 @@ function getCollabStatusFromDetails(details) {
     return 'unknown';
 }
 
+function buildReciclagemSummaryData(items) {
+    const counts = { expired: 0, due: 0, ok: 0, unknown: 0, total: items.length };
+    const typeCounts = {};
+    items.forEach(item => {
+        const status = item.collabStatus || item.status || 'unknown';
+        if (counts[status] !== undefined) counts[status] += 1;
+        (item.detailItems || []).forEach(d => {
+            if (!typeCounts[d.label]) typeCounts[d.label] = { expired: 0, due: 0, ok: 0, unknown: 0 };
+            typeCounts[d.label][d.status] = (typeCounts[d.label][d.status] || 0) + 1;
+        });
+    });
+    return { counts, typeCounts };
+}
+
+function renderReciclagemSummary(items) {
+    const summaryEl = document.getElementById('reciclagem-summary');
+    if (!summaryEl) return;
+    const { counts } = buildReciclagemSummaryData(items);
+    summaryEl.innerHTML = `
+        <div class="reciclagem-kpi">
+            <div class="reciclagem-kpi-card status-expired">
+                <div class="label">Vencidos</div>
+                <div class="value">${counts.expired}</div>
+                <div class="meta">Críticos</div>
+            </div>
+            <div class="reciclagem-kpi-card status-due">
+                <div class="label">Próximos</div>
+                <div class="value">${counts.due}</div>
+                <div class="meta">Até ${CONFIG?.reciclagem?.alertDays ?? 30} dias</div>
+            </div>
+            <div class="reciclagem-kpi-card status-ok">
+                <div class="label">Em dia</div>
+                <div class="value">${counts.ok}</div>
+                <div class="meta">Regulares</div>
+            </div>
+            <div class="reciclagem-kpi-card status-unknown">
+                <div class="label">Sem data</div>
+                <div class="value">${counts.unknown}</div>
+                <div class="meta">Necessita ajuste</div>
+            </div>
+            <div class="reciclagem-kpi-card">
+                <div class="label">Total</div>
+                <div class="value">${counts.total}</div>
+                <div class="meta">Itens filtrados</div>
+            </div>
+        </div>
+    `;
+    summaryEl.classList.remove('hidden');
+}
+
 async function renderReciclagem() {
     const list = document.getElementById('reciclagem-list');
     if (!list) return;
@@ -3986,11 +4711,7 @@ async function renderReciclagem() {
         }
         return true;
     });
-    const summaryEl = document.getElementById('reciclagem-summary');
-    if (summaryEl) {
-        summaryEl.innerHTML = '';
-        summaryEl.classList.add('hidden');
-    }
+    renderReciclagemSummary(filteredByDetail);
     if (typeCountsEl) {
         const typeCounts = {};
         if (reciclagemTab === 'colab') {
@@ -4142,6 +4863,64 @@ async function renderReciclagem() {
             </div>
         `;
     }).join('');
+}
+
+function exportReciclagemReport() {
+    if (!reciclagemRenderCache.length) {
+        showToast("Nenhum dado de reciclagem para exportar.", "info");
+        return;
+    }
+    const items = reciclagemRenderCache;
+    const summary = buildReciclagemSummaryData(items);
+    const resumo = [
+        { "Indicador": "Vencidos", "Valor": summary.counts.expired },
+        { "Indicador": "Próximos", "Valor": summary.counts.due },
+        { "Indicador": "Em dia", "Valor": summary.counts.ok },
+        { "Indicador": "Sem data", "Valor": summary.counts.unknown },
+        { "Indicador": "Total filtrado", "Valor": summary.counts.total }
+    ];
+    const byType = Object.keys(summary.typeCounts).map(label => {
+        const c = summary.typeCounts[label];
+        return {
+            "Tipo": label,
+            "Vencidos": c.expired || 0,
+            "Próximos": c.due || 0,
+            "Em dia": c.ok || 0,
+            "Sem data": c.unknown || 0
+        };
+    });
+    const base = items.map(item => ({
+        "Tipo": item.typeLabel || item.type || '',
+        "Nome": item.name || '',
+        "RE": item.re || '',
+        "Unidade": item.unit || '',
+        "Status": item.collabStatus || item.status || '',
+        "Resumo": item.summary || '',
+        "Detalhes": (item.detailItems || []).map(d => `${d.label}: ${d.dateLabel} (${d.status})`).join(' | ')
+    }));
+    const detalhes = [];
+    items.forEach(item => {
+        (item.detailItems || []).forEach(d => {
+            detalhes.push({
+                "Tipo": d.label,
+                "Nome": item.name || '',
+                "RE": item.re || '',
+                "Unidade": item.unit || '',
+                "Status": d.status,
+                "Validade": d.dateLabel || ''
+            });
+        });
+    });
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumo), "Resumo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(byType), "Por Tipo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(base), "Base");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detalhes), "Detalhes");
+
+    const tag = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `reciclagem_${tag}.xlsx`);
+    showToast("Relatório de reciclagem exportado.", "success");
 }
 
 function openReciclagemModal(sheetKey, targetKey, matchType, label) {
@@ -4402,6 +5181,28 @@ function openAddressInMaps(address, unitName) {
     window.open(url, '_blank');
 }
 
+function buildMapsRouteUrl(origin, destination) {
+    if (!origin || !destination) return '';
+    const params = new URLSearchParams({
+        api: '1',
+        origin: origin,
+        destination: destination
+    });
+    return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+function openMapsRoute(origin, destination) {
+    const url = buildMapsRouteUrl(origin, destination);
+    if (url) {
+        window.open(url, '_blank');
+        return;
+    }
+    const query = destination || origin;
+    if (!query) return;
+    const searchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+    window.open(searchUrl, '_blank');
+}
+
 function openAddressPortal(unitName) {
     const base = 'https://gustauvm.github.io/ENDERECOS-DUNAMIS/';
     const url = unitName ? `${base}?q=${encodeURIComponent(unitName)}` : base;
@@ -4587,6 +5388,7 @@ function renderUnitTable(lista) {
                         const recIcon = recSummary
                             ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
                             : '';
+                        const ftDetailHtml = buildFtDetailsHtml(p.re);
                         return `
                             <tr class="${homenageado ? 'homenageado-row' : ''}">
                                 <td>
@@ -4603,6 +5405,7 @@ function renderUnitTable(lista) {
                                             `).join('')}
                                             ${p.rotuloFim ? `<span class="mini-date">Até ${formatDate(p.rotuloFim)}</span>` : ''}
                                         ` : ''}
+                                        ${ftDetailHtml}
                                     </div>
                                 </td>
                                 <td>${p.re}</td>
@@ -4701,11 +5504,15 @@ function parseCSV(text) {
 function getStatusInfo(item) {
     // 1. Verifica Rótulos Especiais (Prioridade)
     if (item.rotulo) {
-        const r = item.rotulo;
-        if (r === 'FÉRIAS' || r === 'ATESTADO' || r === 'AFASTADO') {
-            return { text: r, color: '#0f766e' }; // Verde azulado (afastamento)
+        const labels = String(item.rotulo)
+            .split(',')
+            .map(v => v.trim())
+            .filter(Boolean);
+        const absence = labels.find(l => l === 'FÉRIAS' || l === 'ATESTADO' || l === 'AFASTADO');
+        if (absence) {
+            return { text: absence, color: '#0f766e' }; // Verde azulado (afastamento)
         }
-        if (r === 'FT') {
+        if (labels.includes('FT')) {
             return { text: 'PLANTÃO EXTRA (FT)', color: '#002D72' }; // Azul Dunamis
         }
     }
@@ -4723,8 +5530,15 @@ function getStatusInfo(item) {
 
 function toggleAiSearchButton() {
     const enabled = !isAiSearchEnabled();
+    if (enabled && isSubstituteSearchEnabled()) {
+        localStorage.setItem('substituteSearchEnabled', '0');
+        substituteTargetRe = '';
+        updateSubstituteSearchButton();
+        updateSubstitutePanel();
+    }
     localStorage.setItem('aiSearchEnabled', enabled ? '1' : '0');
     updateAiSearchButton();
+    realizarBusca();
 }
 
 function isAiSearchEnabled() {
@@ -5034,6 +5848,15 @@ function normalizeText(text) {
         .toLowerCase();
 }
 
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function extractNameInParens(text) {
     const raw = (text || '');
     const match = raw.match(/\(([^)]+)\)/);
@@ -5118,27 +5941,157 @@ function normalizeUnitKey(text) {
         .trim();
 }
 
+function stripUnitNoise(base) {
+    if (!base) return '';
+    const trailingSingles = new Set([
+        'LTDA', 'EIRELI', 'EPP', 'ME', 'MEI', 'SPE', 'SC', 'INC', 'CIA',
+        'SOCIEDADE', 'ANONIMA', 'ASSOCIACAO', 'FUNDACAO', 'HOLDING',
+        'SERVICOS', 'SERVICO', 'SEGURANCA', 'BOMBEIROS'
+    ]);
+    let parts = base.split(' ').filter(Boolean);
+    let changed = true;
+    while (changed && parts.length) {
+        changed = false;
+        const last = parts[parts.length - 1];
+        if (trailingSingles.has(last)) {
+            parts.pop();
+            changed = true;
+            continue;
+        }
+        if (parts.length >= 2) {
+            const two = `${parts[parts.length - 2]} ${parts[parts.length - 1]}`;
+            if (two === 'S A' || two === 'S C') {
+                parts.pop();
+                parts.pop();
+                changed = true;
+            }
+        }
+    }
+    return parts.join(' ').trim();
+}
+
 function buildUnitKeyVariants(name) {
     const base = normalizeUnitKey(name);
-    const variants = new Set([base]);
-    if (base.startsWith('RB ')) variants.add(base.replace(/^RB\\s+/, '').trim());
-    if (base.startsWith('DUNAMIS ')) variants.add(base.replace(/^DUNAMIS\\s+/, '').trim());
-    if (base.startsWith('HOSPITAL ')) variants.add(base.replace(/^HOSPITAL\\s+/, '').trim());
+    const variants = new Set();
+    const addVariant = (value) => {
+        if (value) variants.add(value);
+    };
+    addVariant(base);
+    addVariant(stripUnitNoise(base));
+    if (base.startsWith('RB ')) addVariant(base.replace(/^RB\\s+/, '').trim());
+    if (base.startsWith('DUNAMIS ')) addVariant(base.replace(/^DUNAMIS\\s+/, '').trim());
+    if (base.startsWith('HOSPITAL ')) addVariant(base.replace(/^HOSPITAL\\s+/, '').trim());
+    const suffixClean = base
+        .replace(/\\s*-\\s*(SERVICOS|SERVIÇOS|SEGURANCA|SEGURANÇA|BOMBEIROS|SERVICO|SERVIÇO)\\b/g, '')
+        .replace(/\\s+SERVICOS\\b/g, '')
+        .replace(/\\s+SERVIÇOS\\b/g, '')
+        .replace(/\\s+SEGURANCA\\b/g, '')
+        .replace(/\\s+SEGURANÇA\\b/g, '')
+        .replace(/\\s+BOMBEIROS\\b/g, '')
+        .trim();
+    if (suffixClean) {
+        addVariant(suffixClean);
+        addVariant(stripUnitNoise(suffixClean));
+    }
+    Array.from(variants).forEach(v => addVariant(stripUnitNoise(v)));
     return Array.from(variants).filter(Boolean);
 }
 
+function processUnitAddressData(csvText) {
+    if (!csvText) return [];
+    const rows = parseCSV(csvText);
+    if (!rows.length) return [];
+
+    let headerIndex = rows.findIndex(row => {
+        const normalized = row.map(normalizeHeaderValue);
+        const hasUnit = normalized.some(h => h.includes('UNIDADE') || h.includes('POSTO'));
+        const hasAddress = normalized.some(h => h.includes('ENDERECO'));
+        return hasUnit && hasAddress;
+    });
+    if (headerIndex < 0) headerIndex = 0;
+
+    const headers = rows[headerIndex].map(normalizeHeaderValue);
+    let idxUnit = headers.findIndex(h => h.includes('UNIDADE') || h.includes('POSTO') || h.includes('CLIENTE'));
+    let idxAddress = headers.findIndex(h => h.includes('ENDERECO'));
+
+    if (idxUnit === -1) idxUnit = 0;
+    if (idxAddress === -1) idxAddress = 1;
+
+    return rows.slice(headerIndex + 1).map(cols => {
+        const nome = (cols[idxUnit] || '').trim().toUpperCase();
+        const endereco = (cols[idxAddress] || '').trim();
+        if (!nome) return null;
+        return { nome, endereco };
+    }).filter(Boolean);
+}
+
+function mergeUnitAddressEntries(primary, fallback) {
+    const map = new Map();
+    (primary || []).forEach(entry => {
+        const key = normalizeUnitKey(entry?.nome);
+        if (!key) return;
+        map.set(key, { ...entry });
+    });
+    (fallback || []).forEach(entry => {
+        const key = normalizeUnitKey(entry?.nome);
+        if (!key) return;
+        if (map.has(key)) {
+            const existing = map.get(key);
+            map.set(key, { ...entry, ...existing });
+        } else {
+            map.set(key, { ...entry });
+        }
+    });
+    return Array.from(map.values());
+}
+
+function buildUnitAddressNormMap(entries) {
+    const normMap = {};
+    (entries || []).forEach(e => {
+        if (!e?.endereco) return;
+        const variants = buildUnitKeyVariants(e.nome);
+        variants.forEach(key => {
+            if (key && !normMap[key]) normMap[key] = e.endereco;
+        });
+    });
+    return normMap;
+}
+
 async function loadUnitAddressDb() {
+    let entries = [];
+    let source = '';
+
+    try {
+        const csvUrl = CONFIG?.addressSheets?.units;
+        if (csvUrl) {
+            const csv = await fetchSheetData(csvUrl);
+            const csvEntries = processUnitAddressData(csv);
+            if (csvEntries.length) {
+                entries = csvEntries;
+                source = csvUrl;
+            }
+        }
+    } catch {}
+
     try {
         const resp = await fetch('unit_addresses.json', { cache: 'no-store' });
-        if (!resp.ok) return;
-        unitAddressDb = await resp.json();
-        const normMap = {};
-        (unitAddressDb.entries || []).forEach(e => {
-            const key = normalizeUnitKey(e.nome);
-            if (key && e.endereco) normMap[key] = e.endereco;
-        });
-        unitAddressDb.address_map_norm = normMap;
+        if (resp.ok) {
+            const json = await resp.json();
+            const jsonEntries = json?.entries || [];
+            if (!entries.length) {
+                entries = jsonEntries;
+                source = json?.source || 'unit_addresses.json';
+            } else if (jsonEntries.length) {
+                entries = mergeUnitAddressEntries(entries, jsonEntries);
+            }
+        }
     } catch {}
+
+    unitAddressDb = {
+        source,
+        entries,
+        address_map_norm: buildUnitAddressNormMap(entries)
+    };
 
     try {
         unitGeoCache = JSON.parse(localStorage.getItem('unitGeoCache') || '{}') || {};
@@ -5162,12 +6115,18 @@ function getAddressForUnit(unitName) {
         if (map[key]) return map[key];
     }
     const entries = unitAddressDb?.entries || [];
-    const base = normalizeUnitKey(unitName);
-    if (base.length >= 5) {
+    const keys = variants.length ? variants : [normalizeUnitKey(unitName)];
+    for (const base of keys) {
+        if (base.length < 5) continue;
         const direct = entries.find(e => normalizeUnitKey(e.nome) === base && e.endereco);
         if (direct) return direct.endereco;
         const contains = entries.find(e => normalizeUnitKey(e.nome).includes(base) && e.endereco);
         if (contains) return contains.endereco;
+        const contained = entries.find(e => {
+            const key = normalizeUnitKey(e.nome);
+            return key.length >= 5 && base.includes(key) && e.endereco;
+        });
+        if (contained) return contained.endereco;
     }
     return null;
 }
@@ -5379,14 +6338,22 @@ function findPersonByName(query) {
     }) || null;
 }
 
+function getStatusInfoForFilter(item) {
+    if (item && item._statusInfoSnapshot) return item._statusInfoSnapshot;
+    return getStatusInfo(item);
+}
+
 function applyAiFilters(list, filterStatus, hideAbsence) {
     let filtered = list;
     if (filterStatus === 'plantao') {
-        filtered = filtered.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT'));
+        filtered = filtered.filter(d => {
+            const status = getStatusInfoForFilter(d).text;
+            return status.includes('PLANTÃO') || status.includes('FT');
+        });
     } else if (filterStatus === 'folga') {
-        filtered = filtered.filter(d => getStatusInfo(d).text.includes('FOLGA'));
+        filtered = filtered.filter(d => getStatusInfoForFilter(d).text.includes('FOLGA'));
     } else if (filterStatus === 'ft') {
-        filtered = filtered.filter(d => getStatusInfo(d).text.includes('FT'));
+        filtered = filtered.filter(d => getStatusInfoForFilter(d).text.includes('FT'));
     } else if (filterStatus === 'afastado') {
         filtered = filtered.filter(d => !!d.rotulo);
     }
@@ -5420,40 +6387,116 @@ function isHomenageado(item) {
     return nome.includes('ADRIANO ANTUONO');
 }
 
+function isFtActive(item) {
+    return item && item.status === 'launched';
+}
+
+function isFtToday(item) {
+    return item && item.date === getTodayKey();
+}
+
+function refreshFtLabelsForToday() {
+    const today = getTodayKey();
+    const activeCoverers = new Set(
+        ftLaunches
+            .filter(item => isFtActive(item) && item.date === today)
+            .map(item => normalizeFtRe(item.collabRe))
+            .filter(Boolean)
+    );
+    let changed = false;
+    Object.keys(collaboratorEdits).forEach(key => {
+        const edit = collaboratorEdits[key];
+        if (!edit || edit.rotulo !== 'FT') return;
+        const norm = normalizeFtRe(edit.re || key);
+        if (!activeCoverers.has(norm)) {
+            delete edit.rotulo;
+            delete edit.rotuloInicio;
+            delete edit.rotuloFim;
+            delete edit.rotuloDetalhe;
+            collaboratorEdits[key] = edit;
+            changed = true;
+        }
+    });
+    currentData.forEach(c => {
+        if (c.rotulo !== 'FT') return;
+        const norm = normalizeFtRe(c.re);
+        if (!activeCoverers.has(norm)) {
+            delete c.rotulo;
+            delete c.rotuloInicio;
+            delete c.rotuloFim;
+            delete c.rotuloDetalhe;
+            changed = true;
+        }
+    });
+    if (changed) saveLocalState();
+    ftLaunches
+        .filter(item => isFtActive(item) && item.date === today)
+        .forEach(item => applyFtToCollaborator(item));
+}
+
+function getFtRelationsForRe(re, options = {}) {
+    if (!re) return [];
+    const onlyToday = options.onlyToday !== false;
+    const today = getTodayKey();
+    const items = ftLaunches.filter(item => {
+        if (!isFtActive(item)) return false;
+        if (onlyToday) {
+            if (!item.date || item.date !== today) return false;
+        }
+        return matchesRe(item.collabRe, re) || matchesRe(item.coveringRe, re);
+    });
+    return items.map(item => {
+        const isCovering = matchesRe(item.collabRe, re);
+        const targetName = item.coveringName ||
+            (item.coveringOther && item.coveringOther !== 'Não se aplica' ? item.coveringOther : '') ||
+            (item.coveringRe ? `RE ${item.coveringRe}` : '');
+        const covererName = item.collabName || (item.collabRe ? `RE ${item.collabRe}` : '');
+        return {
+            type: isCovering ? 'covering' : 'covered',
+            label: (isCovering ? targetName : covererName) || 'N/I',
+            unit: item.unitTarget || item.unitCurrent || '',
+            item
+        };
+    });
+}
+
 function getFtRelationInfo(re) {
-    if (!re) return null;
-    const active = ftLaunches.filter(item => item.status === 'submitted' || item.status === 'launched');
-    const covering = active.find(item => item.collabRe === re);
-    if (covering) {
-        const targetName = covering.coveringName ||
-            (covering.coveringOther && covering.coveringOther !== 'Não se aplica' ? covering.coveringOther : '') ||
-            (covering.coveringRe ? `RE ${covering.coveringRe}` : '');
-        return {
-            type: 'covering',
-            label: targetName || 'N/I',
-            unit: covering.unitTarget || covering.unitCurrent || ''
-        };
-    }
-    const covered = active.find(item => item.coveringRe === re);
-    if (covered) {
-        const covererName = covered.collabName || (covered.collabRe ? `RE ${covered.collabRe}` : '');
-        return {
-            type: 'covered',
-            label: covererName || 'N/I',
-            unit: covered.unitTarget || covered.unitCurrent || ''
-        };
-    }
-    return null;
+    const rels = getFtRelationsForRe(re);
+    return rels.length ? rels[0] : null;
+}
+
+function buildFtDetailsHtml(re) {
+    const rels = getFtRelationsForRe(re);
+    if (!rels.length) return '';
+    return rels.map(rel => {
+        const item = rel.item || {};
+        const unit = item.unitTarget || item.unitCurrent || 'N/I';
+        const date = item.date ? formatFtDate(item.date) : 'N/I';
+        const shift = item.shift || 'N/I';
+        const time = item.ftTime ? ` • ${item.ftTime}` : '';
+        const reason = getFtReasonLabel(item.reason, item.reasonOther) || item.reasonRaw || 'N/I';
+        const detail = item.reasonDetail ? `<span class="ft-detail-note">${item.reasonDetail}</span>` : '';
+        const label = rel.type === 'covering'
+            ? `Cobrindo ${rel.label}`
+            : `Coberto por ${rel.label}`;
+        return `
+            <div class="ft-detail ${rel.type}">
+                <strong>FT HOJE:</strong> ${label} • Unidade: ${unit} • Data: ${date} • Turno: ${shift}${time} • Motivo: ${reason}
+                ${detail}
+            </div>
+        `;
+    }).join('');
 }
 
 function renderAiResultCard(item, target, options = {}) {
-    const statusInfo = getStatusInfo(item);
+    const statusInfo = options.statusInfoOverride || getStatusInfo(item);
     const turnoInfo = getTurnoInfo(item.escala);
     const retornoInfo = item.rotulo && item.rotuloFim ? `<span class="return-date">Retorno: ${formatDate(item.rotuloFim)}</span>` : '';
     const ftRelation = getFtRelationInfo(item.re);
     const ftRelationHtml = ftRelation
         ? `<div class="ft-link ${ftRelation.type}"><strong>FT:</strong> ${ftRelation.type === 'covering' ? 'Cobrindo' : 'Coberto por'} ${ftRelation.label}${ftRelation.unit ? ` • ${ftRelation.unit}` : ''}</div>`
         : '';
+    const ftDetailHtml = buildFtDetailsHtml(item.re);
     const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
     const recIcon = recSummary
         ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
@@ -5474,9 +6517,11 @@ function renderAiResultCard(item, target, options = {}) {
     const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
     const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
     const reason = options.reasonOverride || buildAiReason(item, target);
+    const reasonNote = options.reasonNote ? `<div class="ai-reason-note">${options.reasonNote}</div>` : '';
     const actionHtml = options.actionHtml || '';
     const distanceLabel = formatDistanceKm(item._distanceKm);
     const distanceBadge = distanceLabel ? `<span class="distance-badge">≈ ${distanceLabel} km</span>` : '';
+    const headerBadges = options.headerBadgesHtml || '';
 
     const homenageado = isHomenageado(item);
     const nomeDisplay = homenageado ? `${item.nome} ✨` : item.nome;
@@ -5493,6 +6538,7 @@ function renderAiResultCard(item, target, options = {}) {
                     ${retornoInfo}
                 </div>
                 <div class="header-right">
+                    ${headerBadges}
                     ${distanceBadge}
                     <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal('${item.nome}', '${item.telefone || ''}')" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                 </div>
@@ -5507,7 +6553,8 @@ function renderAiResultCard(item, target, options = {}) {
                     ${turnoInfo ? `<div style="margin-top: 4px;">${turnoInfo}</div>` : ''}
                 </div>
                 ${ftRelationHtml}
-                <div class="ai-reason">${reason}</div>
+                ${ftDetailHtml}
+                <div class="ai-reason">${reason}${reasonNote}</div>
             </div>
             ${actionHtml ? `<div class="result-actions">${actionHtml}</div>` : ''}
         </div>
@@ -7036,7 +8083,11 @@ function mergeFtLaunchesFromShadow(remoteLaunches) {
         const eTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
         byId[a.id] = aTime >= eTime ? a : existing;
     });
-    ftLaunches = Object.values(byId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    let merged = Object.values(byId);
+    if (ftRemovedIds.size) {
+        merged = merged.filter(item => !ftRemovedIds.has(item.id));
+    }
+    ftLaunches = merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     saveFtLaunches(true);
 }
 
@@ -7361,12 +8412,344 @@ function formatFtDate(value) {
     }
 }
 
+function formatFtDateTime(value) {
+    if (!value) return '';
+    try {
+        return new Date(value).toLocaleString();
+    } catch {
+        return value;
+    }
+}
+
 function applyFtFilters(list) {
     let items = list.slice();
     if (ftFilter.from) items = items.filter(i => (i.date || '').slice(0,10) >= ftFilter.from);
     if (ftFilter.to) items = items.filter(i => (i.date || '').slice(0,10) <= ftFilter.to);
     if (ftFilter.status !== 'all') items = items.filter(i => i.status === ftFilter.status);
     return items;
+}
+
+function getFtUnitLabel(item) {
+    return (item?.unitTarget || item?.unitCurrent || '').trim() || 'N/I';
+}
+
+function getFtCollabLabel(item) {
+    const name = (item?.collabName || '').trim();
+    const re = (item?.collabRe || '').trim();
+    if (name && re) return `${name} (${re})`;
+    if (name) return name;
+    if (re) return `RE ${re}`;
+    return 'N/I';
+}
+
+function getFtStatusLabel(item) {
+    const isSheet = item?.source === 'sheet';
+    if (item?.status === 'launched') return 'LANÇADO NO NEXTI';
+    if (item?.status === 'submitted') return 'CONFIRMADO (Forms)';
+    return isSheet ? 'PENDENTE (PLANILHA)' : 'AGUARDANDO CONFIRMAÇÃO';
+}
+
+function getFtSourceInfo(item) {
+    const isSheet = item?.source === 'sheet';
+    if (isSheet) {
+        const group = item?.sourceGroup || item?.group || '';
+        const label = group ? `Planilha • ${String(group).toUpperCase()}` : 'Planilha';
+        return { label, className: 'source-sheet' };
+    }
+    if (item?.formLink) return { label: 'Forms', className: 'source-forms' };
+    return { label: 'Manual', className: 'source-manual' };
+}
+
+function buildFtHistorySearchText(item) {
+    const statusLabel = getFtStatusLabel(item);
+    return normalizeText([
+        item?.collabName,
+        item?.collabRe,
+        item?.unitTarget,
+        item?.unitCurrent,
+        item?.reasonRaw,
+        item?.reasonOther,
+        item?.reasonDetail,
+        item?.coveringName,
+        item?.coveringRe,
+        item?.coveringOther,
+        item?.shift,
+        item?.ftTime,
+        item?.status,
+        statusLabel,
+        item?.sheetStatusRaw,
+        item?.group,
+        item?.sourceGroup
+    ].filter(Boolean).join(' '));
+}
+
+function matchesFtHistorySearch(item, term) {
+    if (!term) return true;
+    return buildFtHistorySearchText(item).includes(term);
+}
+
+function applyFtHistoryFilters(list) {
+    let items = applyFtFilters(list);
+    const unitFilter = (ftHistoryFilter.unit || '').trim();
+    if (unitFilter) {
+        items = items.filter(i => getFtUnitLabel(i).toUpperCase() === unitFilter.toUpperCase());
+    }
+    const collabFilter = (ftHistoryFilter.collab || '').trim();
+    if (collabFilter) {
+        items = items.filter(i => {
+            if (matchesRe(i.collabRe, collabFilter)) return true;
+            return normalizeText(i.collabName || '') === normalizeText(collabFilter);
+        });
+    }
+    const term = normalizeText(ftHistoryFilter.search || '').trim();
+    if (term) items = items.filter(i => matchesFtHistorySearch(i, term));
+    return items;
+}
+
+function sortFtHistoryItems(items) {
+    const key = ftHistoryFilter.sort || 'date_desc';
+    const toTime = (value) => {
+        if (!value) return 0;
+        const t = Date.parse(value);
+        return Number.isNaN(t) ? 0 : t;
+    };
+    const statusRank = (value) => {
+        if (value === 'pending') return 0;
+        if (value === 'submitted') return 1;
+        if (value === 'launched') return 2;
+        return 3;
+    };
+    const getDateValue = (item) => toTime(item?.date || item?.createdAt || item?.requestedAt || '');
+    const getCreatedValue = (item) => toTime(item?.createdAt || '');
+    const getRequestedValue = (item) => toTime(item?.requestedAt || '');
+    const getUnitValue = (item) => getFtUnitLabel(item).toUpperCase();
+    const getCollabValue = (item) => (item?.collabName || '').toUpperCase();
+    return items.slice().sort((a, b) => {
+        if (key === 'date_asc') return getDateValue(a) - getDateValue(b);
+        if (key === 'date_desc') return getDateValue(b) - getDateValue(a);
+        if (key === 'created_asc') return getCreatedValue(a) - getCreatedValue(b);
+        if (key === 'created_desc') return getCreatedValue(b) - getCreatedValue(a);
+        if (key === 'requested_asc') return getRequestedValue(a) - getRequestedValue(b);
+        if (key === 'requested_desc') return getRequestedValue(b) - getRequestedValue(a);
+        if (key === 'status') return statusRank(a?.status) - statusRank(b?.status);
+        if (key === 'unit') return getUnitValue(a).localeCompare(getUnitValue(b));
+        if (key === 'collab') return getCollabValue(a).localeCompare(getCollabValue(b));
+        return getDateValue(b) - getDateValue(a);
+    });
+}
+
+function getFtHistoryGroupKey(item) {
+    const date = (item?.date || '').trim();
+    if (date) return date;
+    if (item?.createdAt) return String(item.createdAt).slice(0, 10);
+    if (item?.requestedAt) return String(item.requestedAt).slice(0, 10);
+    return 'Sem data';
+}
+
+function formatFtHistoryGroupLabel(key) {
+    if (!key || key === 'Sem data') return 'Sem data';
+    const date = new Date(`${key}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return key;
+    const weekdays = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB'];
+    const weekday = weekdays[date.getDay()] || '';
+    return `${weekday} • ${date.toLocaleDateString()}`;
+}
+
+function buildFtHistoryGroups(items) {
+    const groups = {};
+    items.forEach(item => {
+        const key = getFtHistoryGroupKey(item);
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(item);
+    });
+    const keys = Object.keys(groups).sort((a, b) => {
+        if (a === 'Sem data') return 1;
+        if (b === 'Sem data') return -1;
+        const ta = Date.parse(`${a}T00:00:00`);
+        const tb = Date.parse(`${b}T00:00:00`);
+        if (Number.isNaN(ta) || Number.isNaN(tb)) return String(b).localeCompare(String(a));
+        return tb - ta;
+    });
+    return keys.map(key => ({ key, label: formatFtHistoryGroupLabel(key), items: groups[key] }));
+}
+
+function toggleFtHistoryGrouped() {
+    ftHistoryFilter.grouped = !ftHistoryFilter.grouped;
+    renderLancamentosHistorico();
+}
+
+function toggleFtHistoryDetails(id) {
+    if (!id) return;
+    if (ftHistoryExpanded.has(id)) {
+        ftHistoryExpanded.delete(id);
+    } else {
+        ftHistoryExpanded.add(id);
+    }
+    const card = document.querySelector(`[data-ft-id="${id}"]`);
+    const details = card?.querySelector('.lancamento-details');
+    const btn = card?.querySelector('.lancamento-toggle');
+    if (details) details.classList.toggle('hidden', !ftHistoryExpanded.has(id));
+    if (btn) btn.textContent = ftHistoryExpanded.has(id) ? 'Ocultar detalhes' : 'Ver detalhes';
+}
+
+function toDateInputValue(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function setFtDateRange(range) {
+    const today = new Date();
+    if (range === 'today') {
+        const value = toDateInputValue(today);
+        ftFilter.from = value;
+        ftFilter.to = value;
+    } else if (range === '7d') {
+        const start = new Date(today);
+        start.setDate(today.getDate() - 6);
+        ftFilter.from = toDateInputValue(start);
+        ftFilter.to = toDateInputValue(today);
+    } else if (range === '30d') {
+        const start = new Date(today);
+        start.setDate(today.getDate() - 29);
+        ftFilter.from = toDateInputValue(start);
+        ftFilter.to = toDateInputValue(today);
+    } else if (range === 'month') {
+        const start = new Date(today.getFullYear(), today.getMonth(), 1);
+        ftFilter.from = toDateInputValue(start);
+        ftFilter.to = toDateInputValue(today);
+    } else {
+        ftFilter.from = '';
+        ftFilter.to = '';
+    }
+    renderLancamentos();
+}
+
+function toggleFtPendingOnly() {
+    ftFilter.status = ftFilter.status === 'pending' ? 'all' : 'pending';
+    renderLancamentos();
+}
+
+function updateLancamentosHeader() {
+    const statusEl = document.getElementById('lancamentos-sync-status');
+    const lastEl = document.getElementById('lancamentos-last-sync');
+    if (statusEl) {
+        if (ftSheetSyncInProgress) {
+            statusEl.textContent = 'Sincronizando...';
+            statusEl.classList.add('syncing');
+        } else {
+            statusEl.textContent = 'Auto sync ativa';
+            statusEl.classList.remove('syncing');
+        }
+    }
+    if (lastEl) {
+        lastEl.textContent = ftLastSyncAt ? formatFtDateTime(ftLastSyncAt) : '—';
+    }
+    document.querySelectorAll('.ft-sync-info').forEach(el => {
+        el.textContent = ftLastSyncAt ? formatFtDateTime(ftLastSyncAt) : '—';
+    });
+}
+
+function updateLancamentosTabs() {
+    const items = applyFtFilters(ftLaunches);
+    const total = items.length;
+    const pending = items.filter(i => i.status === 'pending').length;
+    const totalEl = document.getElementById('lancamentos-tab-total');
+    const pendingEl = document.getElementById('lancamentos-tab-pending');
+    if (totalEl) totalEl.textContent = total;
+    if (pendingEl) pendingEl.textContent = pending;
+    document.querySelectorAll('.lancamentos-tab').forEach(btn => {
+        const key = btn.getAttribute('data-tab');
+        const active = key === currentLancamentosTab;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+}
+
+function renderLancamentosFilters() {
+    const wrap = document.getElementById('lancamentos-filters-wrap');
+    if (!wrap) return;
+    const show = currentLancamentosTab !== 'novo';
+    wrap.classList.toggle('hidden', !show);
+    if (!show) return;
+    wrap.innerHTML = `
+        <div class="lancamentos-filters">
+            <div class="form-group">
+                <label>De</label>
+                <input type="date" id="ft-filter-from" value="${ftFilter.from}">
+            </div>
+            <div class="form-group">
+                <label>Até</label>
+                <input type="date" id="ft-filter-to" value="${ftFilter.to}">
+            </div>
+            <div class="form-group">
+                <label>Status</label>
+                <select id="ft-filter-status">
+                    <option value="all" ${ftFilter.status === 'all' ? 'selected' : ''}>Todos</option>
+                    <option value="pending" ${ftFilter.status === 'pending' ? 'selected' : ''}>Pendentes</option>
+                    <option value="submitted" ${ftFilter.status === 'submitted' ? 'selected' : ''}>Confirmados (Forms)</option>
+                    <option value="launched" ${ftFilter.status === 'launched' ? 'selected' : ''}>Lançados no Nexti</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Última sync</label>
+                <div class="ft-sync-info">${ftLastSyncAt ? formatFtDateTime(ftLastSyncAt) : '—'}</div>
+            </div>
+        </div>
+        <div class="lancamentos-quick">
+            <button class="filter-chip ${ftFilter.status === 'pending' ? 'active' : ''}" onclick="toggleFtPendingOnly()">Somente pendentes</button>
+            <button class="filter-chip" onclick="setFtDateRange('today')">Hoje</button>
+            <button class="filter-chip" onclick="setFtDateRange('7d')">7 dias</button>
+            <button class="filter-chip" onclick="setFtDateRange('30d')">30 dias</button>
+            <button class="filter-chip" onclick="setFtDateRange('month')">Este mês</button>
+            <button class="filter-chip" onclick="setFtDateRange('clear')">Limpar datas</button>
+        </div>
+    `;
+    document.getElementById('ft-filter-from')?.addEventListener('change', (e) => {
+        ftFilter.from = e.target.value || '';
+        renderLancamentos();
+    });
+    document.getElementById('ft-filter-to')?.addEventListener('change', (e) => {
+        ftFilter.to = e.target.value || '';
+        renderLancamentos();
+    });
+    document.getElementById('ft-filter-status')?.addEventListener('change', (e) => {
+        ftFilter.status = e.target.value || 'all';
+        renderLancamentos();
+    });
+}
+
+function buildReportRows(entries) {
+    if (!entries.length) {
+        return `<div class="report-empty">Sem dados.</div>`;
+    }
+    const max = Math.max(...entries.map(e => e.value), 1);
+    return entries.map(e => `
+        <div class="report-row">
+            <div class="report-label">${e.label}</div>
+            <div class="report-bar"><span style="width:${Math.round((e.value / max) * 100)}%"></span></div>
+            <div class="report-value">${e.value}</div>
+        </div>
+    `).join('');
+}
+
+function buildRecentRows(items, emptyText) {
+    if (!items.length) return `<div class="report-empty">${emptyText}</div>`;
+    return items.map(i => `
+        <div class="report-row compact">
+            <div class="report-label">${i.label}</div>
+            <div class="report-value">${i.value}</div>
+        </div>
+    `).join('');
+}
+
+function getFtWeekdayLabel(dateStr) {
+    if (!dateStr) return '';
+    const date = new Date(`${dateStr}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return '';
+    const map = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB'];
+    return map[date.getDay()];
 }
 
 function renderLancamentos() {
@@ -7379,6 +8762,10 @@ function renderLancamentos() {
     panelHistorico.classList.add('hidden');
     panelNovo.classList.add('hidden');
 
+    updateLancamentosHeader();
+    updateLancamentosTabs();
+    renderLancamentosFilters();
+
     if (currentLancamentosTab === 'dashboard') {
         panelDashboard.classList.remove('hidden');
         renderLancamentosDashboard();
@@ -7390,10 +8777,10 @@ function renderLancamentos() {
         renderLancamentosNovo();
     }
 
-    if (!ftSyncTimer) {
-        ftSyncTimer = setInterval(() => {
-            if (currentTab === 'lancamentos') syncFtFormResponses(true);
-        }, 120000);
+    if (!ftSyncTimer) startFtAutoSync();
+
+    if (currentTab === 'lancamentos') {
+        syncFtSheetLaunches(true);
     }
 }
 
@@ -7402,6 +8789,282 @@ function getFtResponseUrls() {
     return Object.entries(forms)
         .map(([group, cfg]) => ({ group, url: cfg?.responsesCsv || '' }))
         .filter(item => item.url);
+}
+
+function getFtSheetSources() {
+    const sources = [];
+    const sheets = CONFIG?.ftSheets && typeof CONFIG.ftSheets === 'object' ? CONFIG.ftSheets : null;
+    if (sheets) {
+        Object.entries(sheets).forEach(([group, url]) => {
+            if (url) sources.push({ group, url });
+        });
+    }
+    if (!sources.length) {
+        const url = CONFIG?.ftSheet?.url || '';
+        if (url) sources.push({ group: currentGroup || 'todos', url });
+    }
+    return sources;
+}
+
+function normalizeFtHeaderLabel(value) {
+    return String(value || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+function cleanFtText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().replace(/;+$/, '').trim();
+}
+
+function normalizeFtRe(value) {
+    return String(value || '').replace(/\D/g, '');
+}
+
+function matchesRe(a, b) {
+    const na = normalizeFtRe(a);
+    const nb = normalizeFtRe(b);
+    if (!na || !nb) return false;
+    return na === nb || na.endsWith(nb) || nb.endsWith(na);
+}
+
+function getTodayKey() {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function parseFtSheetDate(value) {
+    const raw = cleanFtText(value);
+    const match = raw.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    if (!match) return '';
+    return `${match[3]}-${match[2]}-${match[1]}`;
+}
+
+function parseFtSheetDateTime(value) {
+    const raw = cleanFtText(value);
+    const match = raw.match(/(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+    if (!match) return '';
+    const date = `${match[3]}-${match[2]}-${match[1]}`;
+    const hh = (match[4] || '00').padStart(2, '0');
+    const mm = (match[5] || '00').padStart(2, '0');
+    const ss = (match[6] || '00').padStart(2, '0');
+    return `${date}T${hh}:${mm}:${ss}`;
+}
+
+function normalizeFtStatus(value) {
+    const raw = cleanFtText(value).toUpperCase();
+    return raw.includes('LANÇADO') ? 'launched' : 'pending';
+}
+
+function normalizeFtReason(value) {
+    const raw = cleanFtText(value);
+    const upper = raw.toUpperCase();
+    if (!upper) return { code: 'outro', other: '' };
+    if (upper.includes('FALTA')) return { code: 'falta', other: '' };
+    if (upper.includes('TROCA')) return { code: 'troca', other: '' };
+    if (upper.includes('COBERT')) return { code: 'cobertura', other: '' };
+    if (upper.includes('EVENT')) return { code: 'evento', other: '' };
+    return { code: 'outro', other: raw };
+}
+
+function hashString(value) {
+    let hash = 0;
+    const str = String(value || '');
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0;
+    }
+    return Math.abs(hash).toString(36);
+}
+
+function buildFtSheetId(data) {
+    const base = [
+        data.sourceGroup || data.group || '',
+        data.requestedAt || '',
+        data.collabRe || data.collabName || '',
+        data.date || '',
+        data.unitTarget || '',
+        data.shift || '',
+        data.ftTime || ''
+    ].join('|');
+    return `ft-sheet-${hashString(base)}`;
+}
+
+function buildFtSheetSignature(data) {
+    return [
+        data.sourceGroup || data.group || '',
+        data.requestedAt || '',
+        data.date || '',
+        data.collabRe || '',
+        data.unitTarget || '',
+        data.shift || '',
+        data.ftTime || '',
+        data.reasonRaw || '',
+        data.reasonDetail || '',
+        data.coveringRe || '',
+        data.coveringOther || '',
+        data.status || ''
+    ].join('|');
+}
+
+function resolveFtSheetIndexes(header) {
+    const reIndexes = header
+        .map((h, idx) => (h === 're' ? idx : -1))
+        .filter(idx => idx >= 0);
+    return {
+        requestedAt: header.findIndex(h => h.includes('carimbo') || (h.includes('data') && h.includes('hora'))),
+        name: header.findIndex(h => h.includes('nome')),
+        re: reIndexes.length ? reIndexes[0] : header.findIndex(h => h === 're'),
+        date: header.findIndex(h => (h === 'data' || h.startsWith('data ')) && !h.includes('hora')),
+        unit: header.findIndex(h => h.includes('unidade') || h.includes('posto')),
+        reason: header.findIndex(h => h.includes('motivo')),
+        shift: header.findIndex(h => h.includes('turno')),
+        time: header.findIndex(h => h.includes('horario')),
+        reasonDetail: header.findIndex(h => h.includes('no lugar de quem') || h.includes('lugar de quem') || h.includes('detalh')),
+        coveringRe: reIndexes.length > 1 ? reIndexes[1] : -1,
+        status: header.findIndex(h => h.includes('status'))
+    };
+}
+
+function mapFtSheetRow(row, idx, collabMap, sourceGroup) {
+    const firstCell = cleanFtText(row[0] || '');
+    const firstUpper = firstCell.toUpperCase();
+    if (!row.some(cell => String(cell || '').trim())) return null;
+    if (['LEGENDA', 'FT LANÇADA', 'FT A LANÇAR', 'LANÇAR NO DRIVE', 'VERIFICAR'].some(tag => firstUpper.includes(tag))) {
+        return null;
+    }
+    const collabNameRaw = cleanFtText(row[idx.name] || '');
+    const collabRe = normalizeFtRe(row[idx.re] || '');
+    if (!collabNameRaw && !collabRe) return null;
+    const requestedAtRaw = cleanFtText(row[idx.requestedAt] || '');
+    const requestedAt = parseFtSheetDateTime(requestedAtRaw);
+    const ftDateRaw = cleanFtText(row[idx.date] || '');
+    const ftDate = parseFtSheetDate(ftDateRaw);
+    const unitTargetRaw = cleanFtText(row[idx.unit] || '');
+    const unitTarget = unitTargetRaw ? unitTargetRaw.toUpperCase() : '';
+    const reasonRaw = cleanFtText(row[idx.reason] || '');
+    const reasonNorm = normalizeFtReason(reasonRaw);
+    const shift = cleanFtText(row[idx.shift] || '');
+    const ftTime = cleanFtText(row[idx.time] || '');
+    const reasonDetail = cleanFtText(row[idx.reasonDetail] || '');
+    const coveringReRaw = cleanFtText(row[idx.coveringRe] || '');
+    const coveringRe = normalizeFtRe(coveringReRaw);
+    const coveringIgnored = coveringReRaw.toUpperCase() === 'XXXX';
+    const statusRaw = cleanFtText(row[idx.status] || '');
+    const status = normalizeFtStatus(statusRaw);
+    const collab = collabMap[collabRe] || null;
+    const coveringCollab = coveringRe ? (collabMap[coveringRe] || null) : null;
+    const createdAt = ftDate ? `${ftDate}T00:00:00` : (requestedAt || new Date().toISOString());
+    const resolvedGroup = collab?.grupo || sourceGroup || '';
+    const item = {
+        id: '',
+        source: 'sheet',
+        sourceGroup: sourceGroup || '',
+        createdAt,
+        updatedAt: new Date().toISOString(),
+        createdBy: 'Planilha FT',
+        requestedAt: requestedAt || '',
+        date: ftDate || '',
+        collabName: collab?.nome || (collabNameRaw ? collabNameRaw.toUpperCase() : ''),
+        collabRe,
+        collabPhone: collab?.telefone || '',
+        unitCurrent: collab?.posto || '',
+        unitTarget,
+        shift,
+        ftTime,
+        reason: reasonNorm.code,
+        reasonOther: reasonNorm.other,
+        reasonRaw,
+        reasonDetail,
+        coveringRe: coveringIgnored ? '' : coveringRe,
+        coveringName: coveringCollab?.nome || '',
+        coveringPhone: coveringCollab?.telefone || '',
+        coveringOther: '',
+        status,
+        group: resolvedGroup,
+        sheetStatusRaw: statusRaw
+    };
+    item.sheetSignature = buildFtSheetSignature(item);
+    item.id = buildFtSheetId(item);
+    return item;
+}
+
+async function syncFtSheetLaunches(silent = false) {
+    const sources = getFtSheetSources();
+    if (!sources.length) {
+        if (!silent) showToast("Configure a planilha de FT em config.js para sincronizar.", "info");
+        return;
+    }
+    if (ftSheetSyncInProgress) return;
+    ftSheetSyncInProgress = true;
+    updateLancamentosHeader();
+    try {
+        const collabs = await getAllCollaborators();
+        const collabMap = {};
+        (collabs || []).forEach(c => {
+            const key = normalizeFtRe(c.re);
+            if (key) collabMap[key] = c;
+        });
+        const byId = {};
+        ftLaunches.forEach(item => { byId[item.id] = item; });
+        let added = 0;
+        let updated = 0;
+        for (const src of sources) {
+            const csv = await fetchSheetData(src.url);
+            if (!csv) continue;
+            const rows = parseCSV(csv);
+            if (!rows.length) continue;
+            const header = rows[0].map(normalizeFtHeaderLabel);
+            const idx = resolveFtSheetIndexes(header);
+            if (idx.re < 0 || idx.date < 0 || idx.unit < 0 || idx.status < 0) continue;
+            for (let i = 1; i < rows.length; i++) {
+                const item = mapFtSheetRow(rows[i], idx, collabMap, src.group);
+                if (!item) continue;
+                if (ftRemovedIds.has(item.id)) continue;
+                const existing = byId[item.id];
+                if (!existing) {
+                    byId[item.id] = item;
+                    if (item.status === 'submitted' || item.status === 'launched') {
+                        applyFtToCollaborator(item);
+                    }
+                    added++;
+                    continue;
+                }
+                if (existing.source && existing.source !== 'sheet') continue;
+                if (existing.sheetSignature === item.sheetSignature) continue;
+                const prevStatus = existing.status;
+                Object.assign(existing, item);
+                if (prevStatus !== item.status) {
+                    setFtStatus(existing, item.status);
+                } else {
+                    existing.updatedAt = new Date().toISOString();
+                }
+                updated++;
+            }
+        }
+        let merged = Object.values(byId);
+        if (ftRemovedIds.size) {
+            merged = merged.filter(item => !ftRemovedIds.has(item.id));
+        }
+        ftLaunches = merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        refreshFtLabelsForToday();
+        if (added || updated) {
+            saveFtLaunches();
+            if (!silent) showToast(`Planilha FT sincronizada: ${added} novos, ${updated} atualizados.`, "success");
+        } else if (!silent) {
+            showToast("Planilha de FT já está atualizada.", "info");
+        }
+        ftLastSyncAt = new Date().toISOString();
+        updateLancamentosHeader();
+    } finally {
+        ftSheetSyncInProgress = false;
+        updateLancamentosHeader();
+    }
 }
 
 async function syncFtFormResponses(silent = false) {
@@ -7444,7 +9107,28 @@ async function syncFtFormResponses(silent = false) {
     } else if (!silent) {
         showToast("Nenhuma FT nova confirmada.", "info");
     }
+    if (updated) refreshFtLabelsForToday();
     ftLastSyncAt = new Date().toISOString();
+    updateLancamentosHeader();
+}
+
+function startFtAutoSync() {
+    if (ftSyncTimer) return;
+    ftSyncTimer = setInterval(() => {
+        syncFtFormResponses(true);
+        syncFtSheetLaunches(true);
+    }, 120000);
+    if (!ftAutoSyncBound) {
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                syncFtFormResponses(true);
+                syncFtSheetLaunches(true);
+            }
+        });
+        ftAutoSyncBound = true;
+    }
+    syncFtFormResponses(true);
+    syncFtSheetLaunches(true);
 }
 
 async function renderLancamentosNovo() {
@@ -7476,87 +9160,302 @@ function updateFtFormHint() {
     hint.textContent = 'Link de confirmação será gerado automaticamente ao salvar.';
 }
 
+function buildFtDashboardStats(items) {
+    const pending = items.filter(i => i.status === 'pending').length;
+    const submitted = items.filter(i => i.status === 'submitted').length;
+    const launched = items.filter(i => i.status === 'launched').length;
+    const total = items.length;
+    const uniqueDates = new Set(items.map(i => i.date).filter(Boolean));
+    const avgPerDay = uniqueDates.size ? (total / uniqueDates.size) : 0;
+    const launchRate = total ? Math.round((launched / total) * 100) : 0;
+
+    const byUnit = {};
+    const byPerson = {};
+    const byReason = {};
+    const byShift = {};
+    const byWeekday = {};
+    const bySource = {};
+    const pendingByUnit = {};
+    let missingUnit = 0;
+    let missingRe = 0;
+    let missingDate = 0;
+    items.forEach(i => {
+        const unit = i.unitTarget || i.unitCurrent || 'N/I';
+        const name = i.collabName || (i.collabRe ? `RE ${i.collabRe}` : 'N/I');
+        const reason = getFtReasonLabel(i.reason, i.reasonOther) || 'N/I';
+        const shift = i.shift || 'N/I';
+        const weekday = getFtWeekdayLabel(i.date);
+        const source = i.source === 'sheet' ? 'Planilha' : (i.formLink ? 'Forms' : 'Manual');
+        byUnit[unit] = (byUnit[unit] || 0) + 1;
+        byPerson[name] = (byPerson[name] || 0) + 1;
+        byReason[reason] = (byReason[reason] || 0) + 1;
+        byShift[shift] = (byShift[shift] || 0) + 1;
+        if (weekday) byWeekday[weekday] = (byWeekday[weekday] || 0) + 1;
+        bySource[source] = (bySource[source] || 0) + 1;
+        if (i.status === 'pending') pendingByUnit[unit] = (pendingByUnit[unit] || 0) + 1;
+        if (!i.unitTarget && !i.unitCurrent) missingUnit++;
+        if (!i.collabRe) missingRe++;
+        if (!i.date) missingDate++;
+    });
+
+    const topUnits = Object.entries(byUnit).sort((a, b) => b[1] - a[1]).slice(0, 8)
+        .map(([label, value]) => ({ label, value }));
+    const topPeople = Object.entries(byPerson).sort((a, b) => b[1] - a[1]).slice(0, 8)
+        .map(([label, value]) => ({ label, value }));
+    const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 6)
+        .map(([label, value]) => ({ label, value }));
+    const topShifts = Object.entries(byShift).sort((a, b) => b[1] - a[1]).slice(0, 6)
+        .map(([label, value]) => ({ label, value }));
+    const topSources = Object.entries(bySource).sort((a, b) => b[1] - a[1])
+        .map(([label, value]) => ({ label, value }));
+    const topPendingUnits = Object.entries(pendingByUnit).sort((a, b) => b[1] - a[1]).slice(0, 6)
+        .map(([label, value]) => ({ label, value }));
+    const weekdayOrder = ['SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB', 'DOM'];
+    const weekdayEntries = weekdayOrder
+        .map(label => ({ label, value: byWeekday[label] || 0 }))
+        .filter(e => e.value > 0);
+
+    const recentPending = items
+        .filter(i => i.status === 'pending')
+        .sort((a, b) => new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0))
+        .slice(0, 6)
+        .map(i => ({
+            label: `${i.collabName || 'Colaborador'} (${i.collabRe || 'N/I'})`,
+            value: i.date ? formatFtDate(i.date) : formatFtDate(i.createdAt)
+        }));
+
+    const recentLaunched = items
+        .filter(i => i.status === 'launched')
+        .sort((a, b) => new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0))
+        .slice(0, 6)
+        .map(i => ({
+            label: `${i.collabName || 'Colaborador'} (${i.collabRe || 'N/I'})`,
+            value: i.date ? formatFtDate(i.date) : formatFtDate(i.createdAt)
+        }));
+
+    return {
+        pending,
+        submitted,
+        launched,
+        total,
+        avgPerDay,
+        launchRate,
+        topUnits,
+        topPeople,
+        topReasons,
+        topShifts,
+        topSources,
+        topPendingUnits,
+        weekdayEntries,
+        recentPending,
+        recentLaunched,
+        missingUnit,
+        missingRe,
+        missingDate
+    };
+}
+
 function renderLancamentosDashboard() {
     const panel = document.getElementById('lancamentos-panel-dashboard');
     if (!panel) return;
 
-    const now = new Date();
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const items = applyFtFilters(ftLaunches);
-    const pending = items.filter(i => i.status === 'pending').length;
-    const submitted = items.filter(i => i.status === 'submitted').length;
-    const launched = items.filter(i => i.status === 'launched').length;
-    const totalMonth = items.filter(i => (i.date || '').startsWith(monthKey)).length;
-
-    const byUnit = {};
-    items.forEach(i => {
-        const unit = i.unitTarget || i.unitCurrent || 'N/I';
-        byUnit[unit] = (byUnit[unit] || 0) + 1;
-    });
-    const topUnits = Object.entries(byUnit).sort((a, b) => b[1] - a[1]).slice(0, 5);
-
-    const byPerson = {};
-    items.forEach(i => {
-        const name = i.collabName || 'N/I';
-        byPerson[name] = (byPerson[name] || 0) + 1;
-    });
-    const topPeople = Object.entries(byPerson).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const stats = buildFtDashboardStats(items);
+    const {
+        pending,
+        submitted,
+        launched,
+        total,
+        avgPerDay,
+        launchRate,
+        topUnits,
+        topPeople,
+        topReasons,
+        topShifts,
+        topSources,
+        topPendingUnits,
+        weekdayEntries,
+        recentPending,
+        recentLaunched,
+        missingUnit,
+        missingRe,
+        missingDate
+    } = stats;
 
     panel.innerHTML = `
-        <div class="lancamentos-filters">
-            <div class="form-group">
-                <label>De</label>
-                <input type="date" id="ft-filter-from" value="${ftFilter.from}">
+        <div class="lancamentos-kpi">
+            <div class="kpi-card">
+                <div class="kpi-label">Pendentes</div>
+                <div class="kpi-value">${pending}</div>
+                <div class="kpi-sub">Aguardando lançamento</div>
             </div>
-            <div class="form-group">
-                <label>Até</label>
-                <input type="date" id="ft-filter-to" value="${ftFilter.to}">
+            <div class="kpi-card">
+                <div class="kpi-label">Confirmadas</div>
+                <div class="kpi-value">${submitted}</div>
+                <div class="kpi-sub">Forms confirmadas</div>
             </div>
-            <div class="form-group">
-                <label>Status</label>
-                <select id="ft-filter-status">
-                    <option value="all" ${ftFilter.status === 'all' ? 'selected' : ''}>Todos</option>
-                    <option value="pending" ${ftFilter.status === 'pending' ? 'selected' : ''}>Pendentes</option>
-                    <option value="submitted" ${ftFilter.status === 'submitted' ? 'selected' : ''}>Confirmados (Forms)</option>
-                    <option value="launched" ${ftFilter.status === 'launched' ? 'selected' : ''}>Lançados no Nexti</option>
-                </select>
+            <div class="kpi-card">
+                <div class="kpi-label">Lançadas</div>
+                <div class="kpi-value">${launched}</div>
+                <div class="kpi-sub">LANÇADO no Nexti</div>
             </div>
-            <div class="form-group">
-                <label>Última sync</label>
-                <div class="ft-sync-info">${ftLastSyncAt ? formatFtDate(ftLastSyncAt) : '—'}</div>
+            <div class="kpi-card">
+                <div class="kpi-label">Total filtrado</div>
+                <div class="kpi-value">${total}</div>
+                <div class="kpi-sub">No período</div>
             </div>
-        </div>
-        <div class="lancamentos-cards">
-            <div class="lanc-card"><div class="label">Pendentes</div><div class="value">${pending}</div></div>
-            <div class="lanc-card"><div class="label">Confirmados (Forms)</div><div class="value">${submitted}</div></div>
-            <div class="lanc-card"><div class="label">Lançados no Nexti</div><div class="value">${launched}</div></div>
-            <div class="lanc-card"><div class="label">Total no mês</div><div class="value">${totalMonth}</div></div>
+            <div class="kpi-card">
+                <div class="kpi-label">Taxa de lançamento</div>
+                <div class="kpi-value">${launchRate}%</div>
+                <div class="kpi-sub">Lançadas ÷ Total</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-label">Média por dia</div>
+                <div class="kpi-value">${avgPerDay ? avgPerDay.toFixed(1) : '0.0'}</div>
+                <div class="kpi-sub">Dias com FT</div>
+            </div>
         </div>
         ${getFtResponseUrls().length ? '' : '<p class="empty-state">Para confirmação automática, publique a planilha de respostas (CSV) e preencha em config.js.</p>'}
-        <div class="lancamentos-grid">
-            <div class="lanc-panel">
-                <h4>Top Unidades</h4>
-                ${topUnits.map(([unit, count]) => `<div class="lanc-row"><span>${unit}</span><strong>${count}</strong></div>`).join('') || '<div class="empty-state">Sem dados.</div>'}
+        <div class="lancamentos-report-grid">
+            <div class="report-card">
+                <div class="report-title">Por Unidade (Top 8)</div>
+                <div class="report-list">${buildReportRows(topUnits)}</div>
             </div>
-            <div class="lanc-panel">
-                <h4>Top Colaboradores</h4>
-                ${topPeople.map(([name, count]) => `<div class="lanc-row"><span>${name}</span><strong>${count}</strong></div>`).join('') || '<div class="empty-state">Sem dados.</div>'}
+            <div class="report-card">
+                <div class="report-title">Por Colaborador (Top 8)</div>
+                <div class="report-list">${buildReportRows(topPeople)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Por Motivo</div>
+                <div class="report-list">${buildReportRows(topReasons)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Por Turno</div>
+                <div class="report-list">${buildReportRows(topShifts)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Por Dia da Semana</div>
+                <div class="report-list">${buildReportRows(weekdayEntries)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Por Origem</div>
+                <div class="report-list">${buildReportRows(topSources)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Pendências por Unidade</div>
+                <div class="report-list">${buildReportRows(topPendingUnits)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Pendências Recentes</div>
+                <div class="report-list">${buildRecentRows(recentPending, 'Sem pendências no período.')}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Lançadas Recentes</div>
+                <div class="report-list">${buildRecentRows(recentLaunched, 'Sem lançamentos no período.')}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Qualidade dos Dados</div>
+                <div class="report-list">${buildReportRows([
+                    { label: 'Sem unidade', value: missingUnit },
+                    { label: 'Sem RE', value: missingRe },
+                    { label: 'Sem data', value: missingDate }
+                ].filter(e => e.value > 0))}</div>
             </div>
         </div>
     `;
+}
 
-    document.getElementById('ft-filter-from')?.addEventListener('change', (e) => {
-        ftFilter.from = e.target.value || '';
-        renderLancamentosDashboard();
+function exportFtDashboard() {
+    const items = applyFtFilters(ftLaunches);
+    if (!items.length) {
+        showToast("Nenhum dado de FT para exportar.", "info");
+        return;
+    }
+    const stats = buildFtDashboardStats(items);
+    const toRows = (list) => list.map(i => ({ "Item": i.label, "Quantidade": i.value }));
+    const resumo = [
+        { "Indicador": "Pendentes", "Valor": stats.pending },
+        { "Indicador": "Confirmadas (Forms)", "Valor": stats.submitted },
+        { "Indicador": "Lançadas", "Valor": stats.launched },
+        { "Indicador": "Total filtrado", "Valor": stats.total },
+        { "Indicador": "Taxa de lançamento (%)", "Valor": stats.launchRate },
+        { "Indicador": "Média por dia", "Valor": stats.avgPerDay ? Number(stats.avgPerDay.toFixed(2)) : 0 }
+    ];
+    const qualidade = [
+        { "Indicador": "Sem unidade", "Valor": stats.missingUnit },
+        { "Indicador": "Sem RE", "Valor": stats.missingRe },
+        { "Indicador": "Sem data", "Valor": stats.missingDate }
+    ];
+    const base = items.map(i => ({
+        "Status": i.status,
+        "Data": i.date || '',
+        "Solicitada em": i.requestedAt ? formatFtDateTime(i.requestedAt) : '',
+        "Colaborador": i.collabName || '',
+        "RE": i.collabRe || '',
+        "Unidade": i.unitTarget || i.unitCurrent || '',
+        "Turno": i.shift || '',
+        "Horário": i.ftTime || '',
+        "Motivo": getFtReasonLabel(i.reason, i.reasonOther) || i.reasonRaw || '',
+        "Detalhe": i.reasonDetail || '',
+        "Cobrindo": i.coveringOther || (i.coveringName ? `${i.coveringName} (${i.coveringRe})` : (i.coveringRe || '')),
+        "Origem": i.source === 'sheet' ? 'Planilha' : (i.formLink ? 'Forms' : 'Manual'),
+        "Grupo": i.group || i.sourceGroup || ''
+    }));
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumo), "Resumo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topUnits)), "Por Unidade");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topPeople)), "Por Colaborador");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topReasons)), "Por Motivo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topShifts)), "Por Turno");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.weekdayEntries)), "Por Dia Semana");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topSources)), "Por Origem");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topPendingUnits)), "Pendências Unidade");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.recentPending)), "Pendências Recentes");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.recentLaunched)), "Lançadas Recentes");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(qualidade), "Qualidade Dados");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(base), "Base FT");
+
+    const tag = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `ft_dashboard_${tag}.xlsx`);
+    showToast("Relatórios de FT exportados.", "success");
+}
+
+function exportFtHistorico() {
+    const items = sortFtHistoryItems(applyFtHistoryFilters(ftLaunches));
+    if (!items.length) {
+        showToast("Nenhum lançamento de FT para exportar.", "info");
+        return;
+    }
+    const rows = items.map(i => {
+        const coveringText = i.coveringOther
+            ? (i.coveringRe ? `${i.coveringOther} (RE ${i.coveringRe})` : i.coveringOther)
+            : (i.coveringName ? `${i.coveringName} (${i.coveringRe || 'N/I'})` : (i.coveringRe ? `RE ${i.coveringRe}` : ''));
+        return {
+            "Status": getFtStatusLabel(i),
+            "Data FT": i.date || '',
+            "Solicitada em": i.requestedAt ? formatFtDateTime(i.requestedAt) : '',
+            "Criada em": i.createdAt ? formatFtDateTime(i.createdAt) : '',
+            "Colaborador": i.collabName || '',
+            "RE": i.collabRe || '',
+            "Unidade": getFtUnitLabel(i),
+            "Turno": i.shift || '',
+            "Horário": i.ftTime || '',
+            "Motivo": getFtReasonLabel(i.reason, i.reasonOther) || i.reasonRaw || '',
+            "Detalhe": i.reasonDetail || '',
+            "Cobrindo": coveringText,
+            "Observações": i.notes || '',
+            "Origem": getFtSourceInfo(i).label,
+            "Grupo": i.group || i.sourceGroup || '',
+            "Status planilha": i.sheetStatusRaw || '',
+            "Responsável": i.createdBy || ''
+        };
     });
-    document.getElementById('ft-filter-to')?.addEventListener('change', (e) => {
-        ftFilter.to = e.target.value || '';
-        renderLancamentosDashboard();
-    });
-    document.getElementById('ft-filter-status')?.addEventListener('change', (e) => {
-        ftFilter.status = e.target.value || 'all';
-        renderLancamentosDashboard();
-    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Historico FT");
+    const tag = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `ft_historico_${tag}.xlsx`);
+    showToast("Histórico de FT exportado.", "success");
 }
 
 function renderLancamentosHistorico() {
@@ -7566,51 +9465,107 @@ function renderLancamentosHistorico() {
         panel.innerHTML = `<p class="empty-state">Nenhum lançamento registrado.</p>`;
         return;
     }
-    const items = applyFtFilters(ftLaunches).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    panel.innerHTML = `
-        <div class="lancamentos-filters">
-            <div class="form-group">
-                <label>De</label>
-                <input type="date" id="ft-filter-from-h" value="${ftFilter.from}">
-            </div>
-            <div class="form-group">
-                <label>Até</label>
-                <input type="date" id="ft-filter-to-h" value="${ftFilter.to}">
-            </div>
-            <div class="form-group">
-                <label>Status</label>
-                <select id="ft-filter-status-h">
-                    <option value="all" ${ftFilter.status === 'all' ? 'selected' : ''}>Todos</option>
-                    <option value="pending" ${ftFilter.status === 'pending' ? 'selected' : ''}>Pendentes</option>
-                    <option value="submitted" ${ftFilter.status === 'submitted' ? 'selected' : ''}>Confirmados (Forms)</option>
-                    <option value="launched" ${ftFilter.status === 'launched' ? 'selected' : ''}>Lançados no Nexti</option>
-                </select>
-            </div>
+    const baseItems = applyFtFilters(ftLaunches);
+    const filtered = applyFtHistoryFilters(ftLaunches);
+    const sorted = sortFtHistoryItems(filtered);
+    const groups = ftHistoryFilter.grouped ? buildFtHistoryGroups(sorted) : [{ key: 'all', label: '', items: sorted }];
+
+    const total = filtered.length;
+    const pending = filtered.filter(i => i.status === 'pending').length;
+    const submitted = filtered.filter(i => i.status === 'submitted').length;
+    const launched = filtered.filter(i => i.status === 'launched').length;
+    const sheetCount = filtered.filter(i => i.source === 'sheet').length;
+    const formsCount = filtered.filter(i => i.formLink).length;
+    const manualCount = filtered.filter(i => !i.formLink && i.source !== 'sheet').length;
+
+    const unitSet = new Set();
+    baseItems.forEach(i => {
+        const label = getFtUnitLabel(i);
+        if (label && label !== 'N/I') unitSet.add(label);
+    });
+    const unitOptions = Array.from(unitSet).sort((a, b) => a.localeCompare(b));
+    if (ftHistoryFilter.unit && !unitSet.has(ftHistoryFilter.unit)) {
+        unitOptions.unshift(ftHistoryFilter.unit);
+    }
+    const collabMap = new Map();
+    baseItems.forEach(i => {
+        const key = (i.collabRe || i.collabName || '').trim();
+        if (!key) return;
+        if (!collabMap.has(key)) collabMap.set(key, getFtCollabLabel(i));
+    });
+    const collabOptions = Array.from(collabMap.entries())
+        .map(([value, label]) => ({ value, label }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+    if (ftHistoryFilter.collab && !collabMap.has(ftHistoryFilter.collab)) {
+        collabOptions.unshift({ value: ftHistoryFilter.collab, label: ftHistoryFilter.collab });
+    }
+
+    const summaryCards = `
+        <div class="lancamentos-cards">
+            <div class="lanc-card"><div class="label">Total</div><div class="value">${total}</div></div>
+            <div class="lanc-card"><div class="label">Pendentes</div><div class="value">${pending}</div></div>
+            <div class="lanc-card"><div class="label">Confirmadas</div><div class="value">${submitted}</div></div>
+            <div class="lanc-card"><div class="label">Lançadas</div><div class="value">${launched}</div></div>
+            <div class="lanc-card"><div class="label">Planilha</div><div class="value">${sheetCount}</div></div>
+            <div class="lanc-card"><div class="label">Forms</div><div class="value">${formsCount}</div></div>
+            <div class="lanc-card"><div class="label">Manual</div><div class="value">${manualCount}</div></div>
         </div>
-        ${items.map(item => {
-            const statusText = item.status === 'launched'
-                ? 'LANÇADO NO NEXTI'
-                : (item.status === 'submitted' ? 'CONFIRMADO (Forms)' : 'AGUARDANDO CONFIRMAÇÃO');
-            const canLaunch = item.status === 'submitted' && isAdminRole();
-            const launched = item.status === 'launched';
-            return `
-        <div class="lancamento-card" data-ft-id="${item.id}">
-            <div class="lancamento-meta">
-                <span class="lancamento-date">${formatFtDate(item.createdAt)}</span>
-                <span class="lancamento-status status-${item.status}">${statusText}</span>
-            </div>
-            <div class="lancamento-steps">
-                <span class="step ${item.createdAt ? 'done' : ''}">Criada</span>
-                <span class="step ${item.linkSentAt ? 'done' : ''}">Link enviado</span>
-                <span class="step ${item.status === 'submitted' || item.status === 'launched' ? 'done' : ''}">Confirmado pelo colaborador</span>
-                <span class="step ${item.status === 'launched' ? 'done' : ''}">Lançado no Nexti</span>
-            </div>
-            <div class="lancamento-title">${item.collabName || 'Colaborador'} (${item.collabRe})</div>
-            <div class="lancamento-details">
-                <div><strong>Unidade:</strong> ${item.unitTarget || item.unitCurrent || 'N/I'}</div>
-                <div><strong>Data:</strong> ${item.date || 'N/I'} • <strong>Escala:</strong> ${item.shift || 'N/I'}</div>
-                <div><strong>Motivo:</strong> ${getFtReasonLabel(item.reason, item.reasonOther) || 'N/I'} • <strong>Cobrindo:</strong> ${item.coveringOther || (item.coveringName ? `${item.coveringName} (${item.coveringRe})` : (item.coveringRe || '-'))}</div>
-                <div><strong>Responsável:</strong> ${item.createdBy || 'Admin'}</div>
+    `;
+
+    const buildCards = (items) => items.map(item => {
+        const isSheet = item.source === 'sheet';
+        const statusText = getFtStatusLabel(item);
+        const canLaunch = item.status === 'submitted' && isAdminRole() && !isSheet;
+        const launched = item.status === 'launched';
+        const requestedAt = item.requestedAt ? formatFtDateTime(item.requestedAt) : '';
+        const createdAt = item.createdAt ? formatFtDateTime(item.createdAt) : '';
+        const sourceInfo = getFtSourceInfo(item);
+        const coveringText = item.coveringOther
+            ? (item.coveringRe ? `${item.coveringOther} (RE ${item.coveringRe})` : item.coveringOther)
+            : (item.coveringName ? `${item.coveringName} (${item.coveringRe || 'N/I'})` : (item.coveringRe ? `RE ${item.coveringRe}` : '-'));
+        const reasonLabel = getFtReasonLabel(item.reason, item.reasonOther) || item.reasonRaw || 'N/I';
+        const reasonDetail = (item.reasonDetail || '').trim();
+        const reasonUpper = String(reasonLabel || '').toUpperCase();
+        const detailUpper = reasonDetail.toUpperCase();
+        const detailDiff = !!reasonDetail && detailUpper !== reasonUpper;
+        const detailBadge = detailDiff ? `<span class="detail-badge">Detalhe extra</span>` : '';
+        const notes = (item.notes || '').trim();
+        const timeText = item.ftTime ? ` • ${item.ftTime}` : '';
+        const expanded = ftHistoryExpanded.has(item.id);
+        const isToday = item.date === getTodayKey();
+        const isPending = item.status === 'pending';
+        const dateLabel = item.date ? formatFtDate(item.date) : formatFtDate(item.createdAt);
+        return `
+        <div class="lancamento-card ${isToday ? 'is-today' : ''} ${isPending ? 'is-pending' : ''}" data-ft-id="${item.id}">
+            <div class="lancamento-main">
+                <div class="lancamento-meta">
+                    <span class="lancamento-date">${dateLabel || 'N/I'}</span>
+                    <span class="lancamento-status status-${item.status}">${statusText}</span>
+                    <span class="lancamento-source ${sourceInfo.className}">${sourceInfo.label}</span>
+                </div>
+                <div class="lancamento-title">${getFtCollabLabel(item)}</div>
+                <div class="lancamento-summary">
+                    <span><strong>Unidade:</strong> ${getFtUnitLabel(item)}</span>
+                    <span><strong>Data:</strong> ${item.date ? formatFtDate(item.date) : 'N/I'} • <strong>Escala:</strong> ${item.shift || 'N/I'}${timeText}</span>
+                    <span><strong>Motivo:</strong> ${reasonLabel}</span>
+                    <span><strong>Cobrindo:</strong> ${coveringText}</span>
+                    ${detailBadge}
+                </div>
+                <button class="lancamento-toggle" type="button" onclick="toggleFtHistoryDetails('${item.id}')">${expanded ? 'Ocultar detalhes' : 'Ver detalhes'}</button>
+                <div class="lancamento-details ${expanded ? '' : 'hidden'}">
+                    <div class="lancamento-steps">
+                        <span class="step ${item.createdAt ? 'done' : ''}">Criada</span>
+                        <span class="step ${item.linkSentAt ? 'done' : ''}">Link enviado</span>
+                        <span class="step ${item.status === 'submitted' || item.status === 'launched' ? 'done' : ''}">Confirmado pelo colaborador</span>
+                        <span class="step ${item.status === 'launched' ? 'done' : ''}">Lançado no Nexti</span>
+                    </div>
+                    ${reasonDetail ? `<div><strong>Detalhe:</strong> ${reasonDetail}</div>` : ''}
+                    ${notes ? `<div><strong>Observações:</strong> ${notes}</div>` : ''}
+                    ${requestedAt ? `<div><strong>Solicitada em:</strong> ${requestedAt}</div>` : ''}
+                    ${createdAt ? `<div><strong>Criada em:</strong> ${createdAt}</div>` : ''}
+                    ${item.sheetStatusRaw ? `<div><strong>Status planilha:</strong> ${item.sheetStatusRaw}</div>` : ''}
+                    <div><strong>Responsável:</strong> ${item.createdBy || 'Admin'}</div>
+                </div>
             </div>
             <div class="lancamento-actions">
                 <button class="btn-mini btn-secondary" onclick="copyFtLinkById('${item.id}')">Copiar link</button>
@@ -7619,22 +9574,94 @@ function renderLancamentosHistorico() {
                 <button class="btn-mini btn-danger" onclick="deleteFtLaunch('${item.id}')" ${isAdminRole() ? '' : 'disabled'}>Remover</button>
             </div>
         </div>
-    `;
-        }).join('')}
+        `;
+    }).join('');
+
+    const historyBody = total
+        ? groups.map(group => `
+            <div class="lancamentos-history-group">
+                ${ftHistoryFilter.grouped ? `<div class="lancamentos-history-group-title"><span>${group.label}</span><span class="history-count">${group.items.length} registro(s)</span></div>` : ''}
+                ${buildCards(group.items)}
+            </div>
+        `).join('')
+        : `<p class="empty-state">Nenhum lançamento para os filtros selecionados.</p>`;
+
+    panel.innerHTML = `
+        <div class="lancamentos-summary-line">Resultados: <strong>${total}</strong> registros</div>
+        ${summaryCards}
+        <div class="lancamentos-history-tools">
+            <div class="form-group">
+                <label>Buscar</label>
+                <input type="text" id="ft-history-search" placeholder="RE, nome, unidade, motivo...">
+            </div>
+            <div class="form-group">
+                <label>Unidade</label>
+                <select id="ft-history-unit">
+                    <option value="">Todas</option>
+                    ${unitOptions.map(u => `<option value="${u}">${u}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Colaborador</label>
+                <select id="ft-history-collab">
+                    <option value="">Todos</option>
+                    ${collabOptions.map(c => `<option value="${c.value}">${c.label}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Ordenar por</label>
+                <select id="ft-history-sort">
+                    <option value="date_desc">Data da FT (recente)</option>
+                    <option value="date_asc">Data da FT (antiga)</option>
+                    <option value="created_desc">Data de criação (recente)</option>
+                    <option value="created_asc">Data de criação (antiga)</option>
+                    <option value="requested_desc">Solicitada em (recente)</option>
+                    <option value="requested_asc">Solicitada em (antiga)</option>
+                    <option value="status">Status</option>
+                    <option value="unit">Unidade</option>
+                    <option value="collab">Colaborador</option>
+                </select>
+            </div>
+        </div>
+        <div class="lancamentos-history-actions">
+            <button class="filter-chip ${ftHistoryFilter.grouped ? 'active' : ''}" onclick="toggleFtHistoryGrouped()">Agrupar por dia</button>
+            <button class="btn btn-secondary btn-small" onclick="exportFtHistorico()">Exportar histórico</button>
+        </div>
+        ${historyBody}
     `;
 
-    document.getElementById('ft-filter-from-h')?.addEventListener('change', (e) => {
-        ftFilter.from = e.target.value || '';
-        renderLancamentosHistorico();
-    });
-    document.getElementById('ft-filter-to-h')?.addEventListener('change', (e) => {
-        ftFilter.to = e.target.value || '';
-        renderLancamentosHistorico();
-    });
-    document.getElementById('ft-filter-status-h')?.addEventListener('change', (e) => {
-        ftFilter.status = e.target.value || 'all';
-        renderLancamentosHistorico();
-    });
+    const searchInput = document.getElementById('ft-history-search');
+    if (searchInput) {
+        searchInput.value = ftHistoryFilter.search || '';
+        searchInput.addEventListener('input', (e) => {
+            ftHistoryFilter.search = e.target.value || '';
+            renderLancamentosHistorico();
+        });
+    }
+    const unitSelect = document.getElementById('ft-history-unit');
+    if (unitSelect) {
+        unitSelect.value = ftHistoryFilter.unit || '';
+        unitSelect.addEventListener('change', (e) => {
+            ftHistoryFilter.unit = e.target.value || '';
+            renderLancamentosHistorico();
+        });
+    }
+    const collabSelect = document.getElementById('ft-history-collab');
+    if (collabSelect) {
+        collabSelect.value = ftHistoryFilter.collab || '';
+        collabSelect.addEventListener('change', (e) => {
+            ftHistoryFilter.collab = e.target.value || '';
+            renderLancamentosHistorico();
+        });
+    }
+    const sortSelect = document.getElementById('ft-history-sort');
+    if (sortSelect) {
+        sortSelect.value = ftHistoryFilter.sort || 'date_desc';
+        sortSelect.addEventListener('change', (e) => {
+            ftHistoryFilter.sort = e.target.value || 'date_desc';
+            renderLancamentosHistorico();
+        });
+    }
 }
 
 function buildFtFromForm() {
@@ -7792,15 +9819,18 @@ function buildWhatsUrl(phone, text) {
 
 function applyFtToCollaborator(item) {
     if (!item?.collabRe || !item?.date) return;
-    const base = currentData.find(c => c.re === item.collabRe) || (allCollaboratorsCache.items || []).find(c => c.re === item.collabRe);
-    const edit = base ? { ...base } : (collaboratorEdits[item.collabRe] || { re: item.collabRe, nome: item.collabName });
+    if (!isFtToday(item)) return;
+    const base = currentData.find(c => matchesRe(c.re, item.collabRe))
+        || (allCollaboratorsCache.items || []).find(c => matchesRe(c.re, item.collabRe));
+    const reKey = base?.re || item.collabRe;
+    const edit = base ? { ...base } : (collaboratorEdits[reKey] || { re: reKey, nome: item.collabName });
     if (edit.rotulo && edit.rotulo !== 'FT') return;
     edit.rotulo = 'FT';
     edit.rotuloInicio = item.date;
     edit.rotuloFim = item.date;
     edit.rotuloDetalhe = item.unitTarget || '';
-    collaboratorEdits[item.collabRe] = edit;
-    const live = currentData.find(c => c.re === item.collabRe);
+    collaboratorEdits[reKey] = edit;
+    const live = currentData.find(c => matchesRe(c.re, reKey));
     if (live) {
         live.rotulo = 'FT';
         live.rotuloInicio = item.date;
@@ -7812,15 +9842,16 @@ function applyFtToCollaborator(item) {
 
 function removeFtFromCollaborator(item) {
     if (!item?.collabRe) return;
-    const edit = collaboratorEdits[item.collabRe];
+    const editKey = Object.keys(collaboratorEdits).find(key => matchesRe(key, item.collabRe));
+    const edit = editKey ? collaboratorEdits[editKey] : null;
     if (!edit) return;
     if (edit.rotulo === 'FT' && edit.rotuloInicio === item.date && edit.rotuloFim === item.date) {
         delete edit.rotulo;
         delete edit.rotuloInicio;
         delete edit.rotuloFim;
         delete edit.rotuloDetalhe;
-        collaboratorEdits[item.collabRe] = edit;
-        const live = currentData.find(c => c.re === item.collabRe);
+        if (editKey) collaboratorEdits[editKey] = edit;
+        const live = currentData.find(c => matchesRe(c.re, item.collabRe));
         if (live && live.rotulo === 'FT' && live.rotuloInicio === item.date && live.rotuloFim === item.date) {
             delete live.rotulo;
             delete live.rotuloInicio;
@@ -7856,6 +9887,10 @@ function deleteFtLaunch(id) {
     if (!item) return;
     if (!confirm('Remover lançamento de FT?')) return;
     removeFtFromCollaborator(item);
+    if (item.source === 'sheet') {
+        ftRemovedIds.add(item.id);
+        saveFtRemovedIds(true);
+    }
     ftLaunches = ftLaunches.filter(i => i.id !== id);
     saveFtLaunches();
     renderLancamentosHistorico();
@@ -8769,6 +10804,7 @@ function updateMenuStatus() {
     const nextiActive = CONFIG.useApiNexti && NEXTI_AVAILABLE;
     const adminToolsEl = document.getElementById('adminTools');
     const shadowActionsEl = document.getElementById('shadowActions');
+    const authIndicatorEl = document.getElementById('auth-indicator');
     
     if (userReEl) {
         userReEl.innerHTML = SiteAuth.logged
@@ -8792,6 +10828,19 @@ function updateMenuStatus() {
             <div>Nexti: ${nextiActive ? '🟢 Ativo' : '🔴 Inativo'}</div>
             <div>CSV: 🟢 Ativo</div>
         `;
+    }
+
+    if (authIndicatorEl) {
+        if (SiteAuth.logged) {
+            const roleLabel = SiteAuth.role === 'supervisor' ? 'Supervisor' : (SiteAuth.role === 'master' ? 'Master' : (SiteAuth.role === 'admin' ? 'Admin' : 'Usuario'));
+            authIndicatorEl.innerHTML = `<span class="dot"></span> Logado${SiteAuth.user ? `: ${SiteAuth.user}` : ''}`;
+            authIndicatorEl.title = `Logado como ${SiteAuth.user || 'Usuario'} (${roleLabel})`;
+            authIndicatorEl.classList.remove('hidden');
+        } else {
+            authIndicatorEl.classList.add('hidden');
+            authIndicatorEl.textContent = '';
+            authIndicatorEl.removeAttribute('title');
+        }
     }
 
     const keepLoggedEl = document.getElementById('keepLogged');
@@ -8820,8 +10869,78 @@ function updateMenuStatus() {
         (document.getElementById('disableCsvToggle').checked = CONFIG.disableCsvFallback);
 
     renderDataSourceList();
+    renderSheetValidatorOptions();
+    renderConfigSummary();
+    renderAuditList();
     updateShadowStatusUI();
     updateAvisosUI();
+}
+
+function reloadCurrentGroupData() {
+    if (!currentGroup) {
+        showToast("Selecione um grupo para recarregar os dados.", "info");
+        return;
+    }
+    loadGroup(currentGroup);
+}
+
+function getCollaboratorCountsByGroup() {
+    const counts = { bombeiros: 0, servicos: 0, seguranca: 0, rb: 0, todos: 0 };
+    const list = allCollaboratorsCache.items || currentData || [];
+    list.forEach(c => {
+        const key = c.grupo || '';
+        if (counts[key] !== undefined) counts[key] += 1;
+        counts.todos += 1;
+    });
+    return counts;
+}
+
+function renderConfigSummary() {
+    const summaryEl = document.getElementById('config-summary');
+    if (!summaryEl) return;
+    const counts = getCollaboratorCountsByGroup();
+    const unitCount = new Set((currentData || []).map(c => c.posto).filter(Boolean)).size;
+    const editsCount = Object.keys(collaboratorEdits || {}).length;
+    const unitEdits = Object.keys(unitMetadata || {}).length;
+    const lastUpdateText = lastUpdatedAt ? lastUpdatedAt.toLocaleString() : '—';
+    const shadowText = shadowStatus.available ? 'Ativo' : 'Indisponível';
+    const shadowClass = shadowStatus.available ? 'ok' : 'off';
+    summaryEl.innerHTML = `
+        <div class="config-summary-grid">
+            <div class="config-summary-card">
+                <div class="label">Registros</div>
+                <div class="value">${currentData.length}</div>
+                <div class="meta">Grupo atual</div>
+            </div>
+            <div class="config-summary-card">
+                <div class="label">Unidades</div>
+                <div class="value">${unitCount}</div>
+                <div class="meta">Ativas</div>
+            </div>
+            <div class="config-summary-card">
+                <div class="label">Edições</div>
+                <div class="value">${editsCount + unitEdits}</div>
+                <div class="meta">Locais + unidades</div>
+            </div>
+            <div class="config-summary-card">
+                <div class="label">Shadow</div>
+                <div class="value"><span class="status-pill ${shadowClass}">${shadowText}</span></div>
+                <div class="meta">Sincronização</div>
+            </div>
+            <div class="config-summary-card">
+                <div class="label">Última atualização</div>
+                <div class="value">${lastUpdateText}</div>
+                <div class="meta">Base local</div>
+            </div>
+        </div>
+        <div class="config-summary-chips">
+            <span class="summary-chip">Bombeiros: ${counts.bombeiros}</span>
+            <span class="summary-chip">Serviços: ${counts.servicos}</span>
+            <span class="summary-chip">Segurança: ${counts.seguranca}</span>
+            <span class="summary-chip">RB: ${counts.rb}</span>
+            <span class="summary-chip">Total: ${counts.todos}</span>
+        </div>
+    `;
 }
 
 // Toggle de Fonte de Dados (Apenas altera flags)
@@ -8841,10 +10960,9 @@ function renderAuditList() {
 
     if (changeHistory.length > 0) {
         list.innerHTML = changeHistory.slice(0, 20).map(h => `
-            <div style="padding:5px;border-bottom:1px solid #333;font-size:0.8rem">
-                🟢 Shadow (global)<br>
+            <div class="audit-item">
                 <strong>${h.responsavel}</strong> — ${h.acao}<br>
-                <span style="color:#999">${h.detalhe}</span>
+                <span>${h.detalhe}</span>
             </div>
         `).join('');
         return;
@@ -8854,7 +10972,7 @@ function renderAuditList() {
     const units = Object.keys(unitMetadata || {});
     
     if (edits.length === 0 && units.length === 0) {
-        list.innerHTML = '<div style="color:#777;font-style:italic">Nenhuma alteração registrada.</div>';
+        list.innerHTML = '<div class="audit-item">Nenhuma alteração registrada.</div>';
         return;
     }
 
@@ -8862,18 +10980,18 @@ function renderAuditList() {
 
     edits.forEach(re => {
         html += `
-            <div style="padding:5px;border-bottom:1px solid #333;font-size:0.8rem">
-                🟢 ${collaboratorEdits[re].nome}<br>
-                <span style="color:#999">RE ${re} — alteração local</span>
+            <div class="audit-item">
+                <strong>${collaboratorEdits[re].nome}</strong><br>
+                <span>RE ${re} — alteração local</span>
             </div>
         `;
     });
     
     units.forEach(u => {
         html += `
-            <div style="padding:5px;border-bottom:1px solid #333;font-size:0.8rem">
-                🟡 Unidade ${u}<br>
-                <span style="color:#999">Metadados locais</span>
+            <div class="audit-item">
+                <strong>Unidade ${u}</strong><br>
+                <span>Metadados locais</span>
             </div>
         `;
     });
@@ -8997,11 +11115,60 @@ function renderDataSourceList() {
         phones: 'Planilha Telefones'
     };
 
+    const countsByGroup = getCollaboratorCountsByGroup();
     const sources = Object.keys(CONFIG.sheets || {}).map(key => ({
         name: labels[key] || `Planilha ${key}`,
         status: 'ATIVO',
-        url: toSourceViewUrl(CONFIG.sheets[key])
+        url: toSourceViewUrl(CONFIG.sheets[key]),
+        count: countsByGroup[key]
     }));
+
+    if (CONFIG.addressSheets?.units) {
+        sources.push({
+            name: 'Planilha Endereços Unidades',
+            status: 'ATIVO',
+            url: toSourceViewUrl(CONFIG.addressSheets.units),
+            count: unitAddressDb?.entries?.length || 0
+        });
+    }
+    if (CONFIG.addressSheets?.collaborators) {
+        sources.push({
+            name: 'Planilha Endereços Colaboradores',
+            status: 'ATIVO',
+            url: toSourceViewUrl(CONFIG.addressSheets.collaborators),
+            count: Object.keys(collaboratorAddressMap || {}).length
+        });
+    }
+
+    const ftSheetSources = getFtSheetSources();
+    ftSheetSources.forEach(src => {
+        const label = src.group ? `Planilha FT ${String(src.group).toUpperCase()}` : 'Planilha FT';
+        const count = ftLaunches.filter(i => i.source === 'sheet' && (src.group ? i.sourceGroup === src.group : true)).length;
+        sources.push({
+            name: label,
+            status: 'ATIVO',
+            url: toSourceViewUrl(src.url),
+            count
+        });
+    });
+
+    if (CONFIG?.reciclagem?.baseCsvUrl) {
+        sources.push({
+            name: 'Reciclagem (Base CSV)',
+            status: 'ATIVO',
+            url: toSourceViewUrl(CONFIG.reciclagem.baseCsvUrl)
+        });
+    }
+    const recSheets = CONFIG?.reciclagem?.sheets || {};
+    Object.keys(recSheets).forEach(key => {
+        const url = buildReciclagemCsvUrl(key);
+        if (!url) return;
+        sources.push({
+            name: `Reciclagem ${key}`,
+            status: 'ATIVO',
+            url: toSourceViewUrl(url)
+        });
+    });
 
     sources.push({ name: 'Nexti API', status: NEXTI_AVAILABLE ? 'ATIVO' : 'INATIVO' });
     sources.push({ name: 'PASTA DO GOOGLE DRIVE', status: 'ATIVO', url: 'https://drive.google.com/drive/folders/1d-z_dHoqrjygeEv1CvL9JRJSjkJcs02m?usp=sharing' });
@@ -9011,7 +11178,7 @@ function renderDataSourceList() {
             return `
                 <details class="source-item">
                     <summary>
-                        <span>${s.name}</span>
+                        <span>${s.name}${Number.isFinite(s.count) ? ` <span class="source-count">${s.count}</span>` : ''}</span>
                         <span class="source-pill ${s.status === 'ATIVO' ? 'ok' : 'off'}">${s.status}</span>
                     </summary>
                     <div class="source-link">
@@ -9022,11 +11189,405 @@ function renderDataSourceList() {
         }
         return `
             <div class="source-row">
-                <span>${s.name}</span>
+                <span>${s.name}${Number.isFinite(s.count) ? ` <span class="source-count">${s.count}</span>` : ''}</span>
                 <span class="source-pill ${s.status === 'ATIVO' ? 'ok' : 'off'}">${s.status}</span>
             </div>
-        `;
+        `; 
     }).join('');
+}
+
+function getSheetValidatorSources() {
+    const sources = [];
+    const sheets = CONFIG.sheets || {};
+    Object.keys(sheets).forEach(key => {
+        if (key === 'phones') return;
+        const url = sheets[key];
+        if (!url) return;
+        sources.push({
+            id: `base:${key}`,
+            label: `Base ${String(key).toUpperCase()}`,
+            url,
+            type: 'base',
+            group: key
+        });
+    });
+    if (sheets.phones) {
+        sources.push({
+            id: 'phones',
+            label: 'Telefones (CSV)',
+            url: sheets.phones,
+            type: 'phones'
+        });
+    }
+    if (CONFIG.addressSheets?.units) {
+        sources.push({
+            id: 'address-units',
+            label: 'Endereços Unidades',
+            url: CONFIG.addressSheets.units,
+            type: 'address_units'
+        });
+    }
+    if (CONFIG.addressSheets?.collaborators) {
+        sources.push({
+            id: 'address-collabs',
+            label: 'Endereços Colaboradores',
+            url: CONFIG.addressSheets.collaborators,
+            type: 'address_collabs'
+        });
+    }
+    const ftSheetSources = getFtSheetSources();
+    ftSheetSources.forEach(src => {
+        const group = src.group || '';
+        sources.push({
+            id: `ft-sheet:${group || 'geral'}`,
+            label: group ? `FT Planilha ${String(group).toUpperCase()}` : 'FT Planilha (Geral)',
+            url: src.url,
+            type: 'ft_sheet',
+            group
+        });
+    });
+    const ftForms = getFtResponseUrls();
+    ftForms.forEach(src => {
+        const group = src.group || '';
+        sources.push({
+            id: `ft-forms:${group || 'geral'}`,
+            label: group ? `FT Forms ${String(group).toUpperCase()}` : 'FT Forms (Geral)',
+            url: src.url,
+            type: 'ft_forms',
+            group
+        });
+    });
+    if (CONFIG?.reciclagem?.baseCsvUrl) {
+        sources.push({
+            id: 'reciclagem-base',
+            label: 'Reciclagem Base',
+            url: CONFIG.reciclagem.baseCsvUrl,
+            type: 'reciclagem',
+            sheetKey: 'base'
+        });
+    }
+    const recSheets = CONFIG?.reciclagem?.sheets || {};
+    Object.keys(recSheets).forEach(key => {
+        const url = buildReciclagemCsvUrl(key);
+        if (!url) return;
+        sources.push({
+            id: `reciclagem:${key}`,
+            label: `Reciclagem ${String(key).toUpperCase()}`,
+            url,
+            type: 'reciclagem',
+            sheetKey: key
+        });
+    });
+    return sources;
+}
+
+function renderSheetValidatorOptions() {
+    const select = document.getElementById('sheet-validator-select');
+    if (!select) return;
+    const sources = getSheetValidatorSources();
+    const current = select.value;
+    if (!sources.length) {
+        select.innerHTML = `<option value="">Nenhuma fonte configurada</option>`;
+        select.disabled = true;
+        ensureSheetValidatorPlaceholder();
+        return;
+    }
+    select.disabled = false;
+    select.innerHTML = sources.map(src => `<option value="${src.id}">${src.label}</option>`).join('');
+    if (current && sources.some(s => s.id === current)) {
+        select.value = current;
+    }
+    ensureSheetValidatorPlaceholder();
+}
+
+function ensureSheetValidatorPlaceholder() {
+    const statusEl = document.getElementById('sheet-validator-status');
+    const previewEl = document.getElementById('sheet-validator-preview');
+    if (statusEl && !statusEl.innerHTML.trim()) {
+        statusEl.innerHTML = `<div class="validator-empty">Selecione uma fonte e clique em Validar.</div>`;
+    }
+    if (previewEl && !previewEl.innerHTML.trim()) {
+        previewEl.innerHTML = `<div class="validator-empty">O preview aparece aqui após a validação.</div>`;
+    }
+}
+
+function clearSheetValidator() {
+    const statusEl = document.getElementById('sheet-validator-status');
+    const previewEl = document.getElementById('sheet-validator-preview');
+    if (statusEl) statusEl.innerHTML = `<div class="validator-empty">Selecione uma fonte e clique em Validar.</div>`;
+    if (previewEl) previewEl.innerHTML = `<div class="validator-empty">O preview aparece aqui após a validação.</div>`;
+}
+
+function buildValidatorPreview(columns, rows) {
+    if (!columns.length || !rows.length) {
+        return `<div class="validator-empty">Sem dados para preview.</div>`;
+    }
+    const head = columns.map(c => `<th>${escapeHtml(c)}</th>`).join('');
+    const body = rows.map(r => {
+        const cells = columns.map((_, idx) => `<td>${escapeHtml(r[idx] ?? '')}</td>`).join('');
+        return `<tr>${cells}</tr>`;
+    }).join('');
+    return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderValidatorResult(result) {
+    const statusEl = document.getElementById('sheet-validator-status');
+    const previewEl = document.getElementById('sheet-validator-preview');
+    if (!statusEl || !previewEl) return;
+    const labelMap = { ok: 'OK', warn: 'Atenção', error: 'Erro' };
+    const messages = (result.messages || []).map(m => `<div class="${m.type}">${escapeHtml(m.text)}</div>`).join('');
+    statusEl.innerHTML = `
+        <div class="validator-pill ${result.status}">${labelMap[result.status] || 'Status'}</div>
+        <div class="validator-list">${messages || '<div class="info">Sem observações.</div>'}</div>
+    `;
+    previewEl.innerHTML = buildValidatorPreview(result.preview?.columns || [], result.preview?.rows || []);
+}
+
+async function validateSelectedSheet() {
+    const select = document.getElementById('sheet-validator-select');
+    if (!select || !select.value) {
+        showToast("Selecione uma fonte para validar.", "info");
+        return;
+    }
+    const sources = getSheetValidatorSources();
+    const source = sources.find(s => s.id === select.value);
+    if (!source) {
+        showToast("Fonte não encontrada.", "error");
+        return;
+    }
+    const statusEl = document.getElementById('sheet-validator-status');
+    const previewEl = document.getElementById('sheet-validator-preview');
+    if (statusEl) statusEl.innerHTML = `<div class="validator-empty">Validando planilha...</div>`;
+    if (previewEl) previewEl.innerHTML = '';
+    try {
+        const csv = await fetchSheetData(source.url);
+        if (!csv) {
+            renderValidatorResult({
+                status: 'error',
+                messages: [{ type: 'error', text: 'Falha ao carregar o CSV da fonte.' }],
+                preview: { columns: [], rows: [] }
+            });
+            return;
+        }
+        const rows = parseCSV(csv);
+        const result = validateSheetRows(source, rows, csv);
+        renderValidatorResult(result);
+    } catch {
+        renderValidatorResult({
+            status: 'error',
+            messages: [{ type: 'error', text: 'Erro ao validar a planilha.' }],
+            preview: { columns: [], rows: [] }
+        });
+    }
+}
+
+function finalizeValidatorResult(messages, previewColumns, previewRows) {
+    let status = 'ok';
+    if (messages.some(m => m.type === 'error')) status = 'error';
+    else if (messages.some(m => m.type === 'warn')) status = 'warn';
+    return {
+        status,
+        messages,
+        preview: { columns: previewColumns, rows: previewRows }
+    };
+}
+
+function validateSheetRows(source, rows, csvText = '') {
+    const messages = [];
+    if (!rows || !rows.length) {
+        messages.push({ type: 'error', text: 'Nenhuma linha encontrada no CSV.' });
+        return finalizeValidatorResult(messages, [], []);
+    }
+    if (source.type === 'base') {
+        const dataRows = rows.slice(1);
+        const total = dataRows.length;
+        messages.push({ type: 'info', text: `Registros detectados: ${total}` });
+        const header = rows[0].map(normalizeHeaderValue);
+        const hasHeader = header.some(h => h.includes('COLABORADOR') || h.includes('NOME')) &&
+            header.some(h => h.includes('MATRICULA') || h === 'RE') &&
+            header.some(h => h.includes('POSTO') || h.includes('UNIDADE'));
+        if (!hasHeader) {
+            messages.push({ type: 'warn', text: 'Cabeçalho não identificado. Verifique se a primeira linha contém nomes de colunas.' });
+        }
+        if (!total) {
+            messages.push({ type: 'error', text: 'Nenhum dado após o cabeçalho.' });
+        }
+        const sample = dataRows.slice(0, 50);
+        const hasCols = sample.some(row => row.length > 7);
+        if (!hasCols) {
+            messages.push({ type: 'error', text: 'Colunas insuficientes. A base precisa ter dados até a coluna H (Unidade).' });
+        }
+        let missingName = 0;
+        let missingRe = 0;
+        let missingUnit = 0;
+        sample.forEach(row => {
+            if (!String(row[4] || '').trim()) missingName += 1;
+            if (!String(row[5] || '').trim()) missingRe += 1;
+            if (!String(row[7] || '').trim()) missingUnit += 1;
+        });
+        if (missingName) messages.push({ type: 'warn', text: `Linhas sem Nome (coluna E): ${missingName}` });
+        if (missingRe) messages.push({ type: 'warn', text: `Linhas sem RE (coluna F): ${missingRe}` });
+        if (missingUnit) messages.push({ type: 'warn', text: `Linhas sem Unidade (coluna H): ${missingUnit}` });
+
+        const previewItems = mapRowsToObjects(dataRows.slice(0, 10), source.group || '', false, [], {});
+        const previewColumns = ['Nome', 'RE', 'Unidade', 'Escala', 'Turma', 'Grupo'];
+        const previewRows = previewItems.map(item => ([
+            item.nome || '',
+            item.re || '',
+            item.posto || '',
+            item.escala || '',
+            item.turma || '',
+            item.grupoLabel || ''
+        ]));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    if (source.type === 'ft_sheet') {
+        const header = rows[0].map(normalizeFtHeaderLabel);
+        const idx = resolveFtSheetIndexes(header);
+        const missing = [];
+        if (idx.re < 0) missing.push('RE');
+        if (idx.date < 0) missing.push('Data');
+        if (idx.unit < 0) missing.push('Unidade');
+        if (idx.status < 0) missing.push('Status');
+        if (missing.length) {
+            messages.push({ type: 'error', text: `Colunas obrigatórias ausentes: ${missing.join(', ')}` });
+            return finalizeValidatorResult(messages, [], []);
+        }
+        const dataRows = rows.slice(1);
+        const items = dataRows.map(row => mapFtSheetRow(row, idx, {}, source.group || '')).filter(Boolean);
+        messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
+        messages.push({ type: 'info', text: `Registros válidos: ${items.length}` });
+        if (!items.length) messages.push({ type: 'warn', text: 'Nenhum registro válido identificado.' });
+        const launched = items.filter(i => i.status === 'launched').length;
+        const pending = items.filter(i => i.status === 'pending').length;
+        messages.push({ type: 'info', text: `Status: ${launched} lançadas, ${pending} pendentes` });
+
+        const previewColumns = ['Data FT', 'Colaborador', 'RE', 'Unidade', 'Status', 'Motivo', 'Detalhe', 'Turno', 'Horário', 'Cobrindo RE'];
+        const previewRows = items.slice(0, 10).map(i => ([
+            i.date || '',
+            i.collabName || '',
+            i.collabRe || '',
+            i.unitTarget || i.unitCurrent || '',
+            getFtStatusLabel(i),
+            getFtReasonLabel(i.reason, i.reasonOther) || i.reasonRaw || '',
+            i.reasonDetail || '',
+            i.shift || '',
+            i.ftTime || '',
+            i.coveringRe || ''
+        ]));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    if (source.type === 'ft_forms') {
+        const header = rows[0].map(h => String(h || '').toLowerCase());
+        let idx = header.findIndex(h => h.includes('ft id'));
+        if (idx < 0) idx = header.findIndex(h => h.includes('ft') && h.includes('id'));
+        if (idx < 0) {
+            messages.push({ type: 'error', text: 'Coluna "FT ID" não encontrada.' });
+            return finalizeValidatorResult(messages, [], []);
+        }
+        const timeIdx = header.findIndex(h => h.includes('carimbo') || h.includes('timestamp') || h.includes('data'));
+        const dataRows = rows.slice(1);
+        const missingIds = dataRows.filter(r => !String(r[idx] || '').trim()).length;
+        messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
+        if (missingIds) messages.push({ type: 'warn', text: `Linhas sem FT ID: ${missingIds}` });
+        const previewColumns = timeIdx >= 0 ? ['FT ID', 'Data'] : ['FT ID'];
+        const previewRows = dataRows.slice(0, 10).map(r => (timeIdx >= 0 ? [r[idx] || '', r[timeIdx] || ''] : [r[idx] || '']));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    if (source.type === 'phones') {
+        const header = rows[0].map(normalizeHeaderValue);
+        let idxRE = header.findIndex(h => h.includes('RE') || h.includes('MATRICULA'));
+        let idxPhone = header.findIndex(h => h.includes('TELEFONE') || h.includes('CELULAR') || h.includes('WHATSAPP') || h.includes('CONTATO'));
+        let idxName = header.findIndex(h => h.includes('NOME') || h.includes('COLABORADOR') || h.includes('FUNCIONARIO'));
+        if (idxRE < 0 || idxPhone < 0) {
+            messages.push({ type: 'error', text: 'Colunas obrigatórias ausentes: RE e Telefone.' });
+            return finalizeValidatorResult(messages, [], []);
+        }
+        const dataRows = rows.slice(1);
+        const missingPhones = dataRows.filter(r => String(r[idxRE] || '').trim() && !String(r[idxPhone] || '').trim()).length;
+        messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
+        if (missingPhones) messages.push({ type: 'warn', text: `Linhas com RE sem telefone: ${missingPhones}` });
+        const previewColumns = ['Nome', 'RE', 'Telefone'];
+        const previewRows = dataRows.slice(0, 10).map(r => ([
+            idxName >= 0 ? r[idxName] || '' : '',
+            r[idxRE] || '',
+            r[idxPhone] || ''
+        ]));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    if (source.type === 'address_units') {
+        const headerIndex = rows.findIndex(row => {
+            const normalized = row.map(normalizeHeaderValue);
+            const hasUnit = normalized.some(h => h.includes('UNIDADE') || h.includes('POSTO') || h.includes('CLIENTE'));
+            const hasAddress = normalized.some(h => h.includes('ENDERECO'));
+            return hasUnit && hasAddress;
+        });
+        const idxRow = headerIndex >= 0 ? headerIndex : 0;
+        const headers = rows[idxRow].map(normalizeHeaderValue);
+        let idxUnit = headers.findIndex(h => h.includes('UNIDADE') || h.includes('POSTO') || h.includes('CLIENTE'));
+        let idxAddress = headers.findIndex(h => h.includes('ENDERECO'));
+        if (idxUnit < 0 || idxAddress < 0) {
+            messages.push({ type: 'error', text: 'Colunas obrigatórias ausentes: Unidade e Endereço.' });
+            return finalizeValidatorResult(messages, [], []);
+        }
+        const dataRows = rows.slice(idxRow + 1);
+        const missingAddr = dataRows.filter(r => String(r[idxUnit] || '').trim() && !String(r[idxAddress] || '').trim()).length;
+        messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
+        if (missingAddr) messages.push({ type: 'warn', text: `Unidades sem endereço: ${missingAddr}` });
+        const previewColumns = ['Unidade', 'Endereço'];
+        const previewRows = dataRows.slice(0, 10).map(r => ([r[idxUnit] || '', r[idxAddress] || '']));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    if (source.type === 'address_collabs') {
+        const headerIndex = rows.findIndex(row => {
+            const normalized = row.map(normalizeHeaderValue);
+            const hasRe = normalized.some(h => h.includes('MATRICULA') || h === 'RE');
+            const hasAddress = normalized.some(h => h.includes('ENDERECO'));
+            return hasRe && hasAddress;
+        });
+        const idxRow = headerIndex >= 0 ? headerIndex : 0;
+        const headers = rows[idxRow].map(normalizeHeaderValue);
+        let idxRE = headers.findIndex(h => h.includes('MATRICULA') || h === 'RE');
+        let idxAddress = headers.findIndex(h => h.includes('ENDERECO'));
+        if (idxRE < 0 || idxAddress < 0) {
+            messages.push({ type: 'error', text: 'Colunas obrigatórias ausentes: RE e Endereço.' });
+            return finalizeValidatorResult(messages, [], []);
+        }
+        const dataRows = rows.slice(idxRow + 1);
+        const missingAddr = dataRows.filter(r => String(r[idxRE] || '').trim() && !String(r[idxAddress] || '').trim()).length;
+        messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
+        if (missingAddr) messages.push({ type: 'warn', text: `REs sem endereço: ${missingAddr}` });
+        const previewColumns = ['RE', 'Endereço'];
+        const previewRows = dataRows.slice(0, 10).map(r => ([r[idxRE] || '', r[idxAddress] || '']));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    if (source.type === 'reciclagem') {
+        const entries = parseReciclagemCsv(csvText, source.sheetKey || '');
+        messages.push({ type: 'info', text: `Registros detectados: ${entries.length}` });
+        if (!entries.length) {
+            messages.push({ type: 'error', text: 'Nenhum registro válido identificado na planilha.' });
+        }
+        const missingDates = entries.filter(e => !e.expiryIso).length;
+        if (missingDates) messages.push({ type: 'warn', text: `Registros sem data válida: ${missingDates}` });
+        const previewColumns = ['Nome', 'RE', 'Unidade', 'Data bruta', 'Validade'];
+        const previewRows = entries.slice(0, 10).map(e => ([
+            e.name || '',
+            e.re || '',
+            e.unit || '',
+            e.dateRaw || '',
+            e.expiryIso || ''
+        ]));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    messages.push({ type: 'warn', text: 'Tipo de planilha não reconhecido.' });
+    return finalizeValidatorResult(messages, [], []);
 }
 
 function toSourceViewUrl(url) {

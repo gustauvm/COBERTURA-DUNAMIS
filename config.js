@@ -18,6 +18,10 @@ const CONFIG = {
         rb: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSTOfqxdOn5xHlbv-JTIWcLlSMrJk6j4RRQKXnjOK2fka4FdSB8qQjwHT8ZJuJHRbp42WfHSpQ92drh/pub?output=csv',
         phones: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRowojoW0Y5Ojk6LHhAZjnlki2ecvnG_qkWgRAZWcefwTZt3QfH5iaIaY4vnrUPNBZ8CTbEuR1Mya_D/pub?output=csv'
     },
+    addressSheets: {
+        units: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQUo59ROejlA4dLlH9MwtQZQwXAEAsEj_n5jofBa_7kzAhn95oyl5ceIazuFz0UTKD8-DZI2W4bBch3/pub?output=csv',
+        collaborators: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTAYK7d7Q8pAtMwy7OuEkDaikXJ3zisJ-4Rt4Gjx7fQS4uaxHw0e8egJdplD6hKXw/pub?output=csv'
+    },
     images: {
         bombeiros: 'images/logo-dunamis-bombeiros.png',
         servicos: 'images/logo-dunamis-servicos.png',
@@ -110,6 +114,15 @@ const CONFIG = {
                 ftId: 'entry.1267028897'
             }
         }
+    },
+    ftSheet: {
+        url: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT6qElPbHyPwxIutCzVqgaVwNS17ZKWRpnaklVGXnMxVAxxQr20Sx-h0-BGSRZkx8YGmjqOUvgQAnkK/pub?gid=794745337&single=true&output=csv'
+    },
+    ftSheets: {
+        bombeiros: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT6qElPbHyPwxIutCzVqgaVwNS17ZKWRpnaklVGXnMxVAxxQr20Sx-h0-BGSRZkx8YGmjqOUvgQAnkK/pub?gid=794745337&single=true&output=csv',
+        servicos: '',
+        seguranca: '',
+        rb: ''
     },
     ftReasons: [
         { value: 'troca', label: 'Troca' },
