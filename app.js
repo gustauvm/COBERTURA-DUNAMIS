@@ -15,8 +15,15 @@ let collaboratorAddressMap = {};
 let collaboratorAddressLoaded = false;
 let collaboratorAddressUpdatedAt = null;
 let substituteTargetRe = '';
-let substituteProximityMode = 'posto'; // off | posto | endereco
+let substituteProximityMode = 'posto'; // off | posto | endereco | rota
 let substituteSearchSeq = 0;
+let osrmRouteCache = new Map();
+let osrmTableCache = new Map();
+let routeMapInstance = null;
+let routeMapLayer = null;
+let routeMapMarkers = [];
+let routeMapSeq = 0;
+let routeModalState = null;
 let shadowReady = false;
 let shadowSyncTimer = null;
 let shadowAutoPullTimer = null;
@@ -67,6 +74,15 @@ let reciclagemRenderCache = [];
 let escalaInvertida = false;
 let escalaInvertidaAutoMonth = null;
 let reciclagemSyncTimer = null;
+let supervisaoMenu = null;
+let supervisaoHistory = [];
+let supervisaoFavorites = new Set();
+let supervisaoUsage = {};
+let supervisaoFilter = 'internal';
+let supervisaoSearchTerm = '';
+let supervisaoChannelPrefs = {};
+let supervisaoEditingId = null;
+let supervisaoOpenMessages = new Set();
 
 // ==========================================================================
 // 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
@@ -132,6 +148,7 @@ function updateBreadcrumb() {
     const tabLabelMap = {
         busca: 'Busca Rápida',
         unidades: 'Unidades',
+        supervisao: 'Supervisão',
         avisos: 'Avisos',
         lancamentos: 'Lançamentos',
         config: 'Configuração'
@@ -475,6 +492,8 @@ function loadFtLaunches() {
         if (!item.status) item.status = 'pending';
         if (item.status === 'confirmed') item.status = 'submitted';
         if (!item.updatedAt) item.updatedAt = item.createdAt || new Date().toISOString();
+        const normalizedDate = normalizeFtDateKey(item.date);
+        if (normalizedDate) item.date = normalizedDate;
     });
     if (ftRemovedIds.size) {
         ftLaunches = ftLaunches.filter(item => !ftRemovedIds.has(item.id));
@@ -602,6 +621,8 @@ function buildShadowState() {
         reciclagemOverrides,
         reciclagemHistory,
         reciclagemNotes,
+        supervisaoMenu,
+        supervisaoHistory,
         unitGeoCache,
         escalaInvertida,
         escalaInvertidaAutoMonth,
@@ -645,6 +666,15 @@ function applyShadowState(state) {
         reciclagemNotes = { ...reciclagemNotes, ...state.reciclagemNotes };
         saveReciclagemNotes(true);
     }
+    if (state.supervisaoMenu && typeof state.supervisaoMenu === 'object') {
+        supervisaoMenu = state.supervisaoMenu;
+        ensureSupervisaoMenu();
+        saveSupervisaoMenu(true, { skipShadow: true });
+    }
+    if (Array.isArray(state.supervisaoHistory)) {
+        supervisaoHistory = state.supervisaoHistory;
+        saveSupervisaoHistory(true, { skipShadow: true });
+    }
     if (state.unitGeoCache && typeof state.unitGeoCache === 'object') {
         unitGeoCache = state.unitGeoCache;
         localStorage.setItem('unitGeoCache', JSON.stringify(unitGeoCache));
@@ -674,6 +704,13 @@ function applyShadowState(state) {
     }
     if (currentTab === 'busca' && document.getElementById('search-input')) {
         realizarBusca();
+    }
+    if (document.getElementById('supervisao-sections')) {
+        renderSupervisao();
+    }
+    if (document.getElementById('supervisao-admin-list')) {
+        renderSupervisaoAdminList();
+        renderSupervisaoHistory();
     }
     saveLocalState(true);
     renderAuditList();
@@ -997,7 +1034,10 @@ const ICONS = {
     launch: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H9"></path><path d="M6 12H4a2 2 0 0 0-2 2v5"></path><rect x="2" y="3" width="7" height="10" rx="1"></rect><path d="M5 7h2"></path><path d="M5 10h2"></path></svg>`,
     recycle: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6v6h-6"></path><path d="M3 18v-6h6"></path><path d="M20 9a8 8 0 0 0-14.4-3.6L3 8"></path><path d="M4 15a8 8 0 0 0 14.4 3.6L21 16"></path></svg>`,
     whatsapp: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/></svg>`,
-    phone: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`
+    phone: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`,
+    shield: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>`,
+    star: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`,
+    starFilled: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.77 5.82 21 7 14.14l-5-4.87 6.91-1.01L12 2z"></path></svg>`
 };
 
 const PROMPT_TEMPLATES = [
@@ -1066,11 +1106,215 @@ const SEARCH_TOKENS = [
     { key: 'GRUPO', label: 'Grupo (BOMBEIROS/SERVIÇOS/SEGURANÇA/RB)' }
 ];
 
+const SUPERVISAO_CATEGORIES = {
+    internal: {
+        label: 'Supervisão (interno)',
+        badge: 'Interno',
+        description: 'Links de uso interno da supervisão.'
+    },
+    colab: {
+        label: 'Para colaboradores',
+        badge: 'Colaboradores',
+        description: 'Links e mensagens para encaminhar aos colaboradores.'
+    },
+    guide: {
+        label: 'Guias e tutoriais',
+        badge: 'Guia',
+        description: 'Passo a passo e orientações rápidas.'
+    }
+};
+
+const SUPERVISAO_DEFAULT_MENU = {
+    meta: {
+        version: 1,
+        updatedAt: null,
+        updatedBy: 'Sistema'
+    },
+    items: [
+        {
+            id: 'sup_abertura_vagas',
+            category: 'internal',
+            type: 'link',
+            title: 'Abertura de vagas',
+            description: 'Solicitação de abertura de vagas (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/boards/9919638656'
+        },
+        {
+            id: 'sup_aso',
+            category: 'internal',
+            type: 'link',
+            title: 'ASO',
+            description: 'Solicitações de ASO (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/boards/8482734576'
+        },
+        {
+            id: 'sup_uniforme',
+            category: 'internal',
+            type: 'link',
+            title: 'Pedido de uniforme (patrimonial)',
+            description: 'Solicitação de uniforme (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/boards/9918758426'
+        },
+        {
+            id: 'sup_ferias',
+            category: 'internal',
+            type: 'link',
+            title: 'Programação de férias',
+            description: 'Planejamento e programação de férias (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/boards/9919803699'
+        },
+        {
+            id: 'sup_permuta',
+            category: 'internal',
+            type: 'link',
+            title: 'Permuta',
+            description: 'Solicitações de permuta (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/boards/9919342909'
+        },
+        {
+            id: 'sup_reclamacao_salarial',
+            category: 'internal',
+            type: 'link',
+            title: 'Reclamação salarial',
+            description: 'Registro interno de reclamações salariais (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/boards/8625263513'
+        },
+        {
+            id: 'sup_vt',
+            category: 'internal',
+            type: 'link',
+            title: 'Solicitação de VT',
+            description: 'Solicitações de vale-transporte (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/boards/8482137289'
+        },
+        {
+            id: 'sup_visita_diaria',
+            category: 'internal',
+            type: 'link',
+            title: 'Visita diária',
+            description: 'Workspace de visita diária (Monday).',
+            link: 'https://grupodunamiscoorp.monday.com/workspaces/9709048'
+        },
+        {
+            id: 'colab_vt',
+            category: 'colab',
+            type: 'message',
+            title: 'VT – Aderir ou Cancelar',
+            description: 'Solicitação ou cancelamento do vale-transporte.',
+            link: 'https://drive.google.com/file/d/1Iuo00MXbdO95vgAr-PSL95thvavragWB/view?usp=sharing',
+            emailTo: 'dp@grupodunamis.com.br',
+            emailSubject: 'Solicitação/Cancelamento de VT',
+            channels: {
+                whatsapp: `📩 VT – Aderir ou Cancelar\n\nOlá! Para aderir ou cancelar o Vale-Transporte, siga os passos abaixo:\n\n1) Preencha o formulário "Solicitação de VT" com todas as informações.\n2) No formulário, marque a opção desejada:\n- Opto pela utilização do Vale-Transporte (aderir)\n- NÃO opto pela utilização do Vale-Transporte (cancelar)\n\n🔗 Download do formulário:\nhttps://drive.google.com/file/d/1Iuo00MXbdO95vgAr-PSL95thvavragWB/view?usp=sharing\n\nApós o preenchimento, envie para:\n📧 dp@grupodunamis.com.br\n\nNo corpo do e-mail, informe:\nNome:\nRE:\nUnidade:\n\nAtenciosamente,\nGrupo Dunamis`,
+                email: `Prezados(as),\n\nPara aderir ou cancelar o Vale-Transporte, siga as instruções abaixo:\n\n1) Preencha o formulário "Solicitação de VT" com todas as informações.\n2) No formulário, assinale a opção desejada:\n- Opto pela utilização do Vale-Transporte (aderir)\n- NÃO opto pela utilização do Vale-Transporte (cancelar)\n\nDownload do formulário:\nhttps://drive.google.com/file/d/1Iuo00MXbdO95vgAr-PSL95thvavragWB/view?usp=sharing\n\nApós o preenchimento, envie para dp@grupodunamis.com.br informando:\nNome completo:\nRE:\nUnidade:\n\nAtenciosamente,\nGrupo Dunamis`
+            }
+        },
+        {
+            id: 'colab_ferias',
+            category: 'colab',
+            type: 'message',
+            title: 'Programação de férias',
+            description: 'Formulário de férias para colaboradores.',
+            link: 'https://wkf.ms/4n1kC8T',
+            message: `👋 Prezados(as),\n\nPedimos que preencham o link de férias abaixo:\n🔗 https://wkf.ms/4n1kC8T\n\n📥 Favor assinar o recibo e enviar em PDF.\n\nAtenciosamente,\nGrupo Dunamis`
+        },
+        {
+            id: 'colab_cracha',
+            category: 'colab',
+            type: 'message',
+            title: 'Crachá com código de barras',
+            description: 'Solicitação de crachá com código de barras.',
+            link: 'https://wkf.ms/4eO1dW0',
+            message: `👋 Prezados(as),\n\nPara solicitar o crachá com código de barras, preencha o link abaixo:\n🔗 https://wkf.ms/4eO1dW0\n\n📥 As informações serão analisadas e, após a confecção, o crachá será entregue no posto em até 30 dias.\nObs.: a solicitação deve ser feita após o término do período de experiência (90 dias).\n\nAtenciosamente,\nGrupo Dunamis`
+        },
+        {
+            id: 'colab_reclamacao_salarial',
+            category: 'colab',
+            type: 'message',
+            title: 'Reclamação salarial',
+            description: 'Formulário de revisão salarial.',
+            link: 'https://wkf.ms/4hcdd3n',
+            message: `👋 Olá, tudo bem?\n\nPedimos que os questionamentos sobre revisão salarial sejam enviados pelo formulário abaixo:\n🔗 https://wkf.ms/4hcdd3n\n\nAs informações serão analisadas pela Coordenação e retornaremos em breve.\n\nAtenciosamente,\nGrupo Dunamis`
+        },
+        {
+            id: 'colab_holerite',
+            category: 'colab',
+            type: 'message',
+            title: 'Cadastro de holerites',
+            description: 'Instruções para cadastro do holerite.',
+            emailTo: 'denize@grupodunamis.com.br',
+            emailCc: 'cassia@grupodunamis.com.br',
+            emailSubject: 'Cadastro de holerite',
+            channels: {
+                whatsapp: `Para cadastro do holerite:\n\nEnvie um e-mail com:\nNome completo:\nRE:\nE-mail para cadastro:\n\nPara: denize@grupodunamis.com.br\nCc: cassia@grupodunamis.com.br\n\nVocê receberá um link para baixar o app e cadastrar uma senha.\nSe já enviou e-mail anteriormente, favor reenviar.`,
+                email: `Prezados(as),\n\nSolicito o cadastro do holerite com as informações abaixo:\n\nNome completo:\nRE:\nE-mail para cadastro:\n\nAtenciosamente,\n`
+            }
+        },
+        {
+            id: 'colab_ft',
+            category: 'colab',
+            type: 'message',
+            title: 'Solicitação de FT',
+            description: 'Formulário para solicitação de FT.',
+            link: 'https://forms.gle/UKrZnFqFWYU4risGA',
+            message: `📌 Solicitação de FT\n\nPara solicitar FT, preencha o formulário:\nhttps://forms.gle/UKrZnFqFWYU4risGA`
+        },
+        {
+            id: 'colab_curriculo',
+            category: 'colab',
+            type: 'message',
+            title: 'Envio de currículo (vídeo)',
+            description: 'Envio de vídeo currículo.',
+            link: 'https://wkf.ms/3YqtzPm',
+            links: [
+                { label: 'Exemplo de vídeo', url: 'https://youtube.com/shorts/9k_3tj4_hVE?feature=share' }
+            ],
+            message: `📢 Olá!\n\nPor gentileza, envie um vídeo currículo pelo link:\n🔗 https://wkf.ms/3YqtzPm\n\n🕑 Tempo máximo: 2 minutos.\n\nExemplo de apresentação:\n🔗 https://youtube.com/shorts/9k_3tj4_hVE?feature=share\n\nBoa sorte!`
+        },
+        {
+            id: 'colab_troca_folga',
+            category: 'colab',
+            type: 'message',
+            title: 'Troca de folga',
+            description: 'Formulário para troca de folga.',
+            link: 'https://forms.gle/tWXgUt6koiZTXvEP7',
+            message: `📌 Solicitação de troca de folga\n\nPreencha o formulário:\nhttps://forms.gle/tWXgUt6koiZTXvEP7`
+        },
+        {
+            id: 'colab_exercicio_tecnico_fev_2026',
+            category: 'colab',
+            type: 'message',
+            title: 'Exercício técnico – Fevereiro/2026',
+            description: 'Avaliação mensal de fevereiro.',
+            link: 'https://forms.gle/ekp5worSjxvmt6NSA',
+            message: `📚 Exercício técnico - Fevereiro/2026\n\nSegue o link para a avaliação deste mês:\n🔗 https://forms.gle/ekp5worSjxvmt6NSA\n\nBoa sorte!\nCoordenação Dunamis`
+        },
+        {
+            id: 'guide_nexti_1',
+            category: 'guide',
+            type: 'message',
+            title: 'Nexti – Acesso (Etapa 1)',
+            description: 'Primeira etapa de login no app Nexti.',
+            images: ['images/login nexti1.jpeg'],
+            message: `Bom dia!\n\nNa primeira etapa do app, aparecerá "Encontre sua empresa".\nDigite: empresarial.`
+        },
+        {
+            id: 'guide_nexti_2',
+            category: 'guide',
+            type: 'message',
+            title: 'Nexti – Acesso (Etapa 2)',
+            description: 'Login e senha no app Nexti.',
+            images: ['images/login nexti2.jpeg'],
+            message: `Seu login é o CPF (sem pontos e traços).\nA senha são os 4 primeiros dígitos do CPF.\n\nExemplo:\nCPF 678.999.110-75\nLogin: 67899911075\nSenha: 6789`
+        }
+    ]
+};
+
 // Elementos DOM
 const gateway = document.getElementById('gateway');
 const appContainer = document.getElementById('app-container');
 const appTitle = document.getElementById('app-title');
-const APP_VERSION = 'v3.7';
+const APP_VERSION = 'v3.8';
 const contentArea = document.getElementById('content-area');
 
 // Inicialização
@@ -1079,7 +1323,7 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem('substituteSearchEnabled', '0'); // Busca de substituto inicia desativada
     try {
         const storedProx = localStorage.getItem('substituteProximityMode');
-        if (storedProx === 'off' || storedProx === 'posto' || storedProx === 'endereco') {
+        if (storedProx === 'off' || storedProx === 'posto' || storedProx === 'endereco' || storedProx === 'rota') {
             substituteProximityMode = storedProx;
         }
     } catch {}
@@ -1095,6 +1339,11 @@ document.addEventListener('DOMContentLoaded', () => {
     loadReciclagemOverrides();
     loadReciclagemHistory();
     loadReciclagemNotes();
+    loadSupervisaoMenu();
+    loadSupervisaoHistory();
+    loadSupervisaoFavorites();
+    loadSupervisaoUsage();
+    loadSupervisaoChannelPrefs();
     loadReciclagemData(false);
     loadAuthFromStorage();
     startReminderMonitor();
@@ -1120,6 +1369,295 @@ window.onscroll = function() {
     }
 };
 
+function openSupervisaoPage() {
+    appContainer.style.display = 'block';
+    gateway.classList.add('hidden');
+    document.body.classList.remove('on-gateway');
+    document.body.classList.remove('utility-open');
+    currentTab = 'supervisao';
+    contentArea.innerHTML = `
+        <div class="breadcrumb-bar">
+            <div class="breadcrumb-main">
+                <span>Página inicial</span>
+                <span class="breadcrumb-sep">›</span>
+                <span>Supervisão</span>
+            </div>
+            <div class="breadcrumb-meta">
+                <span class="breadcrumb-updated">Acesso direto</span>
+            </div>
+        </div>
+        ${getSupervisaoShellHtml()}
+    `;
+    clearContextBar();
+    bindSupervisaoEvents();
+    renderSupervisao();
+    renderSupervisaoAdminList();
+    renderSupervisaoHistory();
+    updateSupervisaoEditorVisibility();
+    updateSupervisaoAdminStatus();
+}
+
+function openGerenciaPage() {
+    appContainer.style.display = 'block';
+    gateway.classList.add('hidden');
+    document.body.classList.remove('on-gateway');
+    document.body.classList.remove('utility-open');
+    currentTab = 'gerencia';
+    contentArea.innerHTML = `
+        <div class="breadcrumb-bar">
+            <div class="breadcrumb-main">
+                <span>Página inicial</span>
+                <span class="breadcrumb-sep">›</span>
+                <span>Gerência</span>
+            </div>
+            <div class="breadcrumb-meta">
+                <span class="breadcrumb-updated">Em desenvolvimento</span>
+            </div>
+        </div>
+        <div class="gateway-gerencia-card">
+            <strong>Gerência</strong>
+            <p>Menu em desenvolvimento. Em breve teremos os recursos de gestão completos aqui.</p>
+        </div>
+    `;
+    clearContextBar();
+}
+
+function toggleEditModeFromSupervisao() {
+    toggleEditMode();
+    updateSupervisaoAdminStatus();
+    renderSupervisaoAdminList();
+    renderSupervisaoHistory();
+}
+
+async function openSupervisaoUnitEditor() {
+    if (SiteAuth.mode !== 'edit') {
+        showToast("Ative o modo edição para alterar unidades.", "error");
+        return;
+    }
+    const input = document.getElementById('supervisao-unit-input');
+    const raw = input?.value.trim();
+    if (!raw) {
+        showToast("Informe a unidade para editar.", "error");
+        return;
+    }
+    const matched = findUnitByName(raw) || raw.toUpperCase();
+    if (!currentData || currentData.length === 0) {
+        await loadGroup('todos');
+    } else {
+        renderDashboard();
+    }
+    switchTab('unidades');
+    openEditUnitModal(matched);
+}
+
+function updateSupervisaoAdminStatus() {
+    const userEl = document.getElementById('supervisao-admin-user');
+    const roleEl = document.getElementById('supervisao-admin-role');
+    const modeEl = document.getElementById('supervisao-admin-mode');
+    if (!userEl || !roleEl || !modeEl) return;
+    if (!SiteAuth.logged) {
+        userEl.textContent = '—';
+        roleEl.textContent = '—';
+        modeEl.textContent = 'VISUALIZAÇÃO';
+        modeEl.className = 'status-badge-menu view';
+        return;
+    }
+    const roleLabel = ROLE_LABELS[SiteAuth.role] || 'Usuário';
+    const modeLabel = SiteAuth.mode === 'edit' ? 'EDIÇÃO' : 'VISUALIZAÇÃO';
+    userEl.textContent = SiteAuth.user || 'Admin';
+    roleEl.textContent = roleLabel.toUpperCase();
+    modeEl.textContent = modeLabel;
+    modeEl.className = `status-badge-menu ${SiteAuth.mode === 'edit' ? 'edit' : 'view'}`;
+}
+
+function getSupervisaoAdminHtml() {
+    const logged = SiteAuth.logged;
+    const isAdmin = isAdminRole();
+    const canEdit = canEditSupervisao();
+    return `
+        <details class="supervisao-admin-panel">
+            <summary>Menu de edição</summary>
+            <div class="supervisao-admin-body">
+                ${!logged ? `
+                    <div class="supervisao-admin-login">
+                        <div class="field-row">
+                            <label>RE (últimos 4)</label>
+                            <input type="text" id="supervisao-login-re" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <div class="field-row">
+                            <label>CPF (primeiros 4)</label>
+                            <input type="password" id="supervisao-login-cpf" maxlength="4" inputmode="numeric" placeholder="0000">
+                        </div>
+                        <label class="keep-logged">
+                            <input type="checkbox" id="supervisao-keep-logged"> Manter-me conectado
+                        </label>
+                        <div class="actions">
+                            <button class="btn" onclick="loginSite({ source: 'supervisao', target: 'supervisao' })">Entrar</button>
+                        </div>
+                        <div class="hint">Somente administradores podem editar.</div>
+                    </div>
+                ` : `
+                    <div class="supervisao-admin-status">
+                        <div><span>Usuário</span><strong id="supervisao-admin-user">—</strong></div>
+                        <div><span>Perfil</span><strong id="supervisao-admin-role">—</strong></div>
+                        <div><span>Modo</span><strong id="supervisao-admin-mode" class="status-badge-menu view">VISUALIZAÇÃO</strong></div>
+                    </div>
+                    <div class="supervisao-admin-actions">
+                        <button class="btn btn-secondary btn-small" onclick="toggleEditModeFromSupervisao()">Alternar modo</button>
+                        <button class="btn btn-secondary btn-small" onclick="logoutSite({ target: 'supervisao' })">Sair</button>
+                    </div>
+                    ${!canEdit ? `<div class="hint">Para editar, esteja logado como admin e ative o modo edição.</div>` : ''}
+                    ${logged && !isAdmin ? `<div class="hint">Seu perfil não permite editar o menu de Supervisão.</div>` : ''}
+                `}
+
+                ${logged && isAdmin ? `
+                    <div class="supervisao-admin-grid">
+                        <div class="supervisao-admin-section-title">Conteúdo do menu</div>
+                        <div class="supervisao-admin-card tone-primary">
+                            <div class="supervisao-admin-card-header">
+                                <strong>Editor principal</strong>
+                            </div>
+                            <div class="hint">Crie ou atualize links e mensagens principais.</div>
+                            <input type="hidden" id="supervisao-editor-id">
+                            <div class="field-row">
+                                <label>Seção</label>
+                                <select id="supervisao-editor-category">
+                                    <option value="internal">Supervisão (interno)</option>
+                                    <option value="colab">Colaboradores</option>
+                                    <option value="guide">Guias e tutoriais</option>
+                                </select>
+                            </div>
+                            <div class="field-row">
+                                <label>Tipo</label>
+                                <select id="supervisao-editor-type" onchange="updateSupervisaoEditorVisibility()">
+                                    <option value="message">Mensagem</option>
+                                    <option value="link">Link</option>
+                                </select>
+                            </div>
+                            <div class="field-row">
+                                <label>Título</label>
+                                <input type="text" id="supervisao-editor-title" placeholder="Ex: Programação de férias">
+                            </div>
+                            <div class="field-row">
+                                <label>Descrição</label>
+                                <input type="text" id="supervisao-editor-description" placeholder="Resumo curto do item">
+                            </div>
+                            <div class="field-row">
+                                <label>Link principal (opcional)</label>
+                                <input type="text" id="supervisao-editor-link" placeholder="https://...">
+                            </div>
+                            <div class="field-row">
+                                <label>Links extras (um por linha: Rótulo | URL)</label>
+                                <textarea id="supervisao-editor-links" rows="3" placeholder="Exemplo | https://..."></textarea>
+                            </div>
+                            <div id="supervisao-editor-message-group">
+                                <div class="field-row">
+                                    <label>Mensagem (WhatsApp)</label>
+                                    <textarea id="supervisao-editor-message-whatsapp" rows="4" placeholder="Digite a mensagem"></textarea>
+                                </div>
+                                <div class="field-row">
+                                    <label>Mensagem (E-mail)</label>
+                                    <textarea id="supervisao-editor-message-email" rows="4" placeholder="Opcional"></textarea>
+                                </div>
+                                <div class="field-row">
+                                    <label>E-mail destino</label>
+                                    <input type="text" id="supervisao-editor-email-to" placeholder="exemplo@dominio.com">
+                                </div>
+                                <div class="field-row">
+                                    <label>Cc (opcional)</label>
+                                    <input type="text" id="supervisao-editor-email-cc" placeholder="copiar@dominio.com">
+                                </div>
+                                <div class="field-row">
+                                    <label>Assunto do e-mail</label>
+                                    <input type="text" id="supervisao-editor-email-subject" placeholder="Assunto">
+                                </div>
+                            </div>
+                            <div class="field-row">
+                                <label>Imagens (uma por linha)</label>
+                                <textarea id="supervisao-editor-images" rows="3" placeholder="images/exemplo.jpg"></textarea>
+                            </div>
+                            <div class="field-row">
+                                <label>Validade (opcional)</label>
+                                <input type="date" id="supervisao-editor-expires">
+                            </div>
+                            <div class="actions">
+                                <button class="btn" onclick="saveSupervisaoItem()">Salvar item</button>
+                                <button class="btn btn-secondary" onclick="resetSupervisaoEditor()">Limpar</button>
+                            </div>
+                        </div>
+
+                        <div class="supervisao-admin-card tone-blue">
+                            <div class="supervisao-admin-card-header">
+                                <strong>Itens cadastrados</strong>
+                                <button class="btn btn-secondary btn-small" onclick="resetSupervisaoEditor()">Novo item</button>
+                            </div>
+                            <div class="hint">Organize rapidamente tudo que está publicado.</div>
+                            <div id="supervisao-admin-list" class="supervisao-admin-list"></div>
+                        </div>
+
+                        <div class="supervisao-admin-section-title">Operação e histórico</div>
+                        <div class="supervisao-admin-card tone-sky">
+                            <div class="supervisao-admin-card-header">
+                                <strong>Unidades e colaboradores</strong>
+                            </div>
+                            <div class="hint">Abra uma unidade para adicionar/remover colaboradores.</div>
+                            <div class="field-row">
+                                <label>Unidade</label>
+                                <input type="text" id="supervisao-unit-input" placeholder="Digite o nome da unidade">
+                            </div>
+                            <div class="actions">
+                                <button class="btn btn-secondary btn-small" onclick="openSupervisaoUnitEditor()">Abrir edição da unidade</button>
+                            </div>
+                            <div class="hint">A edição abrirá na tela de Unidades (base geral).</div>
+                        </div>
+
+                        <div class="supervisao-admin-card tone-green">
+                            <div class="supervisao-admin-card-header">
+                                <strong>Histórico</strong>
+                            </div>
+                            <div id="supervisao-history-list" class="supervisao-history-list"></div>
+                        </div>
+                    </div>
+                ` : ''}
+            </div>
+        </details>
+    `;
+}
+
+function getSupervisaoShellHtml() {
+    return `
+        <div class="supervisao-shell">
+            <div class="supervisao-header">
+                <div>
+                    <h3>Supervisão</h3>
+                    <p>Links internos e mensagens prontas para enviar aos colaboradores.</p>
+                </div>
+                <div id="supervisao-updated" class="supervisao-meta"></div>
+            </div>
+            <div class="supervisao-toolbar">
+                <input type="text" id="supervisao-search" class="search-input" placeholder="Buscar link ou mensagem...">
+                <div class="supervisao-switch">
+                    <div class="supervisao-switch-label">Público principal</div>
+                    <div class="supervisao-switch-group">
+                        <button class="switch-btn" data-supervisao-filter="internal">Supervisão</button>
+                        <button class="switch-btn" data-supervisao-filter="colab">Colaboradores</button>
+                    </div>
+                </div>
+                <div class="supervisao-switch-hint">Selecione quem verá o conteúdo principal antes dos filtros extras.</div>
+                <div class="supervisao-filters">
+                    <button class="filter-chip" data-supervisao-filter="guide">Guias</button>
+                    <button class="filter-chip" data-supervisao-filter="favorites">Favoritos</button>
+                    <button class="filter-chip" data-supervisao-filter="used">Mais usados</button>
+                    ${isAdminRole() ? `<button class="filter-chip" data-supervisao-filter="expired">Expirados</button>` : ''}
+                </div>
+            </div>
+            <div id="supervisao-top-used" class="supervisao-top-used hidden"></div>
+            <div id="supervisao-sections"></div>
+            ${getSupervisaoAdminHtml()}
+        </div>
+    `;
+}
+
 // 1. Renderizar Gateway
 function renderGateway() {
     gateway.innerHTML = `
@@ -1139,6 +1677,22 @@ function renderGateway() {
                 </div>
                 <h3>Visualização Geral</h3>
                 <p>Todas as unidades</p>
+            </div>
+        </div>
+        <div class="gateway-access-grid">
+            <div class="gateway-card gateway-card-access" onclick="openSupervisaoPage()">
+                <div class="gateway-icon">
+                    ${ICONS.shield}
+                </div>
+                <h3>Supervisão</h3>
+                <p>Links e mensagens para supervisores.</p>
+            </div>
+            <div class="gateway-card gateway-card-access" onclick="openGerenciaPage()">
+                <div class="gateway-icon">
+                    ${ICONS.settings}
+                </div>
+                <h3>Gerência</h3>
+                <p>Painel gerencial (em desenvolvimento).</p>
             </div>
         </div>
         <div class="gateway-links">
@@ -1993,6 +2547,7 @@ function renderDashboard() {
                         <button class="filter-chip" data-prox="off" onclick="setSubstituteProximity('off')">Sem</button>
                         <button class="filter-chip" data-prox="posto" onclick="setSubstituteProximity('posto')">Posto</button>
                         <button class="filter-chip" data-prox="endereco" onclick="setSubstituteProximity('endereco')">Endereço</button>
+                        <button class="filter-chip" data-prox="rota" onclick="setSubstituteProximity('rota')">Rota (OSRM)</button>
                     </div>
                     <div class="hint">Busque o colaborador, clique para fixar o alvo e use os filtros para encontrar cobertura.</div>
                 </div>
@@ -2380,6 +2935,7 @@ function renderDashboard() {
                             <button class="config-tab active" onclick="switchConfigTab('access')">Acesso</button>
                             <button class="config-tab" onclick="switchConfigTab('datasource')">Fonte de Banco de Dados</button>
                             <button class="config-tab" onclick="switchConfigTab('ft')">FT</button>
+                            <button class="config-tab" onclick="switchConfigTab('supervisao')">Supervisão</button>
                         </div>
 
                     <div id="config-pane-access" class="config-pane">
@@ -2654,6 +3210,26 @@ function renderDashboard() {
                             </div>
                         </div>
                     </div>
+
+                    <div id="config-pane-supervisao" class="config-pane hidden">
+                        <div class="config-section">
+                            <div class="config-section-title">Menu de supervisão</div>
+                            <div class="config-grid">
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Editor</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="config-note">O editor de Supervisão agora fica na página inicial.</div>
+                                        <div class="actions">
+                                            <button class="btn btn-secondary" onclick="openSupervisaoPage()">Abrir Supervisão</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2891,7 +3467,7 @@ function renderDashboard() {
                         <ul>
                             <li>Digite nome, RE ou unidade para localizar colaboradores.</li>
                             <li>Os resultados aparecem instantaneamente conforme você digita.</li>
-                            <li>Use “Buscar substituto” para fixar um alvo e filtrar cobertura (proximidade por posto/endereço).</li>
+                            <li>Use “Buscar substituto” para fixar um alvo e filtrar cobertura (posto, endereço ou rota real).</li>
                             <li>Use o botão de WhatsApp para contato rápido quando disponível.</li>
                         </ul>
                     </div>
@@ -2948,6 +3524,22 @@ function renderDashboard() {
             </div>
         </div>
 
+        <!-- Modal Rota (Substituto) -->
+        <div id="route-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 900px;">
+                <div class="modal-header sticky-modal-header">
+                    <h3>Rota da substituição</h3>
+                    <button class="close-modal" onclick="closeRouteModal()">${ICONS.close}</button>
+                </div>
+                <div id="route-meta" class="route-meta">Carregando rota...</div>
+                <div id="route-map" class="route-map"></div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="openRouteInMaps()">Abrir no Google Maps</button>
+                    <button class="btn btn-secondary" onclick="closeRouteModal()">Fechar</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Modal Guia Completo -->
         <div id="guide-modal" class="modal hidden">
             <div class="modal-content" style="max-width: 860px;">
@@ -2971,17 +3563,31 @@ function renderDashboard() {
                                 <h4>2. Navegação principal</h4>
                                 <ol>
                                     <li>Use as abas superiores para trocar entre Busca Rápida, Unidades, Avisos, Reciclagem, Lançamentos e Configuração.</li>
+                                    <li>O menu de Supervisão fica na página inicial (tela de seleção), sem precisar escolher unidade.</li>
                                     <li>O breadcrumb no topo mostra o grupo atual e a aba ativa.</li>
                                     <li>Os botões utilitários (Imprimir, Ajuda, Prompts e Guia) ficam no canto superior.</li>
                                 </ol>
                             </div>
+                            <details class="guide-subitem">
+                                <summary>Últimas implantações e novidades</summary>
+                                <div class="guide-subbody">
+                                    <div class="help-section">
+                                        <h4>v3.8 (06/02/2026)</h4>
+                                        <ul>
+                                            <li>Menu de Supervisão disponível na página inicial, sem selecionar unidade.</li>
+                                            <li>Envio por WhatsApp otimizado: abre o app no celular e a tela de escolha (Web/App) no PC.</li>
+                                            <li>Seletor rápido entre itens de Supervisão e Colaboradores.</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </details>
                             <div class="help-section">
                                 <h4>3. Busca rápida</h4>
                                 <ol>
                                     <li>Digite nome, RE ou unidade para localizar colaboradores rapidamente.</li>
                                     <li>Use os filtros Plantão, Folga, FT e Afastados para refinar resultados.</li>
                                     <li>Ative "Buscar substituto" para fixar um alvo e comparar disponibilidade de cobertura.</li>
-                                    <li>Escolha o tipo de proximidade (posto ou endereço) quando for buscar substituto.</li>
+                                    <li>Escolha o tipo de proximidade (posto, endereço ou rota real) quando for buscar substituto.</li>
                                     <li>Os cartões exibem rótulos de FT e detalhes de quem cobre ou quem foi coberto.</li>
                                 </ol>
                             </div>
@@ -2996,7 +3602,16 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>5. Avisos e lembretes</h4>
+                                <h4>5. Supervisão (menu inicial)</h4>
+                                <ol>
+                                    <li>O menu de Supervisão fica na página inicial e pode ser acessado sem escolher unidade.</li>
+                                    <li>Use o seletor "Supervisão" ou "Colaboradores" para alternar os itens exibidos.</li>
+                                    <li>Favoritos, Guias e "Mais usados" ajudam a encontrar mensagens rapidamente.</li>
+                                    <li>Os botões de WhatsApp abrem o app no celular e a tela de escolha no PC.</li>
+                                </ol>
+                            </div>
+                            <div class="help-section">
+                                <h4>6. Avisos e lembretes</h4>
                                 <ol>
                                     <li>Admins podem criar avisos gerais e lembretes direcionados por grupo ou RE.</li>
                                     <li>Colaboradores visualizam apenas avisos atribuídos ao próprio RE.</li>
@@ -3004,7 +3619,7 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>6. Lançamentos de FT – Dashboard</h4>
+                                <h4>7. Lançamentos de FT – Dashboard</h4>
                                 <ol>
                                     <li>Use o filtro de período e status no topo para ajustar os indicadores.</li>
                                     <li>Consulte os KPIs de pendências, confirmadas e lançadas.</li>
@@ -3013,7 +3628,7 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>7. Lançamentos de FT – Histórico</h4>
+                                <h4>8. Lançamentos de FT – Histórico</h4>
                                 <ol>
                                     <li>Use busca local, filtros por unidade e colaborador e ordenação para encontrar o lançamento certo.</li>
                                     <li>Ative "Agrupar por dia" para organizar por data da FT.</li>
@@ -3023,7 +3638,7 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>8. Lançamentos de FT – Novo</h4>
+                                <h4>9. Lançamentos de FT – Novo</h4>
                                 <ol>
                                     <li>Busque o colaborador, confirme a unidade atual e selecione a unidade da FT.</li>
                                     <li>Use "Sugerir por proximidade" para indicar quem está de folga.</li>
@@ -3032,7 +3647,7 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>9. Reciclagem</h4>
+                                <h4>10. Reciclagem</h4>
                                 <ol>
                                     <li>Use filtros por planilha, status e pesquisa para localizar colaboradores.</li>
                                     <li>O resumo mostra vencidos, a vencer, em dia e sem informação.</li>
@@ -3040,7 +3655,7 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>10. Configuração e Shadow</h4>
+                                <h4>11. Configuração e Shadow</h4>
                                 <ol>
                                     <li>Verifique as fontes de dados (planilhas, forms e reciclagem) e mantenha as URLs atualizadas.</li>
                                     <li>O shadow mantém as alterações globais; aplique e sincronize sempre que necessário.</li>
@@ -3049,7 +3664,7 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>11. Exportações e relatórios</h4>
+                                <h4>12. Exportações e relatórios</h4>
                                 <ol>
                                     <li>Use o menu de exportação para baixar base atualizada, resumos, históricos e PDFs.</li>
                                     <li>Relatórios de FT e reciclagem podem ser exportados com filtros aplicados.</li>
@@ -3266,14 +3881,15 @@ function switchTab(tabName) {
     }
 
     // Atualiza conteúdo
-    document.getElementById('tab-content-busca').classList.add('hidden');
-    document.getElementById('tab-content-unidades').classList.add('hidden');
-    document.getElementById('tab-content-avisos').classList.add('hidden');
-    document.getElementById('tab-content-reciclagem').classList.add('hidden');
+    document.getElementById('tab-content-busca')?.classList.add('hidden');
+    document.getElementById('tab-content-unidades')?.classList.add('hidden');
+    document.getElementById('tab-content-supervisao')?.classList.add('hidden');
+    document.getElementById('tab-content-avisos')?.classList.add('hidden');
+    document.getElementById('tab-content-reciclagem')?.classList.add('hidden');
     document.getElementById('tab-content-lancamentos')?.classList.add('hidden');
-    document.getElementById('tab-content-config').classList.add('hidden');
+    document.getElementById('tab-content-config')?.classList.add('hidden');
     
-    document.getElementById(`tab-content-${tabName}`).classList.remove('hidden');
+    document.getElementById(`tab-content-${tabName}`)?.classList.remove('hidden');
 
     if (tabName === 'config' && !SiteAuth.logged) {
         document.getElementById('config-login')?.classList.remove('hidden');
@@ -3373,7 +3989,14 @@ function switchConfigTab(tabName) {
     document.getElementById('config-pane-access').classList.add('hidden');
     document.getElementById('config-pane-datasource').classList.add('hidden');
     document.getElementById('config-pane-ft')?.classList.add('hidden');
+    document.getElementById('config-pane-supervisao')?.classList.add('hidden');
     document.getElementById(`config-pane-${tabName}`)?.classList.remove('hidden');
+
+    if (tabName === 'supervisao') {
+        renderSupervisaoAdminList();
+        renderSupervisaoHistory();
+        updateSupervisaoEditorVisibility();
+    }
 }
 
 // 5. Lógica da Busca Rápida
@@ -3519,13 +4142,15 @@ function buildSubstituteReason(candidate, target, options = {}) {
     if (candidate.posto && target.posto && normalizeUnitKey(candidate.posto) === normalizeUnitKey(target.posto)) {
         parts.push(`atua na mesma unidade (${candidate.posto})`);
     }
-    const dist = formatDistanceKm(candidate._distanceKm);
+    const distValue = candidate._routeDistanceKm ?? candidate._distanceKm;
+    const dist = formatDistanceKm(distValue);
     if (dist) {
         const mode = options.proximityMode || 'posto';
-        const label = mode === 'endereco'
+        const label = mode === 'endereco' || mode === 'rota'
             ? `endereço do colaborador RE ${target.re}`
             : `unidade do colaborador RE ${target.re}`;
-        parts.push(`está a ~${dist} km da ${label}`);
+        const routeTag = candidate._routeDistanceKm != null ? ' (rota)' : '';
+        parts.push(`está a ~${dist} km${routeTag} da ${label}`);
     }
     if (!parts.length) parts.push('disponibilidade verificada pela escala e status atual');
     return `Motivo: ${parts.join(' e ')}.`;
@@ -3533,7 +4158,7 @@ function buildSubstituteReason(candidate, target, options = {}) {
 
 function getMapsLocationForCollab(collab, modeUsed) {
     if (!collab) return '';
-    if (modeUsed === 'endereco') {
+    if (modeUsed === 'endereco' || modeUsed === 'rota') {
         const addr = getAddressForCollaborator(collab);
         if (addr) return addr;
     }
@@ -3543,49 +4168,55 @@ function getMapsLocationForCollab(collab, modeUsed) {
 }
 
 function buildSubstituteActionHtml(candidate, target, modeUsed) {
-    const origin = getMapsLocationForCollab(candidate, modeUsed);
-    const destination = getMapsLocationForCollab(target, modeUsed);
-    const originJs = JSON.stringify(origin);
-    const destinationJs = JSON.stringify(destination);
+    const candRe = candidate?.re || '';
+    const targetRe = target?.re || '';
     return `
-        <button class="btn btn-secondary btn-small" onclick="openMapsRoute(${originJs}, ${destinationJs})">
-            Ver rota
+        <button class="btn btn-secondary btn-small" onclick="openSubstituteRouteModal('${candRe}', '${targetRe}', '${modeUsed}')">
+            Rota (mapa)
         </button>
     `;
 }
 
 async function getProximityTargetCoords(target, mode) {
-    if (mode === 'posto') {
+    const baseMode = mode === 'rota' ? 'endereco' : mode;
+    if (baseMode === 'posto') {
         const coords = await getCoordsForUnit(target.posto);
-        if (coords) return { coords, modeUsed: 'posto', note: null };
+        if (coords) return { coords, modeUsed: mode, baseMode, note: null };
         const fallbackAddress = getAddressForCollaborator(target);
         const fallbackCoords = await getCoordsForAddress(fallbackAddress);
-        if (fallbackCoords) return { coords: fallbackCoords, modeUsed: 'posto', note: 'fallback_endereco' };
-        return { coords: null, modeUsed: 'posto', note: 'no_target_coords' };
+        if (fallbackCoords) return { coords: fallbackCoords, modeUsed: mode, baseMode, note: 'fallback_endereco' };
+        return { coords: null, modeUsed: mode, baseMode, note: 'no_target_coords' };
     }
-    if (mode === 'endereco') {
+    if (baseMode === 'endereco') {
         const address = getAddressForCollaborator(target);
         const coords = await getCoordsForAddress(address);
-        if (coords) return { coords, modeUsed: 'endereco', note: null };
+        if (coords) return { coords, modeUsed: mode, baseMode, note: null };
         const fallback = await getCoordsForUnit(target.posto);
-        if (fallback) return { coords: fallback, modeUsed: 'posto', note: 'fallback_unit' };
-        return { coords: null, modeUsed: 'endereco', note: 'no_target_coords' };
+        if (fallback) return { coords: fallback, modeUsed: mode, baseMode, note: 'fallback_unit' };
+        return { coords: null, modeUsed: mode, baseMode, note: 'no_target_coords' };
     }
-    return { coords: null, modeUsed: 'off', note: 'off' };
+    return { coords: null, modeUsed: 'off', baseMode: 'off', note: 'off' };
 }
 
 async function sortCandidatesByProximity(list, target, mode) {
     const targetInfo = await getProximityTargetCoords(target, mode);
+    const cfg = getOsrmConfig();
+    const osrmWanted = mode === 'rota';
+    const useOsrm = osrmWanted && cfg.enabled;
     if (!targetInfo.coords) {
         list.forEach(item => { if (item._distanceKm != null) delete item._distanceKm; });
-        return { list, note: targetInfo.note || 'no_target_coords', modeUsed: targetInfo.modeUsed };
+        return { list, note: targetInfo.note || 'no_target_coords', modeUsed: targetInfo.modeUsed, osrmNote: osrmWanted && !cfg.enabled ? 'unavailable' : (useOsrm ? 'unavailable' : '') };
     }
 
     const withDistance = [];
     const withoutDistance = [];
+    const baseMode = targetInfo.baseMode || (mode === 'rota' ? 'endereco' : mode);
     for (const cand of list) {
         let coords = null;
-        if (targetInfo.modeUsed === 'posto') {
+        if (cand._routeDistanceKm != null) delete cand._routeDistanceKm;
+        if (cand._routeDurationMin != null) delete cand._routeDurationMin;
+        if (cand._coords) delete cand._coords;
+        if (baseMode === 'posto') {
             coords = await getCoordsForUnit(cand.posto);
             if (coords) {
                 cand._distanceSource = 'posto';
@@ -3615,21 +4246,44 @@ async function sortCandidatesByProximity(list, target, mode) {
             withoutDistance.push(cand);
             continue;
         }
+        cand._coords = coords;
         cand._distanceKm = calcDistanceKm(targetInfo.coords, coords);
         withDistance.push(cand);
     }
 
     withDistance.sort((a, b) => a._distanceKm - b._distanceKm);
+    let osrmNote = osrmWanted && !cfg.enabled ? 'unavailable' : '';
+    if (useOsrm && withDistance.length) {
+        const osrmTargets = withDistance.slice(0, cfg.maxCandidates).filter(c => c._coords);
+        const table = await fetchOsrmTable(targetInfo.coords, osrmTargets.map(c => c._coords));
+        if (table && table.distances?.length) {
+            osrmTargets.forEach((cand, idx) => {
+                const dist = table.distances[idx];
+                const dur = table.durations?.[idx];
+                if (Number.isFinite(dist)) cand._routeDistanceKm = dist / 1000;
+                if (Number.isFinite(dur)) cand._routeDurationMin = dur / 60;
+            });
+            withDistance.sort((a, b) => {
+                const da = a._routeDistanceKm ?? a._distanceKm ?? Infinity;
+                const db = b._routeDistanceKm ?? b._distanceKm ?? Infinity;
+                return da - db;
+            });
+            osrmNote = 'ok';
+        } else {
+            osrmNote = 'fail';
+        }
+    }
     const note = withDistance.length
         ? (withoutDistance.length ? 'partial' : (targetInfo.note || 'ok'))
         : 'no_candidates_coords';
-    return { list: withDistance.concat(withoutDistance), note, modeUsed: targetInfo.modeUsed };
+    return { list: withDistance.concat(withoutDistance), note, modeUsed: targetInfo.modeUsed, osrmNote };
 }
 
-function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hideAbsence) {
+function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hideAbsence, osrmNote = '') {
     let proximityLabel = 'Desligada';
     if (modeUsed === 'posto') proximityLabel = 'Posto de trabalho';
     if (modeUsed === 'endereco') proximityLabel = 'Endereço do colaborador';
+    if (modeUsed === 'rota') proximityLabel = 'Rota real (OSRM)';
 
     let noteText = '';
     if (note === 'fallback_unit') noteText = 'Endereço do alvo indisponível; usando posto de trabalho.';
@@ -3637,6 +4291,8 @@ function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hi
     if (note === 'no_target_coords') noteText = 'Não consegui localizar o alvo para calcular distância; exibindo sem distância.';
     if (note === 'no_candidates_coords') noteText = 'Não consegui geocodificar candidatos; exibindo sem distância.';
     if (note === 'partial') noteText = 'Alguns candidatos sem endereço/geo; listados por último.';
+    if (modeUsed === 'rota' && osrmNote === 'fail') noteText = 'OSRM indisponível; usando distância estimada (Haversine).';
+    if (modeUsed === 'rota' && osrmNote === 'unavailable') noteText = 'OSRM desativado; usando distância estimada (Haversine).';
 
     const unitInfo = target.posto ? ` • ${target.posto}` : '';
     const filterLabelMap = {
@@ -3706,6 +4362,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
 
     let proximityNote = 'ok';
     let modeUsed = substituteProximityMode || 'off';
+    let osrmNote = '';
     if (modeUsed !== 'off') {
         await loadUnitAddressDb();
         await loadCollaboratorAddressDb();
@@ -3715,6 +4372,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
         list = sorted.list;
         proximityNote = sorted.note;
         modeUsed = sorted.modeUsed;
+        osrmNote = sorted.osrmNote || '';
     } else {
         list.forEach(item => {
             if (item._distanceKm != null) delete item._distanceKm;
@@ -3722,7 +4380,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
         });
     }
 
-    const metaCard = buildSubstituteMetaCard(target, modeUsed, proximityNote, list.length, filterStatus, hideAbsence);
+    const metaCard = buildSubstituteMetaCard(target, modeUsed, proximityNote, list.length, filterStatus, hideAbsence, osrmNote);
     resultsContainer.innerHTML = metaCard + list.map(item => {
         const statusInfo = item._statusInfoSnapshot || getStatusInfo(item);
         const addressOk = !!getAddressForCollaborator(item);
@@ -3730,16 +4388,19 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
         let sourceText = 'desligada';
         if (modeUsed !== 'off') {
             const source = item._distanceSource || modeUsed;
-            if (source === 'endereco' && modeUsed === 'endereco') {
+            const baseMode = modeUsed === 'rota' ? 'endereco' : modeUsed;
+            if (item._routeDistanceKm != null) {
+                sourceText = 'rota (OSRM)';
+            } else if (source === 'endereco' && baseMode === 'endereco') {
                 sourceText = 'endereço';
-            } else if (source === 'posto' && modeUsed === 'endereco') {
+            } else if (source === 'posto' && baseMode === 'endereco') {
                 sourceText = 'posto (fallback)';
-            } else if (source === 'endereco' && modeUsed === 'posto') {
+            } else if (source === 'endereco' && baseMode === 'posto') {
                 sourceText = 'endereço (fallback)';
             } else if (source === 'posto') {
                 sourceText = 'posto';
             } else {
-                sourceText = modeUsed === 'endereco' ? 'endereço' : 'posto';
+                sourceText = baseMode === 'endereco' ? 'endereço' : 'posto';
             }
         }
         const reasonNote = `Fonte da proximidade: ${sourceText}.`;
@@ -4280,8 +4941,7 @@ function openReciclagemWhatsapp(templateId, item) {
         return;
     }
     const phone = item?.phone || '';
-    const url = buildWhatsUrl(phone, text);
-    window.open(url, '_blank');
+    openWhatsApp(phone, text);
 }
 
 function copyReciclagemMessage(templateId, item) {
@@ -5201,6 +5861,109 @@ function openMapsRoute(origin, destination) {
     if (!query) return;
     const searchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
     window.open(searchUrl, '_blank');
+}
+
+async function openSubstituteRouteModal(candidateRe, targetRe, modeUsed) {
+    const modal = document.getElementById('route-modal');
+    if (!modal) return;
+    const metaEl = document.getElementById('route-meta');
+    const candidate = currentData.find(c => matchesRe(c.re, candidateRe))
+        || (allCollaboratorsCache.items || []).find(c => matchesRe(c.re, candidateRe));
+    const target = currentData.find(c => matchesRe(c.re, targetRe))
+        || (allCollaboratorsCache.items || []).find(c => matchesRe(c.re, targetRe))
+        || getSubstituteTarget();
+    if (!candidate || !target) {
+        showToast("Não foi possível localizar os colaboradores para a rota.", "error");
+        return;
+    }
+    modal.classList.remove('hidden');
+    if (metaEl) metaEl.textContent = 'Calculando rota...';
+    const seq = ++routeMapSeq;
+    await loadUnitAddressDb();
+    await loadCollaboratorAddressDb();
+    const baseMode = modeUsed === 'rota' ? 'endereco' : (modeUsed === 'off' ? 'posto' : modeUsed);
+    const originAddr = getMapsLocationForCollab(candidate, baseMode) || candidate.posto || '';
+    const destAddr = getMapsLocationForCollab(target, baseMode) || target.posto || '';
+    routeModalState = { origin: originAddr, destination: destAddr };
+    const originCoords = await getCoordsForAddress(originAddr);
+    const destCoords = await getCoordsForAddress(destAddr);
+    if (seq !== routeMapSeq) return;
+    if (!originCoords || !destCoords) {
+        if (metaEl) metaEl.textContent = 'Endereço indisponível para calcular rota. Tente abrir no Google Maps.';
+        return;
+    }
+    await renderRouteMap(originCoords, destCoords, {
+        originLabel: `${candidate.nome} (RE ${candidate.re})`,
+        destLabel: `${target.nome} (RE ${target.re})`
+    }, seq);
+}
+
+function closeRouteModal() {
+    document.getElementById('route-modal')?.classList.add('hidden');
+}
+
+function openRouteInMaps() {
+    const origin = routeModalState?.origin || '';
+    const destination = routeModalState?.destination || '';
+    if (!origin && !destination) return;
+    openMapsRoute(origin, destination);
+}
+
+async function renderRouteMap(origin, dest, labels = {}, seq = 0) {
+    const metaEl = document.getElementById('route-meta');
+    if (!window.L) {
+        if (metaEl) metaEl.textContent = 'Leaflet não carregou. Use o botão Google Maps.';
+        return;
+    }
+    const container = document.getElementById('route-map');
+    if (routeMapInstance && container && routeMapInstance.getContainer() !== container) {
+        routeMapInstance.remove();
+        routeMapInstance = null;
+        routeMapLayer = null;
+        routeMapMarkers = [];
+    }
+    if (!routeMapInstance) {
+        routeMapInstance = L.map('route-map');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; OpenStreetMap'
+        }).addTo(routeMapInstance);
+    }
+    if (seq && seq !== routeMapSeq) return;
+    if (routeMapLayer) {
+        routeMapInstance.removeLayer(routeMapLayer);
+        routeMapLayer = null;
+    }
+    routeMapMarkers.forEach(marker => routeMapInstance.removeLayer(marker));
+    routeMapMarkers = [];
+
+    const route = await fetchOsrmRoute(origin, dest);
+    if (seq && seq !== routeMapSeq) return;
+    let distanceKm = null;
+    let durationMin = null;
+    if (route?.geometry?.coordinates?.length) {
+        const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+        routeMapLayer = L.polyline(latlngs, { color: '#0b4fb3', weight: 4 }).addTo(routeMapInstance);
+        distanceKm = route.distanceKm;
+        durationMin = route.durationMin;
+    } else {
+        routeMapLayer = L.polyline([[origin.lat, origin.lon], [dest.lat, dest.lon]], { color: '#94a3b8', weight: 3, dashArray: '6,6' }).addTo(routeMapInstance);
+        distanceKm = calcDistanceKm(origin, dest);
+    }
+
+    const originMarker = L.marker([origin.lat, origin.lon]).addTo(routeMapInstance).bindPopup(labels.originLabel || 'Origem');
+    const destMarker = L.marker([dest.lat, dest.lon]).addTo(routeMapInstance).bindPopup(labels.destLabel || 'Destino');
+    routeMapMarkers.push(originMarker, destMarker);
+
+    if (routeMapLayer) {
+        routeMapInstance.fitBounds(routeMapLayer.getBounds().pad(0.2));
+    }
+    setTimeout(() => routeMapInstance.invalidateSize(), 0);
+
+    const distLabel = formatDistanceKm(distanceKm);
+    const durLabel = formatDurationMin(durationMin);
+    const line = distLabel ? `Distância: ${distLabel} km${durLabel ? ` • ${durLabel}` : ''}` : 'Distância indisponível.';
+    if (metaEl) metaEl.textContent = `Origem: ${labels.originLabel || ''} • Destino: ${labels.destLabel || ''} • ${line}`;
 }
 
 function openAddressPortal(unitName) {
@@ -6180,6 +6943,79 @@ function formatDistanceKm(value) {
     return String(rounded).replace('.', ',');
 }
 
+function formatDurationMin(value) {
+    if (value == null || !Number.isFinite(value)) return '';
+    const total = Math.round(value);
+    if (total < 60) return `${total} min`;
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+function getOsrmConfig() {
+    const routing = CONFIG?.routing || {};
+    const base = String(routing.osrmBaseUrl || 'https://router.project-osrm.org').replace(/\/+$/, '');
+    const profile = routing.osrmProfile || 'driving';
+    const enabled = routing.osrmEnabled !== false;
+    let maxCandidates = parseInt(routing.osrmMaxCandidates, 10);
+    if (!Number.isFinite(maxCandidates)) maxCandidates = 12;
+    maxCandidates = Math.min(Math.max(maxCandidates, 3), 30);
+    return { base, profile, enabled, maxCandidates };
+}
+
+function buildOsrmKey(origin, dest) {
+    const o = `${origin.lat.toFixed(5)},${origin.lon.toFixed(5)}`;
+    const d = `${dest.lat.toFixed(5)},${dest.lon.toFixed(5)}`;
+    return `${o}|${d}`;
+}
+
+async function fetchOsrmTable(origin, destinations) {
+    const cfg = getOsrmConfig();
+    if (!cfg.enabled || !origin || !destinations?.length) return null;
+    const coords = [origin].concat(destinations);
+    const key = coords.map(c => `${c.lat.toFixed(5)},${c.lon.toFixed(5)}`).join('|');
+    if (osrmTableCache.has(key)) return osrmTableCache.get(key);
+    try {
+        const coordsStr = coords.map(c => `${c.lon},${c.lat}`).join(';');
+        const destIdx = destinations.map((_, i) => i + 1).join(';');
+        const url = `${cfg.base}/table/v1/${cfg.profile}/${coordsStr}?sources=0&destinations=${destIdx}&annotations=distance,duration`;
+        const resp = await fetch(url);
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        const distances = data?.distances?.[0] || [];
+        const durations = data?.durations?.[0] || [];
+        const result = { distances, durations };
+        osrmTableCache.set(key, result);
+        return result;
+    } catch {
+        return null;
+    }
+}
+
+async function fetchOsrmRoute(origin, dest) {
+    const cfg = getOsrmConfig();
+    if (!cfg.enabled || !origin || !dest) return null;
+    const key = buildOsrmKey(origin, dest);
+    if (osrmRouteCache.has(key)) return osrmRouteCache.get(key);
+    try {
+        const url = `${cfg.base}/route/v1/${cfg.profile}/${origin.lon},${origin.lat};${dest.lon},${dest.lat}?overview=full&geometries=geojson`;
+        const resp = await fetch(url);
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        const route = data?.routes?.[0];
+        if (!route) return null;
+        const result = {
+            distanceKm: route.distance / 1000,
+            durationMin: route.duration / 60,
+            geometry: route.geometry
+        };
+        osrmRouteCache.set(key, result);
+        return result;
+    } catch {
+        return null;
+    }
+}
+
 async function handleCoverageProximityAsync(target, container) {
     container.innerHTML = '<p class="empty-state">Calculando proximidade por endereços...</p>';
 
@@ -6520,7 +7356,12 @@ function renderAiResultCard(item, target, options = {}) {
     const reasonNote = options.reasonNote ? `<div class="ai-reason-note">${options.reasonNote}</div>` : '';
     const actionHtml = options.actionHtml || '';
     const distanceLabel = formatDistanceKm(item._distanceKm);
+    const routeDistanceLabel = formatDistanceKm(item._routeDistanceKm);
+    const routeDurationLabel = formatDurationMin(item._routeDurationMin);
     const distanceBadge = distanceLabel ? `<span class="distance-badge">≈ ${distanceLabel} km</span>` : '';
+    const routeBadge = routeDistanceLabel
+        ? `<span class="distance-badge route">Rota ${routeDistanceLabel} km${routeDurationLabel ? ` • ${routeDurationLabel}` : ''}</span>`
+        : '';
     const headerBadges = options.headerBadgesHtml || '';
 
     const homenageado = isHomenageado(item);
@@ -6539,6 +7380,7 @@ function renderAiResultCard(item, target, options = {}) {
                 </div>
                 <div class="header-right">
                     ${headerBadges}
+                    ${routeBadge}
                     ${distanceBadge}
                     <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal('${item.nome}', '${item.telefone || ''}')" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                 </div>
@@ -7282,6 +8124,883 @@ function undoLastChange() {
     showToast("Não foi possível desfazer esta alteração.", "error");
 }
 
+
+// ==========================================================================
+// 📌 SUPERVISÃO
+// ==========================================================================
+
+function buildDefaultSupervisaoMenu() {
+    const base = JSON.parse(JSON.stringify(SUPERVISAO_DEFAULT_MENU || {}));
+    if (!base.meta) base.meta = {};
+    base.meta.version = base.meta.version || 1;
+    base.meta.updatedAt = new Date().toISOString();
+    base.meta.updatedBy = base.meta.updatedBy || 'Sistema';
+    base.items = Array.isArray(base.items) ? base.items : [];
+    base.items = base.items.map(item => normalizeSupervisaoItem(item));
+    return base;
+}
+
+function createSupervisaoId() {
+    return `sup_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function normalizeSupervisaoItem(item) {
+    const next = { ...(item || {}) };
+    if (!next.id) next.id = createSupervisaoId();
+    if (!SUPERVISAO_CATEGORIES[next.category]) next.category = 'colab';
+    next.type = next.type === 'link' ? 'link' : 'message';
+    if (!Array.isArray(next.links)) next.links = [];
+    next.links = next.links.filter(l => l && l.url);
+    if (!Array.isArray(next.images)) next.images = [];
+    next.images = next.images.filter(Boolean);
+    return next;
+}
+
+function cloneSupervisaoItem(item) {
+    if (!item) return null;
+    try {
+        return JSON.parse(JSON.stringify(item));
+    } catch {
+        return { ...item };
+    }
+}
+
+function ensureSupervisaoMenu() {
+    if (!supervisaoMenu || !Array.isArray(supervisaoMenu.items)) {
+        supervisaoMenu = buildDefaultSupervisaoMenu();
+        saveSupervisaoMenu(true, { skipShadow: true });
+        return;
+    }
+    if (!supervisaoMenu.meta) supervisaoMenu.meta = {};
+    supervisaoMenu.meta.version = supervisaoMenu.meta.version || 1;
+    if (!supervisaoMenu.meta.updatedAt) supervisaoMenu.meta.updatedAt = new Date().toISOString();
+    if (!supervisaoMenu.meta.updatedBy) supervisaoMenu.meta.updatedBy = 'Sistema';
+    supervisaoMenu.items = supervisaoMenu.items.map(item => normalizeSupervisaoItem(item));
+}
+
+function loadSupervisaoMenu() {
+    try {
+        const stored = localStorage.getItem('supervisaoMenu');
+        supervisaoMenu = stored ? JSON.parse(stored) : null;
+    } catch {
+        supervisaoMenu = null;
+    }
+    ensureSupervisaoMenu();
+}
+
+function saveSupervisaoMenu(silent = false, options = {}) {
+    if (!supervisaoMenu) return;
+    localStorage.setItem('supervisaoMenu', JSON.stringify(supervisaoMenu));
+    if (options.skipShadow) return;
+    scheduleShadowSync('supervisao-menu', { silent, notify: !silent });
+}
+
+function loadSupervisaoHistory() {
+    try {
+        const stored = localStorage.getItem('supervisaoHistory');
+        supervisaoHistory = stored ? JSON.parse(stored) || [] : [];
+    } catch {
+        supervisaoHistory = [];
+    }
+}
+
+function saveSupervisaoHistory(silent = false, options = {}) {
+    localStorage.setItem('supervisaoHistory', JSON.stringify(supervisaoHistory));
+    if (options.skipShadow) return;
+    scheduleShadowSync('supervisao-history', { silent, notify: !silent });
+}
+
+function loadSupervisaoFavorites() {
+    try {
+        const stored = localStorage.getItem('supervisaoFavorites');
+        const list = stored ? JSON.parse(stored) || [] : [];
+        supervisaoFavorites = new Set(list);
+    } catch {
+        supervisaoFavorites = new Set();
+    }
+}
+
+function saveSupervisaoFavorites() {
+    localStorage.setItem('supervisaoFavorites', JSON.stringify(Array.from(supervisaoFavorites)));
+}
+
+function loadSupervisaoUsage() {
+    try {
+        const stored = localStorage.getItem('supervisaoUsage');
+        supervisaoUsage = stored ? JSON.parse(stored) || {} : {};
+    } catch {
+        supervisaoUsage = {};
+    }
+}
+
+function saveSupervisaoUsage() {
+    localStorage.setItem('supervisaoUsage', JSON.stringify(supervisaoUsage));
+}
+
+function loadSupervisaoChannelPrefs() {
+    try {
+        const stored = localStorage.getItem('supervisaoChannels');
+        supervisaoChannelPrefs = stored ? JSON.parse(stored) || {} : {};
+    } catch {
+        supervisaoChannelPrefs = {};
+    }
+}
+
+function saveSupervisaoChannelPrefs() {
+    localStorage.setItem('supervisaoChannels', JSON.stringify(supervisaoChannelPrefs));
+}
+
+function getSupervisaoItems() {
+    return supervisaoMenu?.items || [];
+}
+
+function getSupervisaoItemById(id) {
+    return getSupervisaoItems().find(item => item.id === id) || null;
+}
+
+function touchSupervisaoMeta() {
+    if (!supervisaoMenu) return;
+    if (!supervisaoMenu.meta) supervisaoMenu.meta = {};
+    supervisaoMenu.meta.updatedAt = new Date().toISOString();
+    supervisaoMenu.meta.updatedBy = SiteAuth.user || 'Admin';
+}
+
+function getSupervisaoLinks(item) {
+    const links = [];
+    if (item?.link) {
+        links.push({ label: 'Link principal', url: item.link });
+    }
+    (item?.links || []).forEach(l => {
+        if (!l || !l.url) return;
+        links.push({ label: l.label || 'Link extra', url: l.url });
+    });
+    return links;
+}
+
+function getSupervisaoMessage(item, channel) {
+    if (!item) return '';
+    const channels = item.channels || {};
+    if (channel === 'email') {
+        return channels.email || item.message || '';
+    }
+    return channels.whatsapp || item.message || '';
+}
+
+function getSupervisaoPreferredChannel(item) {
+    if (!item) return 'whatsapp';
+    const saved = supervisaoChannelPrefs[item.id];
+    if (saved) return saved;
+    const channels = item.channels || {};
+    if (channels.whatsapp) return 'whatsapp';
+    if (channels.email) return 'email';
+    return 'whatsapp';
+}
+
+function setSupervisaoChannelPref(id, channel) {
+    if (!id || !channel) return;
+    supervisaoChannelPrefs[id] = channel;
+    saveSupervisaoChannelPrefs();
+    renderSupervisao();
+}
+
+function toggleSupervisaoFavorite(id) {
+    if (!id) return;
+    if (supervisaoFavorites.has(id)) {
+        supervisaoFavorites.delete(id);
+    } else {
+        supervisaoFavorites.add(id);
+    }
+    saveSupervisaoFavorites();
+    renderSupervisao();
+}
+
+function trackSupervisaoUsage(id, action) {
+    if (!id || !action) return;
+    const entry = supervisaoUsage[id] || { open: 0, copy: 0, send: 0, lastUsedAt: null };
+    if (entry[action] !== undefined) {
+        entry[action] += 1;
+    }
+    entry.lastUsedAt = new Date().toISOString();
+    supervisaoUsage[id] = entry;
+    saveSupervisaoUsage();
+}
+
+function getSupervisaoUsageTotal(id) {
+    const entry = supervisaoUsage[id];
+    if (!entry) return 0;
+    return (entry.open || 0) + (entry.copy || 0) + (entry.send || 0);
+}
+
+function getSupervisaoUsageInfo(id) {
+    const entry = supervisaoUsage[id];
+    if (!entry) return { open: 0, copy: 0, send: 0, total: 0, lastUsedAt: null };
+    return {
+        open: entry.open || 0,
+        copy: entry.copy || 0,
+        send: entry.send || 0,
+        total: getSupervisaoUsageTotal(id),
+        lastUsedAt: entry.lastUsedAt || null
+    };
+}
+
+function syncSupervisaoOpenStatesFromDom() {
+    document.querySelectorAll('.supervisao-message').forEach(detail => {
+        const card = detail.closest('[data-supervisao-id]');
+        const id = card?.getAttribute('data-supervisao-id');
+        if (!id) return;
+        if (detail.open) supervisaoOpenMessages.add(id);
+        else supervisaoOpenMessages.delete(id);
+    });
+}
+
+function formatSupervisaoDateTime(value) {
+    try {
+        return new Date(value).toLocaleString();
+    } catch {
+        return value || '';
+    }
+}
+
+function getSupervisaoExpiryInfo(item) {
+    if (!item?.expiresAt) return null;
+    const date = new Date(item.expiresAt);
+    if (Number.isNaN(date.getTime())) {
+        return { label: 'Validade inválida', status: 'invalid' };
+    }
+    const now = new Date();
+    const diffDays = Math.ceil((date.getTime() - now.getTime()) / 86400000);
+    if (diffDays < 0) {
+        return { label: `Expirado em ${formatDateOnly(date)}`, status: 'expired' };
+    }
+    if (diffDays === 0) {
+        return { label: 'Expira hoje', status: 'due' };
+    }
+    if (diffDays <= 7) {
+        return { label: `Vence em ${diffDays} dia(s)`, status: 'due' };
+    }
+    return { label: `Vence em ${formatDateOnly(date)}`, status: 'ok' };
+}
+
+function isSupervisaoItemExpired(item) {
+    const info = getSupervisaoExpiryInfo(item);
+    return info && info.status === 'expired';
+}
+
+function isValidHttpUrl(value) {
+    if (!value) return false;
+    try {
+        const url = new URL(value);
+        return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+function getSupervisaoInvalidLinks(item) {
+    const invalid = [];
+    if (item?.link && !isValidHttpUrl(item.link)) invalid.push(item.link);
+    (item?.links || []).forEach(l => {
+        if (l?.url && !isValidHttpUrl(l.url)) invalid.push(l.url);
+    });
+    return invalid;
+}
+
+function matchesSupervisaoSearch(item, term) {
+    if (!term) return true;
+    const haystack = [
+        item.title,
+        item.description,
+        item.message,
+        item.link,
+        ...(item.links || []).map(l => `${l.label || ''} ${l.url || ''}`),
+        item.channels?.whatsapp,
+        item.channels?.email
+    ].filter(Boolean).join(' ');
+    return normalizeText(haystack).includes(normalizeText(term));
+}
+
+function applySupervisaoFilters(items, term) {
+    let list = items.filter(item => matchesSupervisaoSearch(item, term));
+
+    if (!isAdminRole()) {
+        list = list.filter(item => !isSupervisaoItemExpired(item));
+    }
+
+    if (supervisaoFilter === 'favorites') {
+        list = list.filter(item => supervisaoFavorites.has(item.id));
+    } else if (supervisaoFilter === 'used') {
+        list = list.filter(item => getSupervisaoUsageTotal(item.id) > 0)
+            .sort((a, b) => getSupervisaoUsageTotal(b.id) - getSupervisaoUsageTotal(a.id));
+    } else if (supervisaoFilter === 'expired') {
+        list = list.filter(item => isSupervisaoItemExpired(item));
+    } else if (SUPERVISAO_CATEGORIES[supervisaoFilter]) {
+        list = list.filter(item => item.category === supervisaoFilter);
+    }
+    return list;
+}
+
+function updateSupervisaoFiltersUI() {
+    document.querySelectorAll('[data-supervisao-filter]').forEach(btn => {
+        const key = btn.getAttribute('data-supervisao-filter');
+        const active = key === supervisaoFilter;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+}
+
+function renderSupervisaoMeta() {
+    const metaEl = document.getElementById('supervisao-updated');
+    if (!metaEl || !supervisaoMenu?.meta) return;
+    const updatedAt = supervisaoMenu.meta.updatedAt
+        ? formatSupervisaoDateTime(supervisaoMenu.meta.updatedAt)
+        : '—';
+    const updatedBy = supervisaoMenu.meta.updatedBy || 'Sistema';
+    metaEl.textContent = `Última revisão: ${updatedAt} • Responsável: ${updatedBy}`;
+}
+
+function renderSupervisaoTopUsed() {
+    const container = document.getElementById('supervisao-top-used');
+    if (!container) return;
+    let list = getSupervisaoItems()
+        .filter(item => getSupervisaoUsageTotal(item.id) > 0);
+    if (!isAdminRole()) {
+        list = list.filter(item => !isSupervisaoItemExpired(item));
+    }
+    if (SUPERVISAO_CATEGORIES[supervisaoFilter]) {
+        list = list.filter(item => item.category === supervisaoFilter);
+    }
+    list = list
+        .sort((a, b) => getSupervisaoUsageTotal(b.id) - getSupervisaoUsageTotal(a.id))
+        .slice(0, 4);
+    if (!list.length) {
+        container.classList.add('hidden');
+        container.innerHTML = '';
+        return;
+    }
+    container.classList.remove('hidden');
+    container.innerHTML = `
+        <div class="supervisao-top-header">Mais usados</div>
+        <div class="supervisao-top-list">
+            ${list.map(item => `
+                <button class="supervisao-top-chip" onclick="focusSupervisaoItem('${item.id}')">${escapeHtml(item.title)}</button>
+            `).join('')}
+        </div>
+    `;
+}
+
+function renderSupervisaoCard(item) {
+    const links = getSupervisaoLinks(item);
+    const hasLinks = links.length > 0;
+    const extraLinks = links.length > 1 ? links.slice(1) : [];
+    const channel = getSupervisaoPreferredChannel(item);
+    const message = getSupervisaoMessage(item, channel);
+    const hasMessage = !!message;
+    const channelOptions = item.channels?.whatsapp && item.channels?.email;
+    const badge = SUPERVISAO_CATEGORIES[item.category]?.badge || 'Item';
+    const typeLabel = item.type === 'link' ? 'Link' : 'Mensagem';
+    const favoriteActive = supervisaoFavorites.has(item.id);
+    const expiry = getSupervisaoExpiryInfo(item);
+    const invalidLinks = getSupervisaoInvalidLinks(item);
+    const sendLabel = channel === 'email' ? 'Abrir e-mail' : 'Enviar';
+    const copyLabel = channelOptions
+        ? `Copiar ${channel === 'email' ? 'E-mail' : 'WhatsApp'}`
+        : 'Copiar mensagem';
+
+    const usage = getSupervisaoUsageInfo(item.id);
+    const usageLine = isAdminRole()
+        ? `<div class="supervisao-usage">Usos: ${usage.total} • Abrir ${usage.open} • Copiar ${usage.copy} • Enviar ${usage.send}${usage.lastUsedAt ? ` • Último: ${formatSupervisaoDateTime(usage.lastUsedAt)}` : ''}</div>`
+        : '';
+
+    const messageOpen = supervisaoOpenMessages.has(item.id);
+    const messageBlock = hasMessage ? `
+        <details class="supervisao-message" ${messageOpen ? 'open' : ''}>
+            <summary>Mensagem</summary>
+            ${channelOptions ? `
+                <div class="supervisao-channel">
+                    <button class="filter-chip ${channel === 'whatsapp' ? 'active' : ''}" onclick="setSupervisaoChannelPref('${item.id}', 'whatsapp')">WhatsApp</button>
+                    <button class="filter-chip ${channel === 'email' ? 'active' : ''}" onclick="setSupervisaoChannelPref('${item.id}', 'email')">E-mail</button>
+                </div>
+            ` : ''}
+            <div class="supervisao-message-body">${escapeHtml(message)}</div>
+            ${(item.images || []).length ? `
+                <div class="supervisao-images">
+                    ${(item.images || []).map(src => `
+                        <img src="${escapeHtml(src)}" alt="Imagem de apoio" loading="lazy">
+                    `).join('')}
+                </div>
+            ` : ''}
+        </details>
+    ` : '';
+
+    const linksBlock = extraLinks.length ? `
+        <div class="supervisao-link-list">
+            ${extraLinks.map((l, idx) => `
+                <button class="btn btn-secondary btn-small" onclick="openSupervisaoLink('${item.id}', ${idx + 1})">Abrir ${escapeHtml(l.label || 'link')}</button>
+            `).join('')}
+        </div>
+    ` : '';
+
+    return `
+        <div class="supervisao-card ${expiry?.status === 'expired' ? 'is-expired' : ''}" data-supervisao-id="${item.id}">
+            <div class="supervisao-card-header">
+                <div>
+                    <div class="supervisao-card-title">${escapeHtml(item.title || 'Sem título')}</div>
+                    ${item.description ? `<div class="supervisao-card-desc">${escapeHtml(item.description)}</div>` : ''}
+                </div>
+                <button class="supervisao-fav ${favoriteActive ? 'active' : ''}" onclick="toggleSupervisaoFavorite('${item.id}')" title="Favoritar" aria-label="Favoritar">
+                    ${favoriteActive ? ICONS.starFilled : ICONS.star}
+                </button>
+            </div>
+            <div class="supervisao-badges">
+                <span class="supervisao-badge ${item.category}">${escapeHtml(badge)}</span>
+                <span class="supervisao-badge type">${typeLabel}</span>
+                ${expiry ? `<span class="supervisao-badge ${expiry.status}">${escapeHtml(expiry.label)}</span>` : ''}
+                ${invalidLinks.length ? `<span class="supervisao-badge warning">Link inválido</span>` : ''}
+            </div>
+            ${linksBlock}
+            ${messageBlock}
+            <div class="supervisao-actions">
+                ${hasLinks ? `<button class="btn btn-secondary btn-small" onclick="openSupervisaoLink('${item.id}', 0)">Abrir link</button>` : ''}
+                ${hasLinks && !hasMessage ? `<button class="btn btn-secondary btn-small" onclick="copySupervisaoLink('${item.id}', 0)">Copiar link</button>` : ''}
+                ${hasMessage ? `<button class="btn btn-secondary btn-small" onclick="copySupervisaoMessage('${item.id}')">${copyLabel}</button>` : ''}
+                ${hasMessage ? `<button class="btn btn-small" onclick="sendSupervisaoMessage('${item.id}')">${sendLabel}</button>` : ''}
+            </div>
+            ${usageLine}
+        </div>
+    `;
+}
+
+function renderSupervisao() {
+    const container = document.getElementById('supervisao-sections');
+    if (!container) return;
+    syncSupervisaoOpenStatesFromDom();
+    ensureSupervisaoMenu();
+    if (!isAdminRole() && supervisaoFilter === 'expired') {
+        supervisaoFilter = 'internal';
+    }
+    updateSupervisaoFiltersUI();
+    renderSupervisaoMeta();
+    renderSupervisaoTopUsed();
+
+    const input = document.getElementById('supervisao-search');
+    if (input && supervisaoSearchTerm && !input.value) {
+        input.value = supervisaoSearchTerm;
+    }
+    const term = input ? input.value.trim() : supervisaoSearchTerm;
+    supervisaoSearchTerm = term;
+    const filtered = applySupervisaoFilters(getSupervisaoItems(), term);
+    const sections = Object.keys(SUPERVISAO_CATEGORIES).map(key => {
+        const items = filtered.filter(item => item.category === key);
+        if (!items.length) return '';
+        return `
+            <div class="unit-section supervisao-section" data-category="${key}">
+                <h3 class="unit-title">
+                    <span>${escapeHtml(SUPERVISAO_CATEGORIES[key].label)} <span class="count-badge">${items.length}</span></span>
+                </h3>
+                <div class="supervisao-items">
+                    ${items.map(renderSupervisaoCard).join('')}
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = sections || `<div class="empty-state">Nenhum item encontrado.</div>`;
+}
+
+function bindSupervisaoEvents() {
+    const shell = document.querySelector('.supervisao-shell');
+    if (!shell || shell.dataset.bound === '1') return;
+    shell.dataset.bound = '1';
+
+    const input = document.getElementById('supervisao-search');
+    if (input) {
+        input.addEventListener('input', () => {
+            const term = input.value.trim();
+            supervisaoSearchTerm = term;
+            renderSupervisao();
+        });
+    }
+
+    document.querySelectorAll('[data-supervisao-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            supervisaoFilter = btn.getAttribute('data-supervisao-filter') || 'all';
+            renderSupervisao();
+        });
+    });
+
+    shell.addEventListener('toggle', (event) => {
+        const detail = event.target?.closest?.('.supervisao-message');
+        if (!detail) return;
+        const card = detail.closest('[data-supervisao-id]');
+        const id = card?.getAttribute('data-supervisao-id');
+        if (!id) return;
+        if (detail.open) supervisaoOpenMessages.add(id);
+        else supervisaoOpenMessages.delete(id);
+    });
+}
+
+function openSupervisaoLink(id, index = 0) {
+    const item = getSupervisaoItemById(id);
+    if (!item) return;
+    const links = getSupervisaoLinks(item);
+    const target = links[index] || links[0];
+    if (!target?.url) {
+        showToast("Link indisponível.", "error");
+        return;
+    }
+    if (!isValidHttpUrl(target.url)) {
+        showToast("Link inválido.", "error");
+        return;
+    }
+    trackSupervisaoUsage(id, 'open');
+    window.open(target.url, '_blank');
+}
+
+function copySupervisaoLink(id, index = 0) {
+    const item = getSupervisaoItemById(id);
+    if (!item) return;
+    const links = getSupervisaoLinks(item);
+    const target = links[index] || links[0];
+    if (!target?.url) {
+        showToast("Link indisponível.", "error");
+        return;
+    }
+    if (!isValidHttpUrl(target.url)) {
+        showToast("Link inválido.", "error");
+        return;
+    }
+    copyTextToClipboard(target.url);
+    trackSupervisaoUsage(id, 'copy');
+}
+
+function copySupervisaoMessage(id) {
+    const item = getSupervisaoItemById(id);
+    if (!item) return;
+    const channel = getSupervisaoPreferredChannel(item);
+    const message = getSupervisaoMessage(item, channel);
+    if (!message) {
+        showToast("Mensagem indisponível.", "error");
+        return;
+    }
+    copyTextToClipboard(message);
+    trackSupervisaoUsage(id, 'copy');
+}
+
+function sendSupervisaoMessage(id) {
+    const item = getSupervisaoItemById(id);
+    if (!item) return;
+    const channel = getSupervisaoPreferredChannel(item);
+    const message = getSupervisaoMessage(item, channel);
+    if (!message) {
+        showToast("Mensagem indisponível.", "error");
+        return;
+    }
+    if (channel === 'email') {
+        const to = item.emailTo || '';
+        const cc = item.emailCc || '';
+        const subject = item.emailSubject || '';
+        const params = new URLSearchParams();
+        if (subject) params.set('subject', subject);
+        if (cc) params.set('cc', cc);
+        if (message) params.set('body', message);
+        const qs = params.toString();
+        const url = `mailto:${to}${qs ? `?${qs}` : ''}`;
+        trackSupervisaoUsage(id, 'send');
+        window.location.href = url;
+        return;
+    }
+    trackSupervisaoUsage(id, 'send');
+    openWhatsApp('', message);
+}
+
+function focusSupervisaoItem(id) {
+    const card = document.querySelector(`[data-supervisao-id="${id}"]`);
+    if (!card) return;
+    card.classList.add('highlight-unit');
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => card.classList.remove('highlight-unit'), 1500);
+}
+
+function canEditSupervisao() {
+    return SiteAuth.logged && SiteAuth.mode === 'edit' && isAdminRole();
+}
+
+function recordSupervisaoHistory(action, beforeItem, afterItem) {
+    const entry = {
+        id: createSupervisaoId(),
+        data: new Date().toLocaleString(),
+        responsavel: SiteAuth.user || 'Admin',
+        acao: action,
+        before: cloneSupervisaoItem(beforeItem),
+        after: cloneSupervisaoItem(afterItem)
+    };
+    supervisaoHistory.unshift(entry);
+    supervisaoHistory = supervisaoHistory.slice(0, 200);
+    saveSupervisaoHistory();
+}
+
+function renderSupervisaoAdminList() {
+    const list = document.getElementById('supervisao-admin-list');
+    if (!list) return;
+    const items = getSupervisaoItems();
+    const canEdit = canEditSupervisao();
+    if (!items.length) {
+        list.innerHTML = '<div class="admin-empty">Nenhum item cadastrado.</div>';
+        return;
+    }
+
+    list.innerHTML = Object.keys(SUPERVISAO_CATEGORIES).map(key => {
+        const sectionItems = items.filter(item => item.category === key);
+        if (!sectionItems.length) return '';
+        return `
+            <div class="supervisao-admin-section">
+                <div class="supervisao-admin-title">${escapeHtml(SUPERVISAO_CATEGORIES[key].label)}</div>
+                ${sectionItems.map(item => {
+                    const invalidLinks = getSupervisaoInvalidLinks(item);
+                    const expiry = getSupervisaoExpiryInfo(item);
+                    return `
+                        <div class="supervisao-admin-row">
+                            <div>
+                                <strong>${escapeHtml(item.title || 'Sem título')}</strong>
+                                <div class="supervisao-admin-meta">${item.type === 'link' ? 'Link' : 'Mensagem'}${expiry ? ` • ${escapeHtml(expiry.label)}` : ''}${invalidLinks.length ? ' • Link inválido' : ''}</div>
+                            </div>
+                            <div class="supervisao-admin-actions">
+                                ${canEdit ? `
+                                    <button class="btn-mini btn-secondary" onclick="openSupervisaoEditor('${item.id}')">Editar</button>
+                                    <button class="btn-mini btn-danger" onclick="removeSupervisaoItem('${item.id}')">Excluir</button>
+                                ` : '<span class="supervisao-admin-lock">Somente admin</span>'}
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }).join('');
+}
+
+function renderSupervisaoHistory() {
+    const list = document.getElementById('supervisao-history-list');
+    if (!list) return;
+    if (!supervisaoHistory.length) {
+        list.innerHTML = '<div class="admin-empty">Nenhuma alteração registrada.</div>';
+        return;
+    }
+    const canEdit = canEditSupervisao();
+    list.innerHTML = supervisaoHistory.slice(0, 20).map((entry, idx) => {
+        const label = entry.after?.title || entry.before?.title || 'Item';
+        const hasRestore = !!entry.before && canEdit;
+        return `
+            <div class="supervisao-history-item">
+                <div>
+                    <strong>${escapeHtml(label)}</strong>
+                    <div class="supervisao-history-meta">${escapeHtml(entry.data || '')} • ${escapeHtml(entry.responsavel || '')} • ${escapeHtml(entry.acao || '')}</div>
+                </div>
+                ${hasRestore ? `<button class="btn-mini btn-secondary" onclick="restoreSupervisaoHistory(${idx})">Restaurar</button>` : ''}
+            </div>
+        `;
+    }).join('');
+}
+
+function openSupervisaoEditor(id) {
+    const item = getSupervisaoItemById(id);
+    if (!item) return;
+    supervisaoEditingId = item.id;
+    document.getElementById('supervisao-editor-id').value = item.id;
+    document.getElementById('supervisao-editor-category').value = item.category || 'colab';
+    document.getElementById('supervisao-editor-type').value = item.type || 'message';
+    document.getElementById('supervisao-editor-title').value = item.title || '';
+    document.getElementById('supervisao-editor-description').value = item.description || '';
+    document.getElementById('supervisao-editor-link').value = item.link || '';
+    document.getElementById('supervisao-editor-links').value = (item.links || [])
+        .map(l => `${l.label ? `${l.label} | ` : ''}${l.url || ''}`.trim())
+        .join('\n');
+    document.getElementById('supervisao-editor-message-whatsapp').value = item.channels?.whatsapp || item.message || '';
+    document.getElementById('supervisao-editor-message-email').value = item.channels?.email || '';
+    document.getElementById('supervisao-editor-email-to').value = item.emailTo || '';
+    document.getElementById('supervisao-editor-email-cc').value = item.emailCc || '';
+    document.getElementById('supervisao-editor-email-subject').value = item.emailSubject || '';
+    document.getElementById('supervisao-editor-images').value = (item.images || []).join('\n');
+    document.getElementById('supervisao-editor-expires').value = item.expiresAt || '';
+    updateSupervisaoEditorVisibility();
+}
+
+function resetSupervisaoEditor() {
+    supervisaoEditingId = null;
+    document.getElementById('supervisao-editor-id').value = '';
+    document.getElementById('supervisao-editor-category').value = 'colab';
+    document.getElementById('supervisao-editor-type').value = 'message';
+    document.getElementById('supervisao-editor-title').value = '';
+    document.getElementById('supervisao-editor-description').value = '';
+    document.getElementById('supervisao-editor-link').value = '';
+    document.getElementById('supervisao-editor-links').value = '';
+    document.getElementById('supervisao-editor-message-whatsapp').value = '';
+    document.getElementById('supervisao-editor-message-email').value = '';
+    document.getElementById('supervisao-editor-email-to').value = '';
+    document.getElementById('supervisao-editor-email-cc').value = '';
+    document.getElementById('supervisao-editor-email-subject').value = '';
+    document.getElementById('supervisao-editor-images').value = '';
+    document.getElementById('supervisao-editor-expires').value = '';
+    updateSupervisaoEditorVisibility();
+}
+
+function updateSupervisaoEditorVisibility() {
+    const type = document.getElementById('supervisao-editor-type')?.value || 'message';
+    const msgGroup = document.getElementById('supervisao-editor-message-group');
+    if (msgGroup) msgGroup.classList.toggle('hidden', type !== 'message');
+}
+
+function parseSupervisaoLinks(text) {
+    if (!text) return [];
+    return text.split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+        const parts = line.split('|').map(p => p.trim()).filter(Boolean);
+        if (parts.length === 1) {
+            return { label: 'Link extra', url: parts[0] };
+        }
+        return { label: parts[0], url: parts.slice(1).join(' | ') };
+    }).filter(item => item.url);
+}
+
+function parseSupervisaoImages(text) {
+    if (!text) return [];
+    return text.split('\n').map(line => line.trim()).filter(Boolean);
+}
+
+function validateSupervisaoItem(data) {
+    const errors = [];
+    if (!data.title) errors.push('Informe o título.');
+    if (data.link && !isValidHttpUrl(data.link)) errors.push('Link principal inválido.');
+    (data.links || []).forEach(l => {
+        if (l.url && !isValidHttpUrl(l.url)) errors.push(`Link inválido: ${l.url}`);
+    });
+    if (data.expiresAt) {
+        const dt = new Date(data.expiresAt);
+        if (Number.isNaN(dt.getTime())) errors.push('Data de validade inválida.');
+    }
+    if (data.type === 'link' && !data.link && !(data.links || []).length) {
+        errors.push('Informe ao menos um link.');
+    }
+    if (data.type === 'message' && !data.messageWhatsapp && !data.messageEmail) {
+        errors.push('Informe ao menos uma mensagem.');
+    }
+    return errors;
+}
+
+function collectSupervisaoEditorData() {
+    const data = {
+        id: document.getElementById('supervisao-editor-id')?.value.trim() || '',
+        category: document.getElementById('supervisao-editor-category')?.value || 'colab',
+        type: document.getElementById('supervisao-editor-type')?.value || 'message',
+        title: document.getElementById('supervisao-editor-title')?.value.trim() || '',
+        description: document.getElementById('supervisao-editor-description')?.value.trim() || '',
+        link: document.getElementById('supervisao-editor-link')?.value.trim() || '',
+        links: parseSupervisaoLinks(document.getElementById('supervisao-editor-links')?.value || ''),
+        messageWhatsapp: document.getElementById('supervisao-editor-message-whatsapp')?.value.trim() || '',
+        messageEmail: document.getElementById('supervisao-editor-message-email')?.value.trim() || '',
+        emailTo: document.getElementById('supervisao-editor-email-to')?.value.trim() || '',
+        emailCc: document.getElementById('supervisao-editor-email-cc')?.value.trim() || '',
+        emailSubject: document.getElementById('supervisao-editor-email-subject')?.value.trim() || '',
+        images: parseSupervisaoImages(document.getElementById('supervisao-editor-images')?.value || ''),
+        expiresAt: document.getElementById('supervisao-editor-expires')?.value || ''
+    };
+    return data;
+}
+
+function saveSupervisaoItem() {
+    if (!canEditSupervisao()) {
+        showToast("Apenas admins em modo edição podem salvar.", "error");
+        return;
+    }
+    ensureSupervisaoMenu();
+    const data = collectSupervisaoEditorData();
+    const errors = validateSupervisaoItem(data);
+    if (errors.length) {
+        showToast(errors[0], "error");
+        return;
+    }
+
+    const item = normalizeSupervisaoItem({
+        id: data.id || createSupervisaoId(),
+        category: data.category,
+        type: data.type,
+        title: data.title,
+        description: data.description,
+        link: data.link || '',
+        links: data.links || [],
+        images: data.images || [],
+        expiresAt: data.expiresAt || '',
+        emailTo: data.emailTo || '',
+        emailCc: data.emailCc || '',
+        emailSubject: data.emailSubject || ''
+    });
+
+    if (data.type === 'message' && (data.messageWhatsapp || data.messageEmail)) {
+        item.channels = {};
+        if (data.messageWhatsapp) item.channels.whatsapp = data.messageWhatsapp;
+        if (data.messageEmail) item.channels.email = data.messageEmail;
+    }
+
+    const idx = supervisaoMenu.items.findIndex(i => i.id === item.id);
+    const before = idx >= 0 ? { ...supervisaoMenu.items[idx] } : null;
+    if (idx >= 0) {
+        supervisaoMenu.items[idx] = item;
+        recordSupervisaoHistory('Atualização', before, item);
+    } else {
+        supervisaoMenu.items.push(item);
+        recordSupervisaoHistory('Criação', null, item);
+    }
+
+    touchSupervisaoMeta();
+    saveSupervisaoMenu();
+    renderSupervisao();
+    renderSupervisaoAdminList();
+    renderSupervisaoHistory();
+    showToast("Item salvo com sucesso.", "success");
+    resetSupervisaoEditor();
+}
+
+function removeSupervisaoItem(id) {
+    if (!canEditSupervisao()) {
+        showToast("Apenas admins em modo edição podem excluir.", "error");
+        return;
+    }
+    if (!confirm('Remover este item?')) return;
+    const idx = supervisaoMenu.items.findIndex(i => i.id === id);
+    if (idx < 0) return;
+    const before = { ...supervisaoMenu.items[idx] };
+    supervisaoMenu.items.splice(idx, 1);
+    recordSupervisaoHistory('Exclusão', before, null);
+    touchSupervisaoMeta();
+    saveSupervisaoMenu();
+    renderSupervisao();
+    renderSupervisaoAdminList();
+    renderSupervisaoHistory();
+    showToast("Item removido.", "success");
+}
+
+function restoreSupervisaoHistory(index) {
+    if (!canEditSupervisao()) {
+        showToast("Apenas admins em modo edição podem restaurar.", "error");
+        return;
+    }
+    const entry = supervisaoHistory[index];
+    if (!entry?.before) return;
+    if (!confirm('Restaurar a versão anterior deste item?')) return;
+    const item = normalizeSupervisaoItem(entry.before);
+    const idx = supervisaoMenu.items.findIndex(i => i.id === item.id);
+    if (idx >= 0) {
+        supervisaoMenu.items[idx] = item;
+    } else {
+        supervisaoMenu.items.push(item);
+    }
+    recordSupervisaoHistory('Restauração', entry.after || null, item);
+    touchSupervisaoMeta();
+    saveSupervisaoMenu();
+    renderSupervisao();
+    renderSupervisaoAdminList();
+    renderSupervisaoHistory();
+    showToast("Versão restaurada.", "success");
+}
+
 // ==========================================================================
 // 📌 AVISOS
 // ==========================================================================
@@ -7958,8 +9677,7 @@ function sendAvisoWhatsapp() {
         return;
     }
     const text = [title, message].filter(Boolean).join(' - ');
-    const url = `https://wa.me/?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank');
+    openWhatsApp('', text);
 }
 
 function sendReminderWhatsapp() {
@@ -7970,8 +9688,7 @@ function sendReminderWhatsapp() {
         return;
     }
     const text = [title, message].filter(Boolean).join(' - ');
-    const url = `https://wa.me/?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank');
+    openWhatsApp('', text);
 }
 
 function toggleAvisosMini() {
@@ -8403,28 +10120,97 @@ function getFtFormLink(data) {
     return qs ? `${form.formUrl}?${qs}` : form.formUrl;
 }
 
+function parseFtDateParts(value) {
+    if (!value) return null;
+    const raw = String(value).trim();
+    const isoMatch = raw.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+    if (isoMatch) {
+        return { y: Number(isoMatch[1]), m: Number(isoMatch[2]), d: Number(isoMatch[3]) };
+    }
+    const brMatch = raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+    if (brMatch) {
+        return { y: Number(brMatch[3]), m: Number(brMatch[2]), d: Number(brMatch[1]) };
+    }
+    return null;
+}
+
+function normalizeFtDateKey(value) {
+    const parts = parseFtDateParts(value);
+    if (!parts) return '';
+    const y = String(parts.y).padStart(4, '0');
+    const m = String(parts.m).padStart(2, '0');
+    const d = String(parts.d).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function getFtItemDateKey(item) {
+    if (!item) return '';
+    return normalizeFtDateKey(item.date)
+        || normalizeFtDateKey(item.createdAt)
+        || normalizeFtDateKey(item.requestedAt)
+        || '';
+}
+
+function getFtItemDateValue(item) {
+    const key = normalizeFtDateKey(item?.date);
+    if (key) {
+        const ts = Date.parse(`${key}T00:00:00`);
+        return Number.isNaN(ts) ? 0 : ts;
+    }
+    const created = Date.parse(item?.createdAt || '');
+    if (!Number.isNaN(created)) return created;
+    const requested = Date.parse(item?.requestedAt || '');
+    if (!Number.isNaN(requested)) return requested;
+    return 0;
+}
+
 function formatFtDate(value) {
     if (!value) return '';
+    const parts = parseFtDateParts(value);
+    if (parts) {
+        const date = new Date(parts.y, parts.m - 1, parts.d);
+        return date.toLocaleDateString();
+    }
     try {
         return new Date(value).toLocaleDateString();
     } catch {
-        return value;
+        return String(value);
     }
+}
+
+function formatFtDateShort(value) {
+    if (!value) return '';
+    const parts = parseFtDateParts(value);
+    if (parts) {
+        return `${String(parts.d).padStart(2, '0')}/${String(parts.m).padStart(2, '0')}`;
+    }
+    return formatFtDate(value);
 }
 
 function formatFtDateTime(value) {
     if (!value) return '';
+    const parts = parseFtDateParts(value);
+    if (parts && !String(value).includes('T')) {
+        return formatFtDate(value);
+    }
     try {
         return new Date(value).toLocaleString();
     } catch {
-        return value;
+        return String(value);
     }
 }
 
 function applyFtFilters(list) {
     let items = list.slice();
-    if (ftFilter.from) items = items.filter(i => (i.date || '').slice(0,10) >= ftFilter.from);
-    if (ftFilter.to) items = items.filter(i => (i.date || '').slice(0,10) <= ftFilter.to);
+    if (ftFilter.from || ftFilter.to) {
+        items = items.filter(i => {
+            const key = normalizeFtDateKey(i?.date);
+            if (!key) return false;
+            if (ftFilter.from && key < ftFilter.from) return false;
+            if (ftFilter.to && key > ftFilter.to) return false;
+            return true;
+        });
+    }
     if (ftFilter.status !== 'all') items = items.filter(i => i.status === ftFilter.status);
     return items;
 }
@@ -8449,11 +10235,12 @@ function getFtStatusLabel(item) {
     return isSheet ? 'PENDENTE (PLANILHA)' : 'AGUARDANDO CONFIRMAÇÃO';
 }
 
-function getFtSourceInfo(item) {
+function getFtSourceInfo(item, options = {}) {
     const isSheet = item?.source === 'sheet';
     if (isSheet) {
         const group = item?.sourceGroup || item?.group || '';
-        const label = group ? `Planilha • ${String(group).toUpperCase()}` : 'Planilha';
+        const showGroup = options.showGroup !== false;
+        const label = showGroup && group ? `Planilha • ${String(group).toUpperCase()}` : 'Planilha';
         return { label, className: 'source-sheet' };
     }
     if (item?.formLink) return { label: 'Forms', className: 'source-forms' };
@@ -8490,15 +10277,18 @@ function matchesFtHistorySearch(item, term) {
 
 function applyFtHistoryFilters(list) {
     let items = applyFtFilters(list);
-    const unitFilter = (ftHistoryFilter.unit || '').trim();
+    const unitFilterRaw = (ftHistoryFilter.unit || '').trim();
+    const unitFilter = normalizeText(unitFilterRaw);
     if (unitFilter) {
-        items = items.filter(i => getFtUnitLabel(i).toUpperCase() === unitFilter.toUpperCase());
+        items = items.filter(i => normalizeText(getFtUnitLabel(i)) === unitFilter);
     }
-    const collabFilter = (ftHistoryFilter.collab || '').trim();
-    if (collabFilter) {
+    const collabFilterRaw = (ftHistoryFilter.collab || '').trim();
+    if (collabFilterRaw) {
+        const collabNorm = normalizeText(collabFilterRaw);
         items = items.filter(i => {
-            if (matchesRe(i.collabRe, collabFilter)) return true;
-            return normalizeText(i.collabName || '') === normalizeText(collabFilter);
+            if (matchesRe(i.collabRe, collabFilterRaw)) return true;
+            if (normalizeText(i.collabName || '') === collabNorm) return true;
+            return normalizeText(getFtCollabLabel(i)) === collabNorm;
         });
     }
     const term = normalizeText(ftHistoryFilter.search || '').trim();
@@ -8508,20 +10298,15 @@ function applyFtHistoryFilters(list) {
 
 function sortFtHistoryItems(items) {
     const key = ftHistoryFilter.sort || 'date_desc';
-    const toTime = (value) => {
-        if (!value) return 0;
-        const t = Date.parse(value);
-        return Number.isNaN(t) ? 0 : t;
-    };
     const statusRank = (value) => {
         if (value === 'pending') return 0;
         if (value === 'submitted') return 1;
         if (value === 'launched') return 2;
         return 3;
     };
-    const getDateValue = (item) => toTime(item?.date || item?.createdAt || item?.requestedAt || '');
-    const getCreatedValue = (item) => toTime(item?.createdAt || '');
-    const getRequestedValue = (item) => toTime(item?.requestedAt || '');
+    const getDateValue = (item) => getFtItemDateValue(item);
+    const getCreatedValue = (item) => getFtItemDateValue({ createdAt: item?.createdAt });
+    const getRequestedValue = (item) => getFtItemDateValue({ requestedAt: item?.requestedAt });
     const getUnitValue = (item) => getFtUnitLabel(item).toUpperCase();
     const getCollabValue = (item) => (item?.collabName || '').toUpperCase();
     return items.slice().sort((a, b) => {
@@ -8539,10 +10324,12 @@ function sortFtHistoryItems(items) {
 }
 
 function getFtHistoryGroupKey(item) {
-    const date = (item?.date || '').trim();
+    const date = normalizeFtDateKey(item?.date);
     if (date) return date;
-    if (item?.createdAt) return String(item.createdAt).slice(0, 10);
-    if (item?.requestedAt) return String(item.requestedAt).slice(0, 10);
+    const created = normalizeFtDateKey(item?.createdAt);
+    if (created) return created;
+    const requested = normalizeFtDateKey(item?.requestedAt);
+    if (requested) return requested;
     return 'Sem data';
 }
 
@@ -8840,20 +10627,19 @@ function getTodayKey() {
 
 function parseFtSheetDate(value) {
     const raw = cleanFtText(value);
-    const match = raw.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-    if (!match) return '';
-    return `${match[3]}-${match[2]}-${match[1]}`;
+    const key = normalizeFtDateKey(raw);
+    return key || '';
 }
 
 function parseFtSheetDateTime(value) {
     const raw = cleanFtText(value);
-    const match = raw.match(/(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
-    if (!match) return '';
-    const date = `${match[3]}-${match[2]}-${match[1]}`;
-    const hh = (match[4] || '00').padStart(2, '0');
-    const mm = (match[5] || '00').padStart(2, '0');
-    const ss = (match[6] || '00').padStart(2, '0');
-    return `${date}T${hh}:${mm}:${ss}`;
+    const dateKey = normalizeFtDateKey(raw);
+    if (!dateKey) return '';
+    const timeMatch = raw.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    const hh = (timeMatch?.[1] || '00').padStart(2, '0');
+    const mm = (timeMatch?.[2] || '00').padStart(2, '0');
+    const ss = (timeMatch?.[3] || '00').padStart(2, '0');
+    return `${dateKey}T${hh}:${mm}:${ss}`;
 }
 
 function normalizeFtStatus(value) {
@@ -8924,7 +10710,7 @@ function resolveFtSheetIndexes(header) {
         unit: header.findIndex(h => h.includes('unidade') || h.includes('posto')),
         reason: header.findIndex(h => h.includes('motivo')),
         shift: header.findIndex(h => h.includes('turno')),
-        time: header.findIndex(h => h.includes('horario')),
+        time: header.findIndex(h => h.includes('horario') || (h.includes('hora') && !h.includes('data'))),
         reasonDetail: header.findIndex(h => h.includes('no lugar de quem') || h.includes('lugar de quem') || h.includes('detalh')),
         coveringRe: reIndexes.length > 1 ? reIndexes[1] : -1,
         status: header.findIndex(h => h.includes('status'))
@@ -9021,7 +10807,7 @@ async function syncFtSheetLaunches(silent = false) {
             if (!rows.length) continue;
             const header = rows[0].map(normalizeFtHeaderLabel);
             const idx = resolveFtSheetIndexes(header);
-            if (idx.re < 0 || idx.date < 0 || idx.unit < 0 || idx.status < 0) continue;
+            if (idx.re < 0 || idx.date < 0 || idx.unit < 0) continue;
             for (let i = 1; i < rows.length; i++) {
                 const item = mapFtSheetRow(rows[i], idx, collabMap, src.group);
                 if (!item) continue;
@@ -9117,7 +10903,7 @@ function startFtAutoSync() {
     ftSyncTimer = setInterval(() => {
         syncFtFormResponses(true);
         syncFtSheetLaunches(true);
-    }, 120000);
+    }, 60000);
     if (!ftAutoSyncBound) {
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
@@ -9165,7 +10951,7 @@ function buildFtDashboardStats(items) {
     const submitted = items.filter(i => i.status === 'submitted').length;
     const launched = items.filter(i => i.status === 'launched').length;
     const total = items.length;
-    const uniqueDates = new Set(items.map(i => i.date).filter(Boolean));
+    const uniqueDates = new Set(items.map(i => normalizeFtDateKey(i?.date)).filter(Boolean));
     const avgPerDay = uniqueDates.size ? (total / uniqueDates.size) : 0;
     const launchRate = total ? Math.round((launched / total) * 100) : 0;
 
@@ -9173,23 +10959,39 @@ function buildFtDashboardStats(items) {
     const byPerson = {};
     const byReason = {};
     const byShift = {};
+    const byTime = {};
     const byWeekday = {};
     const bySource = {};
     const pendingByUnit = {};
     let missingUnit = 0;
     let missingRe = 0;
     let missingDate = 0;
+
+    const isShiftTimeLike = (label) => {
+        const text = String(label || '').toLowerCase().trim();
+        if (!text) return false;
+        if (text.includes(':')) return true;
+        if (text.includes(' às ') || text.includes(' as ')) return true;
+        if (/^\d{1,2}\s*[-–]\s*\d{1,2}$/.test(text)) return true;
+        return false;
+    };
     items.forEach(i => {
         const unit = i.unitTarget || i.unitCurrent || 'N/I';
         const name = i.collabName || (i.collabRe ? `RE ${i.collabRe}` : 'N/I');
         const reason = getFtReasonLabel(i.reason, i.reasonOther) || 'N/I';
-        const shift = i.shift || 'N/I';
-        const weekday = getFtWeekdayLabel(i.date);
+        let shift = i.shift || 'N/I';
+        let time = (i.ftTime || '').trim() || 'N/I';
+        if (isShiftTimeLike(shift) && time === 'N/I') {
+            time = shift;
+            shift = 'N/I';
+        }
+        const weekday = getFtWeekdayLabel(normalizeFtDateKey(i?.date));
         const source = i.source === 'sheet' ? 'Planilha' : (i.formLink ? 'Forms' : 'Manual');
         byUnit[unit] = (byUnit[unit] || 0) + 1;
         byPerson[name] = (byPerson[name] || 0) + 1;
         byReason[reason] = (byReason[reason] || 0) + 1;
         byShift[shift] = (byShift[shift] || 0) + 1;
+        byTime[time] = (byTime[time] || 0) + 1;
         if (weekday) byWeekday[weekday] = (byWeekday[weekday] || 0) + 1;
         bySource[source] = (bySource[source] || 0) + 1;
         if (i.status === 'pending') pendingByUnit[unit] = (pendingByUnit[unit] || 0) + 1;
@@ -9204,7 +11006,15 @@ function buildFtDashboardStats(items) {
         .map(([label, value]) => ({ label, value }));
     const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 6)
         .map(([label, value]) => ({ label, value }));
-    const topShifts = Object.entries(byShift).sort((a, b) => b[1] - a[1]).slice(0, 6)
+    const topShifts = Object.entries(byShift)
+        .filter(([label]) => !isShiftTimeLike(label))
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([label, value]) => ({ label, value }));
+    const topTimes = Object.entries(byTime)
+        .filter(([label]) => label && label !== 'N/I')
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
         .map(([label, value]) => ({ label, value }));
     const topSources = Object.entries(bySource).sort((a, b) => b[1] - a[1])
         .map(([label, value]) => ({ label, value }));
@@ -9217,20 +11027,20 @@ function buildFtDashboardStats(items) {
 
     const recentPending = items
         .filter(i => i.status === 'pending')
-        .sort((a, b) => new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0))
+        .sort((a, b) => getFtItemDateValue(b) - getFtItemDateValue(a))
         .slice(0, 6)
         .map(i => ({
             label: `${i.collabName || 'Colaborador'} (${i.collabRe || 'N/I'})`,
-            value: i.date ? formatFtDate(i.date) : formatFtDate(i.createdAt)
+            value: formatFtDate(i.date || i.createdAt)
         }));
 
     const recentLaunched = items
         .filter(i => i.status === 'launched')
-        .sort((a, b) => new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0))
+        .sort((a, b) => getFtItemDateValue(b) - getFtItemDateValue(a))
         .slice(0, 6)
         .map(i => ({
             label: `${i.collabName || 'Colaborador'} (${i.collabRe || 'N/I'})`,
-            value: i.date ? formatFtDate(i.date) : formatFtDate(i.createdAt)
+            value: formatFtDate(i.date || i.createdAt)
         }));
 
     return {
@@ -9244,6 +11054,7 @@ function buildFtDashboardStats(items) {
         topPeople,
         topReasons,
         topShifts,
+        topTimes,
         topSources,
         topPendingUnits,
         weekdayEntries,
@@ -9272,6 +11083,7 @@ function renderLancamentosDashboard() {
         topPeople,
         topReasons,
         topShifts,
+        topTimes,
         topSources,
         topPendingUnits,
         weekdayEntries,
@@ -9283,6 +11095,10 @@ function renderLancamentosDashboard() {
     } = stats;
 
     panel.innerHTML = `
+        <div class="lancamentos-dashboard-toolbar">
+            <div class="dashboard-title">Visão executiva</div>
+            <button class="btn btn-ghost btn-small" onclick="exportFtDashboard()">Exportar dashboard</button>
+        </div>
         <div class="lancamentos-kpi">
             <div class="kpi-card">
                 <div class="kpi-label">Pendentes</div>
@@ -9332,6 +11148,10 @@ function renderLancamentosDashboard() {
             <div class="report-card">
                 <div class="report-title">Por Turno</div>
                 <div class="report-list">${buildReportRows(topShifts)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Por Horário</div>
+                <div class="report-list">${buildReportRows(topTimes)}</div>
             </div>
             <div class="report-card">
                 <div class="report-title">Por Dia da Semana</div>
@@ -9408,6 +11228,7 @@ function exportFtDashboard() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topPeople)), "Por Colaborador");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topReasons)), "Por Motivo");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topShifts)), "Por Turno");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topTimes)), "Por Horario");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.weekdayEntries)), "Por Dia Semana");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topSources)), "Por Origem");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topPendingUnits)), "Pendências Unidade");
@@ -9519,7 +11340,7 @@ function renderLancamentosHistorico() {
         const launched = item.status === 'launched';
         const requestedAt = item.requestedAt ? formatFtDateTime(item.requestedAt) : '';
         const createdAt = item.createdAt ? formatFtDateTime(item.createdAt) : '';
-        const sourceInfo = getFtSourceInfo(item);
+        const sourceInfo = getFtSourceInfo(item, { showGroup: false });
         const coveringText = item.coveringOther
             ? (item.coveringRe ? `${item.coveringOther} (RE ${item.coveringRe})` : item.coveringOther)
             : (item.coveringName ? `${item.coveringName} (${item.coveringRe || 'N/I'})` : (item.coveringRe ? `RE ${item.coveringRe}` : '-'));
@@ -9530,23 +11351,26 @@ function renderLancamentosHistorico() {
         const detailDiff = !!reasonDetail && detailUpper !== reasonUpper;
         const detailBadge = detailDiff ? `<span class="detail-badge">Detalhe extra</span>` : '';
         const notes = (item.notes || '').trim();
-        const timeText = item.ftTime ? ` • ${item.ftTime}` : '';
         const expanded = ftHistoryExpanded.has(item.id);
         const isToday = item.date === getTodayKey();
         const isPending = item.status === 'pending';
-        const dateLabel = item.date ? formatFtDate(item.date) : formatFtDate(item.createdAt);
+        const dateLabel = item.date ? formatFtDate(item.date) : 'N/I';
+        const shiftLabel = item.shift || 'N/I';
+        const timeLabel = item.ftTime || 'N/I';
         return `
         <div class="lancamento-card ${isToday ? 'is-today' : ''} ${isPending ? 'is-pending' : ''}" data-ft-id="${item.id}">
             <div class="lancamento-main">
                 <div class="lancamento-meta">
-                    <span class="lancamento-date">${dateLabel || 'N/I'}</span>
+                    <span class="lancamento-date"><strong>Data FT</strong> ${dateLabel}</span>
                     <span class="lancamento-status status-${item.status}">${statusText}</span>
                     <span class="lancamento-source ${sourceInfo.className}">${sourceInfo.label}</span>
                 </div>
                 <div class="lancamento-title">${getFtCollabLabel(item)}</div>
                 <div class="lancamento-summary">
                     <span><strong>Unidade:</strong> ${getFtUnitLabel(item)}</span>
-                    <span><strong>Data:</strong> ${item.date ? formatFtDate(item.date) : 'N/I'} • <strong>Escala:</strong> ${item.shift || 'N/I'}${timeText}</span>
+                    <span><strong>Data FT:</strong> ${dateLabel}</span>
+                    <span><strong>Turno:</strong> ${shiftLabel}</span>
+                    <span><strong>Horário:</strong> ${timeLabel}</span>
                     <span><strong>Motivo:</strong> ${reasonLabel}</span>
                     <span><strong>Cobrindo:</strong> ${coveringText}</span>
                     ${detailBadge}
@@ -9568,8 +11392,6 @@ function renderLancamentosHistorico() {
                 </div>
             </div>
             <div class="lancamento-actions">
-                <button class="btn-mini btn-secondary" onclick="copyFtLinkById('${item.id}')">Copiar link</button>
-                <button class="btn-mini btn-secondary" onclick="sendFtWhatsappById('${item.id}')">WhatsApp</button>
                 <button class="btn-mini ${launched ? 'btn-ok' : 'btn-secondary'}" onclick="markFtLaunched('${item.id}')" ${canLaunch ? '' : 'disabled'}>${launched ? 'Lançado no Nexti' : 'Marcar Lançado no Nexti'}</button>
                 <button class="btn-mini btn-danger" onclick="deleteFtLaunch('${item.id}')" ${isAdminRole() ? '' : 'disabled'}>Remover</button>
             </div>
@@ -9800,21 +11622,43 @@ function sendFtWhatsappById(id) {
         ? item.coveringOther
         : (item.coveringName ? `${item.coveringName} (${item.coveringRe})` : item.coveringRe);
     const text = `FT confirmação\n${item.collabName} (${item.collabRe})\nUnidade: ${item.unitTarget || item.unitCurrent}\nData: ${item.date}\nEscala: ${item.shift}\nMotivo: ${reasonText}\nCobrindo: ${coveringText || '-'}\nLink: ${link}`;
-    const url = buildWhatsUrl(item.collabPhone, text);
     item.linkSentAt = item.linkSentAt || new Date().toISOString();
     item.updatedAt = new Date().toISOString();
     saveFtLaunches();
-    window.open(url, '_blank');
+    openWhatsApp(item.collabPhone, text);
 }
 
-function buildWhatsUrl(phone, text) {
-    if (!phone) return `https://wa.me/?text=${encodeURIComponent(text)}`;
-    const clean = String(phone).replace(/\D/g, '');
-    if (clean.length >= 10) {
-        const withCountry = clean.startsWith('55') ? clean : `55${clean}`;
-        return `https://wa.me/${withCountry}?text=${encodeURIComponent(text)}`;
+function isMobileDevice() {
+    if (navigator.userAgentData && typeof navigator.userAgentData.mobile === 'boolean') {
+        return navigator.userAgentData.mobile;
     }
-    return `https://wa.me/?text=${encodeURIComponent(text)}`;
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Windows Phone/i.test(navigator.userAgent || '');
+}
+
+function openWhatsApp(phone, text) {
+    const isMobile = isMobileDevice();
+    const url = buildWhatsUrl(phone, text, isMobile ? 'mobile' : 'desktop');
+    if (isMobile) {
+        window.location.href = url;
+        return;
+    }
+    const win = window.open(url, '_blank', 'noopener');
+    if (!win) {
+        window.location.href = url;
+    }
+}
+
+function buildWhatsUrl(phone, text, mode = 'desktop') {
+    const clean = String(phone || '').replace(/\D/g, '');
+    const withCountry = clean.length >= 10 ? (clean.startsWith('55') ? clean : `55${clean}`) : '';
+    const params = new URLSearchParams();
+    if (withCountry) params.set('phone', withCountry);
+    if (text) params.set('text', text);
+    const query = params.toString();
+    if (mode === 'mobile') {
+        return `whatsapp://send${query ? `?${query}` : ''}`;
+    }
+    return `https://api.whatsapp.com/send${query ? `?${query}` : ''}`;
 }
 
 function applyFtToCollaborator(item) {
@@ -9952,13 +11796,7 @@ function closePhoneModal() {
 
 function contactWhatsApp() {
     if (!currentContactPhone) return;
-    const formatted = currentContactPhone.length <= 11 ? '55' + currentContactPhone : currentContactPhone;
-    // Prefer deep link to app on mobile
-    window.location.href = `whatsapp://send?phone=${formatted}`;
-    // Fallback to wa.me after a short delay
-    setTimeout(() => {
-        window.open(`https://wa.me/${formatted}`, '_blank');
-    }, 600);
+    openWhatsApp(currentContactPhone, '');
 }
 
 function contactCall() {
@@ -10536,9 +12374,17 @@ function closeExportModal() {
     document.getElementById('export-modal')?.classList.add('hidden');
 }
 
-function loginSite() {
-    const re = document.getElementById('loginRe').value.trim();
-    const cpf = document.getElementById('loginCpf').value.trim();
+function loginSite(options = {}) {
+    const source = options.source || 'config';
+    const target = options.target || (source === 'supervisao' ? 'supervisao' : 'config');
+    const reInput = source === 'supervisao'
+        ? document.getElementById('supervisao-login-re')
+        : document.getElementById('loginRe');
+    const cpfInput = source === 'supervisao'
+        ? document.getElementById('supervisao-login-cpf')
+        : document.getElementById('loginCpf');
+    const re = reInput?.value.trim() || '';
+    const cpf = cpfInput?.value.trim() || '';
 
     if (!re || !cpf) {
         alert('Preencha RE e CPF');
@@ -10565,8 +12411,28 @@ function loginSite() {
     document.getElementById('config-login')?.classList.add('hidden');
     document.getElementById('config-content')?.classList.remove('hidden');
 
-    const keepLogged = document.getElementById('keepLogged')?.checked === true;
+    const keepLogged = source === 'supervisao'
+        ? document.getElementById('supervisao-keep-logged')?.checked === true
+        : document.getElementById('keepLogged')?.checked === true;
     saveAuthToStorage(hash, keepLogged);
+
+    if (target === 'supervisao') {
+        openSupervisaoPage();
+        updateMenuStatus();
+        renderSupervisaoAdminList();
+        renderSupervisaoHistory();
+        updateSupervisaoEditorVisibility();
+        updateSupervisaoAdminStatus();
+        showToast("Login efetuado com sucesso, agora você está no modo editor.", "success");
+        return;
+    }
+    if (target === 'gateway') {
+        renderGateway();
+        updateMenuStatus();
+        showToast("Login efetuado com sucesso, agora você está no modo editor.", "success");
+        return;
+    }
+
     renderDashboard();
     switchTab('config');
     renderAdminList();
@@ -10575,7 +12441,7 @@ function loginSite() {
     showToast("Login efetuado com sucesso, agora você está no modo editor.", "success");
 }
 
-function logoutSite() {
+function logoutSite(options = {}) {
     SiteAuth.logged = false;
     SiteAuth.user = null;
     SiteAuth.re = null;
@@ -10587,12 +12453,25 @@ function logoutSite() {
     document.getElementById('config-login')?.classList.remove('hidden');
     document.getElementById('config-content')?.classList.add('hidden');
 
-    renderDashboard();
-    switchTab('config');
     localStorage.setItem('keepLogged', '0');
     localStorage.removeItem('authHash');
     localStorage.removeItem('authUser');
     localStorage.removeItem('authRe');
+
+    if (options.target === 'supervisao') {
+        openSupervisaoPage();
+        updateMenuStatus();
+        updateSupervisaoAdminStatus();
+        return;
+    }
+    if (options.target === 'gateway') {
+        renderGateway();
+        updateMenuStatus();
+        return;
+    }
+
+    renderDashboard();
+    switchTab('config');
 }
 
 function toggleEditMode() {
@@ -10602,6 +12481,7 @@ function toggleEditMode() {
     
     document.body.classList.toggle('mode-edit', SiteAuth.mode === 'edit');
     updateMenuStatus();
+    updateSupervisaoAdminStatus();
 }
 
 function renderAdminList() {
@@ -10872,6 +12752,12 @@ function updateMenuStatus() {
     renderSheetValidatorOptions();
     renderConfigSummary();
     renderAuditList();
+    const supervisaoPane = document.getElementById('config-pane-supervisao');
+    if (supervisaoPane && !supervisaoPane.classList.contains('hidden')) {
+        renderSupervisaoAdminList();
+        renderSupervisaoHistory();
+        updateSupervisaoEditorVisibility();
+    }
     updateShadowStatusUI();
     updateAvisosUI();
 }

@@ -28,6 +28,12 @@ const CONFIG = {
         seguranca: 'images/logo-dunamis-seguranca.png',
         rb: 'images/logo-rb.png'
     },
+    routing: {
+        osrmBaseUrl: 'https://router.project-osrm.org',
+        osrmProfile: 'driving',
+        osrmEnabled: true,
+        osrmMaxCandidates: 12
+    },
     ftForms: {
         bombeiros: {
             formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLSeuOXsSQLZszJCNp9rDph6tSQIfbKDv-AsCygTWzPJvtS6Ypw/viewform',
@@ -116,13 +122,12 @@ const CONFIG = {
         }
     },
     ftSheet: {
-        url: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT6qElPbHyPwxIutCzVqgaVwNS17ZKWRpnaklVGXnMxVAxxQr20Sx-h0-BGSRZkx8YGmjqOUvgQAnkK/pub?gid=794745337&single=true&output=csv'
+        url: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQjyBzMotc55QxXUrk1RHonwoyjs6lQ8hRsMvVxQAogWg6bEBCCIpEJC7wHgBkOD5nrDU1v_bShcMPT/pub?gid=794745337&single=true&output=csv'
     },
     ftSheets: {
-        bombeiros: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT6qElPbHyPwxIutCzVqgaVwNS17ZKWRpnaklVGXnMxVAxxQr20Sx-h0-BGSRZkx8YGmjqOUvgQAnkK/pub?gid=794745337&single=true&output=csv',
-        servicos: '',
-        seguranca: '',
-        rb: ''
+        atual: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQjyBzMotc55QxXUrk1RHonwoyjs6lQ8hRsMvVxQAogWg6bEBCCIpEJC7wHgBkOD5nrDU1v_bShcMPT/pub?gid=794745337&single=true&output=csv',
+        jan_2026: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQjyBzMotc55QxXUrk1RHonwoyjs6lQ8hRsMvVxQAogWg6bEBCCIpEJC7wHgBkOD5nrDU1v_bShcMPT/pub?gid=148970921&single=true&output=csv',
+        dez_2025: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQjyBzMotc55QxXUrk1RHonwoyjs6lQ8hRsMvVxQAogWg6bEBCCIpEJC7wHgBkOD5nrDU1v_bShcMPT/pub?gid=533598812&single=true&output=csv'
     },
     ftReasons: [
         { value: 'troca', label: 'Troca' },
