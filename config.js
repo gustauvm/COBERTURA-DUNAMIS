@@ -129,6 +129,14 @@ const CONFIG = {
         jan_2026: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQjyBzMotc55QxXUrk1RHonwoyjs6lQ8hRsMvVxQAogWg6bEBCCIpEJC7wHgBkOD5nrDU1v_bShcMPT/pub?gid=148970921&single=true&output=csv',
         dez_2025: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQjyBzMotc55QxXUrk1RHonwoyjs6lQ8hRsMvVxQAogWg6bEBCCIpEJC7wHgBkOD5nrDU1v_bShcMPT/pub?gid=533598812&single=true&output=csv'
     },
+    trocaSheet: {
+        url: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSUkoOtjemzAloprwJ9kE6_nIDPrErsVPvwD2KvPzywBfHVlScravu7KgC2FdRY4JcGRWfPw-ZzIwWE/pub?output=csv'
+    },
+    trocaSheets: {
+        atual: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSUkoOtjemzAloprwJ9kE6_nIDPrErsVPvwD2KvPzywBfHVlScravu7KgC2FdRY4JcGRWfPw-ZzIwWE/pub?gid=927478556&single=true&output=csv',
+        jan_2026: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSUkoOtjemzAloprwJ9kE6_nIDPrErsVPvwD2KvPzywBfHVlScravu7KgC2FdRY4JcGRWfPw-ZzIwWE/pub?gid=350189077&single=true&output=csv',
+        dez_2025: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSUkoOtjemzAloprwJ9kE6_nIDPrErsVPvwD2KvPzywBfHVlScravu7KgC2FdRY4JcGRWfPw-ZzIwWE/pub?gid=107538996&single=true&output=csv'
+    },
     ftReasons: [
         { value: 'troca', label: 'Troca' },
         { value: 'cobertura', label: 'Cobertura' },

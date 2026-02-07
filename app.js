@@ -24,6 +24,7 @@ let routeMapLayer = null;
 let routeMapMarkers = [];
 let routeMapSeq = 0;
 let routeModalState = null;
+let addressModalState = { mode: 'unit', filter: '', collabRe: '', collabName: '', unitName: '' };
 let shadowReady = false;
 let shadowSyncTimer = null;
 let shadowAutoPullTimer = null;
@@ -46,7 +47,9 @@ const RECICLAGEM_CACHE_TTL_MS = 30 * 60 * 1000;
 let exportUnitTarget = null;
 let ftLaunches = [];
 let ftRemovedIds = new Set();
-let currentLancamentosTab = 'dashboard';
+let trocaLaunches = [];
+let currentLancamentosMode = 'ft'; // ft | troca
+let currentLancamentosTab = 'diaria';
 let ftFilter = { from: '', to: '', status: 'all' };
 let ftHistoryFilter = { search: '', unit: '', collab: '', sort: 'date_desc', grouped: true };
 let ftHistoryExpanded = new Set();
@@ -55,11 +58,16 @@ let lastFtCreatedId = null;
 let ftSyncTimer = null;
 let ftLastSyncAt = null;
 let ftSheetSyncInProgress = false;
+let trocaSheetSyncInProgress = false;
+let trocaLastSyncAt = null;
 let ftAutoSyncBound = false;
+let dailySnapshotInProgress = false;
 let reminderCheckTimer = null;
 let reminderAlertsHidden = false;
 let searchFilterStatus = 'all'; // all | plantao | folga | ft | afastado
 let searchHideAbsence = false;
+let searchDateFilter = { from: '', to: '' };
+let unitDateFilter = { from: '', to: '' };
 let currentContext = null;
 let contextBound = false;
 let reciclagemData = {};
@@ -83,6 +91,9 @@ let supervisaoSearchTerm = '';
 let supervisaoChannelPrefs = {};
 let supervisaoEditingId = null;
 let supervisaoOpenMessages = new Set();
+let gerenciaDataCache = [];
+let gerenciaFilter = { group: 'all', from: '', to: '' };
+let commandPaletteState = { open: false, activeIndex: 0, filtered: [] };
 
 // ==========================================================================
 // 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
@@ -102,6 +113,89 @@ const ROLE_LABELS = {
     admin: 'Admin',
     supervisor: 'Supervisor',
     viewer: 'Colaborador'
+};
+
+const ROADMAP_ITEMS = [
+    { title: 'Snapshot diário local + shadow', status: 'concluido', area: 'Segurança', detail: 'Restore point automático por dia com retenção local e envio silencioso para shadow.' },
+    { title: 'Modo Comando (Ctrl+K)', status: 'concluido', area: 'Produtividade', detail: 'Atalho global para navegar telas e acionar rotinas sem trocar menu manualmente.' },
+    { title: 'PWA leve para atalho no celular', status: 'concluido', area: 'Mobilidade', detail: 'Manifesto + Service Worker básico para instalação como app sem alterar o fluxo atual.' },
+    { title: 'Ajuda contextual lateral', status: 'concluido', area: 'Usabilidade', detail: 'Mini-guia por tela, fixo na lateral, sem pop-up invasivo.' },
+    { title: 'Foco diário em Lançamentos', status: 'concluido', area: 'Operação', detail: 'Aba Diária com visão de FT/Troca do dia e erros prioritários.' },
+    { title: 'Alerta mensal de GID FT/Troca', status: 'concluido', area: 'Governança', detail: 'Lembrete automático para cadastrar nova aba mensal no config.js.' }
+];
+
+const CONTEXT_HELP_CONTENT = {
+    gateway: {
+        title: 'Página Inicial',
+        lines: [
+            'Selecione um grupo para abrir a operação.',
+            'Use Supervisão para links e mensagens rápidas.',
+            'Gerência está em placeholder até próxima evolução.'
+        ]
+    },
+    busca: {
+        title: 'Busca Rápida',
+        lines: [
+            'Pesquise por nome, RE ou unidade.',
+            'Use filtros por status e período de FT.',
+            'Botão de mapa vermelho indica endereço não cadastrado.'
+        ]
+    },
+    unidades: {
+        title: 'Unidades',
+        lines: [
+            'Visualize plantão e folga por unidade.',
+            'Use o mapa para endereço, copiar e abrir rota.',
+            'Resumo semanal FT aparece no topo de cada unidade.'
+        ]
+    },
+    avisos: {
+        title: 'Avisos',
+        lines: [
+            'Acompanhe pendências e responsáveis.',
+            'Use lembretes para follow-up automático.',
+            'Filtre por unidade para ação rápida.'
+        ]
+    },
+    reciclagem: {
+        title: 'Reciclagem',
+        lines: [
+            'Filtre por tipo, status e colaborador.',
+            'Cards focam na execução sem resumo KPI.',
+            'Use exportação para relatórios externos.'
+        ]
+    },
+    lancamentos: {
+        title: 'Lançamentos',
+        lines: [
+            'Aba Diária prioriza execução do dia.',
+            'Dashboard mantém visão gerencial de FT/Troca.',
+            'Histórico concentra auditoria e correções.'
+        ]
+    },
+    config: {
+        title: 'Configuração',
+        lines: [
+            'Valide fontes antes da operação.',
+            'Roadmap mostra evolução e status interno.',
+            'Snapshot diário aumenta segurança de restauração.'
+        ]
+    },
+    supervisao: {
+        title: 'Supervisão',
+        lines: [
+            'Acesso rápido a mensagens e links padrão.',
+            'Favoritos e histórico aceleram atendimento.',
+            'Use filtros por público para reduzir ruído.'
+        ]
+    },
+    gerencia: {
+        title: 'Gerência',
+        lines: [
+            'Menu em modo placeholder conforme solicitado.',
+            'Estrutura preservada para retomada futura.'
+        ]
+    }
 };
 
 function isAdminRole() {
@@ -148,6 +242,7 @@ function updateBreadcrumb() {
     const tabLabelMap = {
         busca: 'Busca Rápida',
         unidades: 'Unidades',
+        gerencia: 'Gerência',
         supervisao: 'Supervisão',
         avisos: 'Avisos',
         lancamentos: 'Lançamentos',
@@ -179,7 +274,7 @@ function updateSearchFilterUI() {
     }
     const filterWrap = document.querySelector('.search-filters');
     if (filterWrap) {
-        const hasActive = searchFilterStatus !== 'all' || searchHideAbsence;
+        const hasActive = searchFilterStatus !== 'all' || searchHideAbsence || hasDateRangeFilter(searchDateFilter);
         filterWrap.classList.toggle('filters-active', hasActive);
     }
 }
@@ -194,6 +289,37 @@ function toggleSearchHideAbsence() {
     searchHideAbsence = !searchHideAbsence;
     updateSearchFilterUI();
     realizarBusca();
+}
+
+function setSearchDateFilter(from, to) {
+    const normalized = normalizeDateRange(from, to);
+    searchDateFilter.from = normalized.from;
+    searchDateFilter.to = normalized.to;
+    const fromInput = document.getElementById('search-date-from');
+    const toInput = document.getElementById('search-date-to');
+    if (fromInput && fromInput.value !== searchDateFilter.from) fromInput.value = searchDateFilter.from;
+    if (toInput && toInput.value !== searchDateFilter.to) toInput.value = searchDateFilter.to;
+    updateSearchFilterUI();
+    realizarBusca();
+}
+
+function clearSearchDateFilter() {
+    setSearchDateFilter('', '');
+}
+
+function setUnitDateFilter(from, to) {
+    const normalized = normalizeDateRange(from, to);
+    unitDateFilter.from = normalized.from;
+    unitDateFilter.to = normalized.to;
+    const fromInput = document.getElementById('unit-date-from');
+    const toInput = document.getElementById('unit-date-to');
+    if (fromInput && fromInput.value !== unitDateFilter.from) fromInput.value = unitDateFilter.from;
+    if (toInput && toInput.value !== unitDateFilter.to) toInput.value = unitDateFilter.to;
+    renderizarUnidades();
+}
+
+function clearUnitDateFilter() {
+    setUnitDateFilter('', '');
 }
 
 function toggleSubstituteSearchButton() {
@@ -341,14 +467,15 @@ function renderContextBar() {
     if (currentContext.type === 'unit') {
         const unitName = currentContext.unitName;
         const unitJs = JSON.stringify(unitName);
+        const unitJsAttr = escapeHtml(unitJs);
         const canEdit = SiteAuth.mode === 'edit';
         bar.innerHTML = `
             <div class="context-bar-inner">
-                <div class="context-title">Unidade: <strong>${unitName}</strong></div>
+                <div class="context-title">Unidade: <strong>${escapeHtml(unitName)}</strong></div>
                 <div class="context-actions">
-                    <button class="context-action" onclick="openAvisosForUnit(${unitJs})">Avisos</button>
-                    <button class="context-action" onclick="exportUnitPrompt(${unitJs})">Exportar</button>
-                    <button class="context-action" onclick="openEditUnitModal(${unitJs})" ${canEdit ? '' : 'disabled'}>Editar</button>
+                    <button class="context-action" onclick="openAvisosForUnit(${unitJsAttr})">Avisos</button>
+                    <button class="context-action" onclick="exportUnitPrompt(${unitJsAttr})">Exportar</button>
+                    <button class="context-action" onclick="openEditUnitModal(${unitJsAttr})" ${canEdit ? '' : 'disabled'}>Editar</button>
                 </div>
                 <button class="context-close" onclick="clearContextBar()">Fechar</button>
             </div>
@@ -367,13 +494,16 @@ function renderContextBar() {
         const nameJs = JSON.stringify(item.nome || 'Colaborador');
         const phoneJs = JSON.stringify(item.telefone || '');
         const unitJs = JSON.stringify(item.posto || '');
+        const nameJsAttr = escapeHtml(nameJs);
+        const phoneJsAttr = escapeHtml(phoneJs);
+        const unitJsAttr = escapeHtml(unitJs);
         const canEdit = SiteAuth.mode === 'edit';
         bar.innerHTML = `
             <div class="context-bar-inner">
-                <div class="context-title">Colaborador: <strong>${item.nome}</strong> (${item.re})</div>
+                <div class="context-title">Colaborador: <strong>${escapeHtml(item.nome)}</strong> (${escapeHtml(item.re)})</div>
                 <div class="context-actions">
-                    <button class="context-action" onclick="openPhoneModal(${nameJs}, ${phoneJs})">Contato</button>
-                    <button class="context-action" onclick="navigateToUnit(${unitJs})">Unidade</button>
+                    <button class="context-action" onclick="openPhoneModal(${nameJsAttr}, ${phoneJsAttr})">Contato</button>
+                    <button class="context-action" onclick="navigateToUnit(${unitJsAttr})">Unidade</button>
                     <button class="context-action" onclick="openEditModal(${item.id})" ${canEdit ? '' : 'disabled'}>Editar</button>
                 </div>
                 <button class="context-close" onclick="clearContextBar()">Fechar</button>
@@ -481,6 +611,82 @@ function saveAvisos(silent = false) {
     updateAvisosUI();
 }
 
+function getFtItemUpdatedTime(item) {
+    const updated = new Date(item?.updatedAt || 0).getTime();
+    if (updated) return updated;
+    const requested = new Date(item?.requestedAt || 0).getTime();
+    if (requested) return requested;
+    return new Date(item?.createdAt || 0).getTime() || 0;
+}
+
+function buildFtDedupKey(item) {
+    const fallbackId = String(item?.id || '').trim();
+    const normalizedDate = normalizeFtDateKey(item?.date) || '';
+    const collabKey = normalizeFtRe(item?.collabRe) || normalizeText(item?.collabName || '');
+    const unitKey = normalizeUnitKey(item?.unitTarget || item?.unitCurrent || '');
+    const coveringKey = normalizeFtRe(item?.coveringRe)
+        || normalizeText(item?.coveringOther || item?.coveringName || '');
+    const timeKey = String(item?.ftTime || '').trim().toUpperCase();
+    const shiftKey = String(item?.shift || '').trim().toUpperCase();
+    const reasonKey = normalizeText(item?.reasonRaw || item?.reasonOther || item?.reason || '');
+    const detailKey = normalizeText(item?.reasonDetail || '');
+    const core = [normalizedDate, collabKey, unitKey, coveringKey, shiftKey, timeKey, reasonKey, detailKey]
+        .filter(Boolean)
+        .join('|');
+    if (core) return core;
+    if (fallbackId) return `id:${fallbackId}`;
+    return ['ft', item?.createdAt || '', item?.collabName || '', item?.unitTarget || ''].join('|');
+}
+
+function pickPreferredFtItem(existing, incoming) {
+    if (!existing) return incoming;
+    const existingStatus = getFtStatusRank(existing?.status);
+    const incomingStatus = getFtStatusRank(incoming?.status);
+    if (incomingStatus !== existingStatus) {
+        return incomingStatus > existingStatus ? incoming : existing;
+    }
+    const existingTime = getFtItemUpdatedTime(existing);
+    const incomingTime = getFtItemUpdatedTime(incoming);
+    if (incomingTime !== existingTime) {
+        return incomingTime > existingTime ? incoming : existing;
+    }
+    const existingSource = existing?.source === 'sheet' ? 1 : 0;
+    const incomingSource = incoming?.source === 'sheet' ? 1 : 0;
+    if (incomingSource !== existingSource) {
+        return incomingSource > existingSource ? incoming : existing;
+    }
+    return incoming;
+}
+
+function dedupeFtLaunches(list = []) {
+    const byKey = new Map();
+    (list || []).forEach(item => {
+        if (!item) return;
+        const key = buildFtDedupKey(item);
+        const existing = byKey.get(key);
+        byKey.set(key, pickPreferredFtItem(existing, item));
+    });
+    return Array.from(byKey.values())
+        .sort((a, b) => getFtItemUpdatedTime(b) - getFtItemUpdatedTime(a));
+}
+
+function normalizeFtLaunchEntries(list = []) {
+    const normalized = (list || []).map(item => {
+        if (!item) return null;
+        const next = { ...item };
+        if (!next.status) next.status = 'pending';
+        if (next.status === 'confirmed') next.status = 'submitted';
+        if (!['pending', 'submitted', 'launched'].includes(next.status)) {
+            next.status = normalizeFtStatus(next.status);
+        }
+        if (!next.updatedAt) next.updatedAt = next.createdAt || new Date().toISOString();
+        const normalizedDate = normalizeFtDateKey(next.date);
+        if (normalizedDate) next.date = normalizedDate;
+        return next;
+    }).filter(Boolean);
+    return dedupeFtLaunches(normalized);
+}
+
 function loadFtLaunches() {
     try {
         const stored = localStorage.getItem('ftLaunches');
@@ -488,19 +694,14 @@ function loadFtLaunches() {
     } catch {
         ftLaunches = [];
     }
-    ftLaunches.forEach(item => {
-        if (!item.status) item.status = 'pending';
-        if (item.status === 'confirmed') item.status = 'submitted';
-        if (!item.updatedAt) item.updatedAt = item.createdAt || new Date().toISOString();
-        const normalizedDate = normalizeFtDateKey(item.date);
-        if (normalizedDate) item.date = normalizedDate;
-    });
+    ftLaunches = normalizeFtLaunchEntries(ftLaunches);
     if (ftRemovedIds.size) {
         ftLaunches = ftLaunches.filter(item => !ftRemovedIds.has(item.id));
     }
 }
 
 function saveFtLaunches(silent = false) {
+    ftLaunches = normalizeFtLaunchEntries(ftLaunches);
     localStorage.setItem('ftLaunches', JSON.stringify(ftLaunches));
     scheduleShadowSync('ft', { silent, notify: !silent });
     updateLancamentosUI();
@@ -836,6 +1037,78 @@ async function shadowPushSnapshot(reason = '') {
         updateShadowStatusUI();
         showToast("Falha ao enviar snapshot para o shadow.", "error");
         return false;
+    }
+}
+
+function getDailySnapshotKey(date = new Date()) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function buildSafetySnapshotState() {
+    return {
+        capturedAt: new Date().toISOString(),
+        group: currentGroup || 'todos',
+        collaboratorEdits: collaboratorEdits || {},
+        unitMetadata: unitMetadata || {},
+        changeHistory: changeHistory || [],
+        avisos: avisos || [],
+        ftLaunches: ftLaunches || [],
+        trocaLaunches: trocaLaunches || [],
+        currentData: currentData || []
+    };
+}
+
+function saveDailyLocalSnapshot(snapshotKey) {
+    const storageKey = 'dailySafetySnapshots';
+    const keepDays = 20;
+    const bucket = (() => {
+        try {
+            const raw = localStorage.getItem(storageKey);
+            return raw ? JSON.parse(raw) || {} : {};
+        } catch {
+            return {};
+        }
+    })();
+    bucket[snapshotKey] = buildSafetySnapshotState();
+    const keys = Object.keys(bucket).sort();
+    while (keys.length > keepDays) {
+        const oldest = keys.shift();
+        if (oldest) delete bucket[oldest];
+    }
+    localStorage.setItem(storageKey, JSON.stringify(bucket));
+}
+
+async function runDailySafetySnapshot(options = {}) {
+    const force = !!options.force;
+    const notify = !!options.notify || force;
+    if (dailySnapshotInProgress) return false;
+    const todayKey = getDailySnapshotKey(new Date());
+    const markerKey = 'dailySafetySnapshot:last';
+    if (!force && localStorage.getItem(markerKey) === todayKey) return false;
+    if (!currentData?.length && !ftLaunches.length && !trocaLaunches.length) return false;
+
+    dailySnapshotInProgress = true;
+    try {
+        saveDailyLocalSnapshot(todayKey);
+        localStorage.setItem(markerKey, todayKey);
+        if (shadowEnabled() && currentData?.length) {
+            try {
+                await shadowRequest('push_snapshot', {
+                    snapshot: currentData,
+                    group: currentGroup || 'todos',
+                    reason: `auto-daily-${todayKey}`
+                });
+            } catch {}
+        }
+        if (notify) {
+            showToast(`Snapshot diário criado (${todayKey}).`, 'success');
+        }
+        return true;
+    } finally {
+        dailySnapshotInProgress = false;
     }
 }
 
@@ -1314,7 +1587,7 @@ const SUPERVISAO_DEFAULT_MENU = {
 const gateway = document.getElementById('gateway');
 const appContainer = document.getElementById('app-container');
 const appTitle = document.getElementById('app-title');
-const APP_VERSION = 'v3.8';
+const APP_VERSION = 'v3.9';
 const contentArea = document.getElementById('content-area');
 
 // Inicialização
@@ -1351,13 +1624,194 @@ document.addEventListener('DOMContentLoaded', () => {
     loadUnitAddressDb();
     loadCollaboratorAddressDb();
     startFtAutoSync();
+    syncTrocaSheetLaunches(true);
     shadowPullState(false);
     startShadowAutoPull();
     document.body.classList.add('on-gateway');
     renderGateway();
+    document.getElementById('context-help-panel')?.remove();
+    ensureCommandPalette();
+    registerPwaSupport();
+    maybeShowMonthlyGidReminder();
     updateMenuStatus();
     updateLastUpdatedDisplay();
 });
+
+function registerPwaSupport() {
+    if (!('serviceWorker' in navigator)) return;
+    const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
+    if (!isSecure) return;
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
+function openTabFromCommand(tabName, afterOpen) {
+    const finalize = () => {
+        switchTab(tabName);
+        if (typeof afterOpen === 'function') afterOpen();
+    };
+    const targetGroup = currentGroup || 'todos';
+    const needsBoot = appContainer.style.display === 'none' || !document.getElementById(`tab-content-${tabName}`);
+    if (needsBoot) {
+        loadGroup(targetGroup).then(finalize).catch(() => {});
+        return;
+    }
+    finalize();
+}
+
+function getCommandPaletteCommands() {
+    const commands = [];
+    const push = (label, keywords, action) => commands.push({ label, keywords, action });
+    push('Abrir Busca Rápida', 'busca pesquisar colaborador', () => openTabFromCommand('busca'));
+    push('Abrir Unidades', 'unidades postos', () => openTabFromCommand('unidades'));
+    push('Abrir Avisos', 'avisos pendencias lembretes', () => openTabFromCommand('avisos'));
+    push('Abrir Reciclagem', 'reciclagem validade', () => openTabFromCommand('reciclagem'));
+    push('Abrir Lançamentos', 'ft lancamentos diaria', () => openTabFromCommand('lancamentos'));
+    push('Abrir Configuração', 'configuracao settings', () => openTabFromCommand('config'));
+    push('Lançamentos • Aba Diária', 'lancamentos diaria foco dia', () => {
+        openTabFromCommand('lancamentos', () => switchLancamentosTab('diaria'));
+    });
+    push('Lançamentos • Indicadores FT', 'lancamentos dashboard ft', () => {
+        openTabFromCommand('lancamentos', () => switchLancamentosTab('dashboard'));
+    });
+    push('Lançamentos • Troca de folga', 'lancamentos troca erros', () => {
+        openTabFromCommand('lancamentos', () => switchLancamentosMode('troca'));
+    });
+    push('Abrir Supervisão', 'supervisao menu links', () => openSupervisaoPage());
+    push('Abrir Gerência', 'gerencia placeholder', () => openGerenciaPage());
+    push('Voltar para Página Inicial', 'inicio home gateway', () => resetToGateway());
+    push('Sincronizar Planilhas (FT + Troca)', 'sincronizar ft troca', () => syncLancamentosSheets());
+    push('Criar Snapshot Diário Agora', 'snapshot backup restore', () => runDailySafetySnapshot({ force: true }));
+    return commands;
+}
+
+function renderCommandPaletteList(term = '') {
+    const listEl = document.getElementById('command-palette-list');
+    if (!listEl) return;
+    const query = normalizeText(term || '');
+    const commands = getCommandPaletteCommands();
+    const filtered = commands.filter(cmd => {
+        const bag = normalizeText(`${cmd.label} ${cmd.keywords}`);
+        return !query || bag.includes(query);
+    });
+    commandPaletteState.filtered = filtered;
+    if (commandPaletteState.activeIndex >= filtered.length) {
+        commandPaletteState.activeIndex = Math.max(filtered.length - 1, 0);
+    }
+    if (!filtered.length) {
+        listEl.innerHTML = `<div class="command-item empty">Nenhum comando encontrado.</div>`;
+        return;
+    }
+    listEl.innerHTML = filtered.map((cmd, idx) => `
+        <button class="command-item ${idx === commandPaletteState.activeIndex ? 'active' : ''}" data-command-idx="${idx}" type="button">
+            <span>${cmd.label}</span>
+        </button>
+    `).join('');
+}
+
+function closeCommandPalette() {
+    const palette = document.getElementById('command-palette');
+    if (!palette) return;
+    palette.classList.add('hidden');
+    commandPaletteState.open = false;
+}
+
+function executeCommandPaletteSelection() {
+    const cmd = commandPaletteState.filtered?.[commandPaletteState.activeIndex];
+    if (!cmd) return;
+    closeCommandPalette();
+    cmd.action();
+}
+
+function openCommandPalette() {
+    const palette = document.getElementById('command-palette');
+    const input = document.getElementById('command-palette-input');
+    if (!palette || !input) return;
+    palette.classList.remove('hidden');
+    commandPaletteState.open = true;
+    commandPaletteState.activeIndex = 0;
+    input.value = '';
+    renderCommandPaletteList('');
+    setTimeout(() => input.focus(), 0);
+}
+
+function ensureCommandPalette() {
+    if (document.getElementById('command-palette')) return;
+    const el = document.createElement('div');
+    el.id = 'command-palette';
+    el.className = 'command-palette hidden';
+    el.innerHTML = `
+        <div class="command-backdrop" data-close="1"></div>
+        <div class="command-dialog" role="dialog" aria-modal="true" aria-label="Modo comando">
+            <div class="command-header">
+                <strong>Modo Comando</strong>
+                <span>Ctrl+K</span>
+            </div>
+            <input id="command-palette-input" class="search-input" type="text" placeholder="Digite um comando...">
+            <div id="command-palette-list" class="command-list"></div>
+        </div>
+    `;
+    document.body.appendChild(el);
+
+    el.addEventListener('click', (ev) => {
+        const target = ev.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.dataset.close === '1') {
+            closeCommandPalette();
+            return;
+        }
+        const button = target.closest('.command-item[data-command-idx]');
+        if (!button) return;
+        const idx = Number(button.getAttribute('data-command-idx'));
+        if (!Number.isFinite(idx)) return;
+        commandPaletteState.activeIndex = idx;
+        executeCommandPaletteSelection();
+    });
+
+    const input = el.querySelector('#command-palette-input');
+    if (input) {
+        input.addEventListener('input', () => {
+            commandPaletteState.activeIndex = 0;
+            renderCommandPaletteList(input.value);
+        });
+        input.addEventListener('keydown', (ev) => {
+            const size = commandPaletteState.filtered?.length || 0;
+            if (ev.key === 'ArrowDown') {
+                ev.preventDefault();
+                if (!size) return;
+                commandPaletteState.activeIndex = (commandPaletteState.activeIndex + 1) % size;
+                renderCommandPaletteList(input.value);
+            } else if (ev.key === 'ArrowUp') {
+                ev.preventDefault();
+                if (!size) return;
+                commandPaletteState.activeIndex = (commandPaletteState.activeIndex - 1 + size) % size;
+                renderCommandPaletteList(input.value);
+            } else if (ev.key === 'Enter') {
+                ev.preventDefault();
+                executeCommandPaletteSelection();
+            } else if (ev.key === 'Escape') {
+                ev.preventDefault();
+                closeCommandPalette();
+            }
+        });
+    }
+
+    document.addEventListener('keydown', (ev) => {
+        const isShortcut = (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k';
+        if (isShortcut) {
+            ev.preventDefault();
+            if (commandPaletteState.open) {
+                closeCommandPalette();
+            } else {
+                openCommandPalette();
+            }
+            return;
+        }
+        if (ev.key === 'Escape' && commandPaletteState.open) {
+            ev.preventDefault();
+            closeCommandPalette();
+        }
+    });
+}
 
 // Botão de Scroll Top
 window.onscroll = function() {
@@ -1397,7 +1851,7 @@ function openSupervisaoPage() {
     updateSupervisaoAdminStatus();
 }
 
-function openGerenciaPage() {
+async function openGerenciaPage(options = {}) {
     appContainer.style.display = 'block';
     gateway.classList.add('hidden');
     document.body.classList.remove('on-gateway');
@@ -1411,14 +1865,229 @@ function openGerenciaPage() {
                 <span>Gerência</span>
             </div>
             <div class="breadcrumb-meta">
-                <span class="breadcrumb-updated">Em desenvolvimento</span>
+                <span class="breadcrumb-updated">Placeholder</span>
             </div>
         </div>
         <div class="gateway-gerencia-card">
             <strong>Gerência</strong>
-            <p>Menu em desenvolvimento. Em breve teremos os recursos de gestão completos aqui.</p>
+            <p>Em breve: painel gerencial.</p>
         </div>
     `;
+    clearContextBar();
+}
+
+function getGerenciaDataSource() {
+    if (gerenciaDataCache && gerenciaDataCache.length) return gerenciaDataCache;
+    return currentData || [];
+}
+
+function getGerenciaFilteredWorkforce() {
+    const source = getGerenciaDataSource();
+    if (gerenciaFilter.group && gerenciaFilter.group !== 'all') {
+        return source.filter(item => item.grupo === gerenciaFilter.group);
+    }
+    return source.slice();
+}
+
+function getGerenciaFilteredFtItems() {
+    const range = normalizeDateRange(gerenciaFilter.from, gerenciaFilter.to);
+    return getFtOperationalItems(ftLaunches).filter(item => {
+        if (gerenciaFilter.group && gerenciaFilter.group !== 'all' && item?.group && item.group !== gerenciaFilter.group) {
+            return false;
+        }
+        if (!hasDateRangeFilter(range)) return true;
+        const key = normalizeFtDateKey(item?.date);
+        return isDateInsideRange(key, range.from, range.to);
+    });
+}
+
+function getGerenciaGroupRows(sourceData) {
+    const counts = {};
+    (sourceData || []).forEach(item => {
+        const key = item?.grupo || 'N/I';
+        counts[key] = (counts[key] || 0) + 1;
+    });
+    return Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, value]) => ({ label: String(label).toUpperCase(), value }));
+}
+
+function buildGerenciaWeekProjectionHtml(groupFilter) {
+    const start = normalizeFtDateKey(gerenciaFilter.from) || getTodayKey();
+    const sourceItems = getFtOperationalItems(ftLaunches);
+    const chips = [];
+    for (let i = 0; i < 7; i++) {
+        const dayKey = getDateKeyWithOffset(start, i);
+        const list = sourceItems.filter(item => {
+            if (groupFilter && groupFilter !== 'all' && item?.group && item.group !== groupFilter) return false;
+            return normalizeFtDateKey(item?.date) === dayKey;
+        });
+        const preview = resolveFtPreviewFromItems(list);
+        const date = new Date(`${dayKey}T00:00:00`);
+        const weekday = Number.isNaN(date.getTime())
+            ? dayKey
+            : ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB'][date.getDay()];
+        const css = preview.code === 'V' ? 'v' : (preview.code === 'E' ? 'e' : (preview.code === 'D' ? 'd' : 'none'));
+        chips.push(`
+            <div class="gerencia-day-chip ${css}" title="${formatFtDate(dayKey)}: ${preview.count ? `${preview.count} FT` : 'Sem FT'}">
+                <div class="day">${weekday}</div>
+                <div class="code">${preview.code}</div>
+                <div class="count">${preview.count || 0}</div>
+            </div>
+        `);
+    }
+    return `<div class="gerencia-day-grid">${chips.join('')}</div>`;
+}
+
+function setGerenciaDateRangePreset(preset) {
+    const today = new Date();
+    if (preset === 'today') {
+        const value = toDateInputValue(today);
+        gerenciaFilter.from = value;
+        gerenciaFilter.to = value;
+    } else if (preset === '7d') {
+        const start = new Date(today);
+        start.setDate(today.getDate() - 6);
+        gerenciaFilter.from = toDateInputValue(start);
+        gerenciaFilter.to = toDateInputValue(today);
+    } else if (preset === 'next7') {
+        const end = new Date(today);
+        end.setDate(today.getDate() + 6);
+        gerenciaFilter.from = toDateInputValue(today);
+        gerenciaFilter.to = toDateInputValue(end);
+    } else if (preset === 'clear') {
+        gerenciaFilter.from = '';
+        gerenciaFilter.to = '';
+    }
+    renderGerenciaDashboard();
+}
+
+function bindGerenciaFilters() {
+    const groupSelect = document.getElementById('gerencia-group-filter');
+    const dateFrom = document.getElementById('gerencia-date-from');
+    const dateTo = document.getElementById('gerencia-date-to');
+    if (groupSelect) {
+        groupSelect.addEventListener('change', () => {
+            gerenciaFilter.group = groupSelect.value || 'all';
+            renderGerenciaDashboard();
+        });
+    }
+    if (dateFrom && dateTo) {
+        const onDate = () => {
+            const normalized = normalizeDateRange(dateFrom.value, dateTo.value);
+            gerenciaFilter.from = normalized.from;
+            gerenciaFilter.to = normalized.to;
+            renderGerenciaDashboard();
+        };
+        dateFrom.addEventListener('change', onDate);
+        dateTo.addEventListener('change', onDate);
+    }
+}
+
+async function refreshGerenciaDashboard() {
+    await openGerenciaPage({ forceReload: true });
+}
+
+function renderGerenciaDashboard() {
+    const allData = getGerenciaDataSource();
+    const workforce = getGerenciaFilteredWorkforce();
+    const ftItems = getGerenciaFilteredFtItems();
+    const ftStats = buildFtDashboardStats(ftItems);
+    const total = workforce.length;
+    const plantao = workforce.filter(d => {
+        const status = getStatusInfo(d).text;
+        return status.includes('PLANTÃO') || status.includes('FT');
+    }).length;
+    const folga = workforce.filter(d => {
+        const status = getStatusInfo(d).text;
+        return !status.includes('PLANTÃO') && !status.includes('FT');
+    }).length;
+    const groupRows = getGerenciaGroupRows(allData).slice(0, 6);
+    const byUnit = {};
+    workforce.forEach(item => {
+        const key = item?.posto || 'N/I';
+        byUnit[key] = (byUnit[key] || 0) + 1;
+    });
+    const topUnitsWorkforce = Object.entries(byUnit)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([label, value]) => ({ label, value }));
+    const pendingUnits = ftStats.topPendingUnits || [];
+    const optionGroups = getGerenciaGroupRows(allData).filter(g => g.label !== 'N/I');
+    const groupOptions = ['<option value="all">Todos os grupos</option>']
+        .concat(optionGroups.map(g => {
+            const value = g.label.toLowerCase();
+            return `<option value="${value}" ${gerenciaFilter.group === value ? 'selected' : ''}>${g.label}</option>`;
+        }));
+    const rangeLabel = hasDateRangeFilter(gerenciaFilter)
+        ? `${gerenciaFilter.from || '...'} até ${gerenciaFilter.to || '...'}`
+        : 'Sem recorte de data';
+    contentArea.innerHTML = `
+        <div class="breadcrumb-bar">
+            <div class="breadcrumb-main">
+                <span>Página inicial</span>
+                <span class="breadcrumb-sep">›</span>
+                <span>Gerência</span>
+            </div>
+            <div class="breadcrumb-meta">
+                <span class="breadcrumb-updated">Recorte: ${rangeLabel}</span>
+            </div>
+        </div>
+        <section class="gerencia-shell">
+            <div class="gerencia-header">
+                <h3>Central Gerencial de Coberturas</h3>
+                <p>Indicadores consolidados para decisões rápidas de escala, risco e produtividade.</p>
+            </div>
+            <div class="gerencia-filters">
+                <select id="gerencia-group-filter" class="filter-select">${groupOptions.join('')}</select>
+                <input type="date" id="gerencia-date-from" value="${gerenciaFilter.from || ''}">
+                <input type="date" id="gerencia-date-to" value="${gerenciaFilter.to || ''}">
+                <button class="filter-chip" onclick="setGerenciaDateRangePreset('today')">Hoje</button>
+                <button class="filter-chip" onclick="setGerenciaDateRangePreset('7d')">Últ. 7 dias</button>
+                <button class="filter-chip" onclick="setGerenciaDateRangePreset('next7')">Próx. 7 dias</button>
+                <button class="filter-chip" onclick="setGerenciaDateRangePreset('clear')">Limpar datas</button>
+                <button class="btn btn-secondary btn-small" onclick="refreshGerenciaDashboard()">Atualizar números</button>
+            </div>
+            <div class="lancamentos-kpi gerencia-kpi">
+                <div class="kpi-card"><div class="kpi-label">Efetivo filtrado</div><div class="kpi-value">${total}</div><div class="kpi-sub">Colaboradores no recorte</div></div>
+                <div class="kpi-card"><div class="kpi-label">Plantão hoje</div><div class="kpi-value">${plantao}</div><div class="kpi-sub">Status operacional atual</div></div>
+                <div class="kpi-card"><div class="kpi-label">Folga hoje</div><div class="kpi-value">${folga}</div><div class="kpi-sub">Reserva potencial</div></div>
+                <div class="kpi-card"><div class="kpi-label">FT no período</div><div class="kpi-value">${ftStats.total}</div><div class="kpi-sub">Todas as solicitações</div></div>
+                <div class="kpi-card"><div class="kpi-label">Pendências FT</div><div class="kpi-value">${ftStats.pending}</div><div class="kpi-sub">Aguardando lançamento</div></div>
+                <div class="kpi-card"><div class="kpi-label">Taxa de lançamento</div><div class="kpi-value">${ftStats.launchRate}%</div><div class="kpi-sub">Eficiência no Nexti</div></div>
+            </div>
+            <div class="lancamentos-report-grid gerencia-grid">
+                <div class="report-card">
+                    <div class="report-title">Efetivo por Grupo</div>
+                    <div class="report-list">${buildReportRows(groupRows)}</div>
+                </div>
+                <div class="report-card">
+                    <div class="report-title">Unidades com maior efetivo</div>
+                    <div class="report-list">${buildReportRows(topUnitsWorkforce)}</div>
+                </div>
+                <div class="report-card">
+                    <div class="report-title">FT por Unidade</div>
+                    <div class="report-list">${buildReportRows(ftStats.topUnits || [])}</div>
+                </div>
+                <div class="report-card">
+                    <div class="report-title">Pendências por Unidade</div>
+                    <div class="report-list">${buildReportRows(pendingUnits)}</div>
+                </div>
+                <div class="report-card">
+                    <div class="report-title">Motivos de FT</div>
+                    <div class="report-list">${buildReportRows(ftStats.topReasons || [])}</div>
+                </div>
+                <div class="report-card">
+                    <div class="report-title">Radar próximos 7 dias (V/E/D)</div>
+                    <div class="report-list">
+                        ${buildGerenciaWeekProjectionHtml(gerenciaFilter.group)}
+                    </div>
+                </div>
+            </div>
+        </section>
+    `;
+    bindGerenciaFilters();
+    updateLastUpdatedDisplay();
     clearContextBar();
 }
 
@@ -1692,7 +2361,7 @@ function renderGateway() {
                     ${ICONS.settings}
                 </div>
                 <h3>Gerência</h3>
-                <p>Painel gerencial (em desenvolvimento).</p>
+                <p>Placeholder.</p>
             </div>
         </div>
         <div class="gateway-links">
@@ -1959,6 +2628,7 @@ async function loadGroup(groupKey) {
 
     renderDashboard();
     updateLastUpdatedDisplay();
+    runDailySafetySnapshot();
 }
 
 // 3. Voltar ao Gateway
@@ -1974,9 +2644,9 @@ function resetToGateway() {
     // Não limpamos unitMetadata e collaboratorEdits aqui para permitir persistência na sessão
 }
 
-async function getAllCollaborators() {
+async function getAllCollaborators(force = false) {
     const ttl = 5 * 60 * 1000;
-    if (allCollaboratorsCache.items && (Date.now() - allCollaboratorsCache.updatedAt) < ttl) {
+    if (!force && allCollaboratorsCache.items && (Date.now() - allCollaboratorsCache.updatedAt) < ttl) {
         return allCollaboratorsCache.items;
     }
     try {
@@ -2046,7 +2716,10 @@ function mapNextiToAppFormat(nextiPersons, groupTag, keepChanges) {
 
         // Se optou por manter alterações e existe edição para este RE, usa a edição
         if (keepChanges && collaboratorEdits[re]) {
-            return { ...collaboratorEdits[re], grupo: groupTag };
+            const edited = { ...collaboratorEdits[re], grupo: groupTag };
+            if (!edited.endereco) edited.endereco = getCollaboratorAddressByRe(re);
+            if (!edited.cargo) edited.cargo = getCollaboratorRoleByRe(re);
+            return edited;
         }
 
         // Extração de Tipo de Escala (Lógica mantida do original)
@@ -2071,6 +2744,7 @@ function mapNextiToAppFormat(nextiPersons, groupTag, keepChanges) {
             // API já fornece telefone, não precisa de map externo
             telefone: (p.phone || p.phone2 || '').replace(/\D/g, ''),
             endereco: getCollaboratorAddressByRe(re),
+            cargo: getCollaboratorRoleByRe(re),
             _nextiId: p.id // ID interno para busca de afastamentos
         };
     }).filter(item => item && item.nome && item.re);
@@ -2088,11 +2762,15 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap, addressMap) {
         
         // Se optou por manter alterações e existe edição para este RE, usa a edição
         if (keepChanges && collaboratorEdits[re]) {
-            return { ...collaboratorEdits[re], grupo: groupTag }; // Mantém grupo atual
+            const edited = { ...collaboratorEdits[re], grupo: groupTag };
+            if (!edited.endereco) edited.endereco = findCollaboratorAddress(re, addressMap);
+            if (!edited.cargo) edited.cargo = findCollaboratorRole(re, addressMap);
+            return edited; // Mantém grupo atual
         }
 
         const telefone = findPhone(re, nome, phoneMap);
         const endereco = findCollaboratorAddress(re, addressMap);
+        const cargo = findCollaboratorRole(re, addressMap);
         const grupoLabel = (cols[0] || '').trim().toUpperCase();
 
         // Extração de Tipo de Escala (12x36, 5x2, etc)
@@ -2114,7 +2792,8 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap, addressMap) {
             rotuloDetalhe: '', // Descrição para 'Outros'
             grupo: groupTag,
             telefone: telefone,
-            endereco: endereco
+            endereco: endereco,
+            cargo: cargo
         };
 
         return obj;
@@ -2326,7 +3005,10 @@ function mapNextiData(persons, groupTag, keepChanges) {
 
         // Mantém edições locais se existirem
         if (keepChanges && collaboratorEdits[re]) {
-            return { ...collaboratorEdits[re], grupo: groupTag };
+            const edited = { ...collaboratorEdits[re], grupo: groupTag };
+            if (!edited.endereco) edited.endereco = getCollaboratorAddressByRe(re);
+            if (!edited.cargo) edited.cargo = getCollaboratorRoleByRe(re);
+            return edited;
         }
 
         // Lógica de extração de escala (idêntica ao CSV)
@@ -2346,7 +3028,8 @@ function mapNextiData(persons, groupTag, keepChanges) {
             rotuloDetalhe: '',
             grupo: groupTag, // Atribui o grupo selecionado
             telefone: (p.phone || p.phone2 || '').replace(/\D/g, ''), // Usa telefone da API
-            endereco: getCollaboratorAddressByRe(re)
+            endereco: getCollaboratorAddressByRe(re),
+            cargo: getCollaboratorRoleByRe(re)
         };
     }).filter(item => item && item.nome && item.re);
 }
@@ -2445,16 +3128,23 @@ function processCollaboratorAddressData(csvText) {
     const headers = rows[headerIndex].map(normalizeHeaderValue);
     let idxRE = headers.findIndex(h => h.includes('MATRICULA') || h === 'RE');
     let idxAddress = headers.findIndex(h => h.includes('ENDERECO'));
+    let idxRole = headers.findIndex(h => h.includes('CARGO') || h.includes('FUNCAO') || h.includes('FUNÇÃO'));
 
     if (idxRE === -1) idxRE = 8;
     if (idxAddress === -1) idxAddress = 10;
+    if (idxRole === -1) idxRole = -1;
 
     const map = {};
     rows.slice(headerIndex + 1).forEach(cols => {
         const reRaw = cols[idxRE] || '';
         const address = (cols[idxAddress] || '').trim();
+        const role = idxRole >= 0 ? (cols[idxRole] || '').trim().toUpperCase() : '';
         const key = normalizeReKey(reRaw);
-        if (key && address) map[key] = address;
+        if (!key) return;
+        const current = map[key] || { address: '', role: '' };
+        if (address) current.address = address;
+        if (role) current.role = role;
+        if (current.address || current.role) map[key] = current;
     });
     return map;
 }
@@ -2475,14 +3165,33 @@ async function loadCollaboratorAddressDb(force = false) {
 }
 
 function findCollaboratorAddress(re, addressMap) {
-    if (!re) return '';
+    const profile = findCollaboratorProfile(re, addressMap);
+    return profile.address;
+}
+
+function findCollaboratorRole(re, addressMap) {
+    const profile = findCollaboratorProfile(re, addressMap);
+    return profile.role;
+}
+
+function findCollaboratorProfile(re, addressMap) {
+    if (!re) return { address: '', role: '' };
     const map = addressMap || collaboratorAddressMap || {};
     const key = normalizeReKey(re);
-    return map[key] || '';
+    const profile = map[key];
+    if (!profile) return { address: '', role: '' };
+    if (typeof profile === 'string') return { address: profile, role: '' };
+    const address = String(profile.address || profile.endereco || '').trim();
+    const role = String(profile.role || profile.cargo || '').trim();
+    return { address, role };
 }
 
 function getCollaboratorAddressByRe(re) {
     return findCollaboratorAddress(re, collaboratorAddressMap);
+}
+
+function getCollaboratorRoleByRe(re) {
+    return findCollaboratorRole(re, collaboratorAddressMap);
 }
 
 function getAddressForCollaborator(collab) {
@@ -2532,6 +3241,19 @@ function renderDashboard() {
                     <button class="filter-chip" data-filter="ft" onclick="setSearchFilterStatus('ft')">FT</button>
                     <button class="filter-chip" data-filter="afastado" onclick="setSearchFilterStatus('afastado')">Afastados</button>
                     <button class="filter-chip" data-hide="1" onclick="toggleSearchHideAbsence()">Sem afastamento</button>
+                </div>
+                <div class="search-date-filters">
+                    <div class="search-date-field">
+                        <label>FT de</label>
+                        <input type="date" id="search-date-from" value="${searchDateFilter.from || ''}">
+                    </div>
+                    <div class="search-date-field">
+                        <label>até</label>
+                        <input type="date" id="search-date-to" value="${searchDateFilter.to || ''}">
+                    </div>
+                    <div class="menu-actions-row search-date-actions">
+                        <button class="btn btn-secondary btn-small" onclick="clearSearchDateFilter()">Limpar data</button>
+                    </div>
                 </div>
                 <div id="substitute-panel" class="substitute-panel hidden">
                     <div class="substitute-target-row">
@@ -2589,12 +3311,21 @@ function renderDashboard() {
                         <option value="TROCA">Troca</option>
                         <option value="OUTRO">Outro</option>
                     </select>
-                    <button class="btn btn-secondary btn-small" onclick="openExportModal()">
-                        ${ICONS.download} Exportar
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="openHistoryModal()">
-                        ${ICONS.history} Histórico
-                    </button>
+                </div>
+                <div class="search-date-filters unit-date-filters">
+                    <div class="search-date-field">
+                        <label>FT de</label>
+                        <input type="date" id="unit-date-from" value="${unitDateFilter.from || ''}">
+                    </div>
+                    <div class="search-date-field">
+                        <label>até</label>
+                        <input type="date" id="unit-date-to" value="${unitDateFilter.to || ''}">
+                    </div>
+                    <div class="menu-actions-row unit-toolbar-actions">
+                        <button class="btn btn-secondary btn-small" onclick="openExportModal()">${ICONS.download} Exportar</button>
+                        <button class="btn btn-secondary btn-small" onclick="openHistoryModal()">${ICONS.history} Histórico</button>
+                        <button class="btn btn-secondary btn-small" onclick="clearUnitDateFilter()">Limpar data</button>
+                    </div>
                 </div>
             </div>
             <div id="units-list"></div>
@@ -2767,14 +3498,13 @@ function renderDashboard() {
             <div class="reciclagem-shell">
                 <div class="reciclagem-header">
                     <h3>Reciclagem</h3>
-                    <div class="reciclagem-actions">
+                    <div class="reciclagem-actions menu-actions-row">
                         <button class="btn btn-secondary btn-small" onclick="loadReciclagemData(true); renderReciclagem();">Atualizar</button>
                         <button class="btn btn-secondary btn-small" onclick="exportReciclagemReport()">Exportar relatório</button>
                         ${isAdminRole() ? `<button class="btn btn-secondary btn-small" onclick="toggleReciclagemTemplatesPanel()">Editar mensagens</button>` : ''}
                         ${isAdminRole() ? `<button class="btn btn-secondary btn-small" onclick="toggleReciclagemHistory()">Histórico</button>` : ''}
                     </div>
                 </div>
-                <div id="reciclagem-summary" class="reciclagem-summary"></div>
                 <div class="reciclagem-tabs">
                     <button class="reciclagem-tab active" onclick="switchReciclagemTab('colab')">Colaboradores</button>
                     <button class="reciclagem-tab" onclick="switchReciclagemTab('unit')">Unidades</button>
@@ -2827,24 +3557,38 @@ function renderDashboard() {
             <div class="lancamentos-shell">
                 <div class="lancamentos-top">
                     <div class="lancamentos-title">
-                        <h3>Lançamentos de FT</h3>
+                        <h3 id="lancamentos-main-title">Lançamentos FT (Planilha Atual)</h3>
                         <div class="lancamentos-meta">
                             <span id="lancamentos-sync-status" class="lancamentos-sync-pill">Auto sync ativa</span>
                             <span class="lancamentos-last-sync">Última sync: <span id="lancamentos-last-sync">—</span></span>
                         </div>
+                        <div class="lancamentos-mode-switch" id="lancamentos-mode-switch">
+                            <button class="lancamentos-mode-btn active" data-mode="ft" onclick="switchLancamentosMode('ft')">FT</button>
+                            <button class="lancamentos-mode-btn" data-mode="troca" onclick="switchLancamentosMode('troca')">Troca de folga</button>
+                        </div>
                     </div>
-                    <div class="lancamentos-actions">
-                        <button class="btn btn-secondary btn-small" onclick="syncFtSheetLaunches()" ${canManageLancamentos ? '' : 'disabled'}>Sincronizar planilha</button>
-                        <button class="btn btn-secondary btn-small" onclick="syncFtFormResponses()" ${canManageLancamentos ? '' : 'disabled'}>Sincronizar confirmações</button>
-                        <button class="btn btn-small" onclick="switchLancamentosTab('novo')" ${canManageLancamentos ? '' : 'disabled'}>Novo Lançamento</button>
+                    <div class="lancamentos-actions menu-actions-row">
+                        <div id="lancamentos-actions-ft" class="lanc-action-group">
+                            <button class="btn btn-secondary btn-small" onclick="syncLancamentosSheets()" ${canManageLancamentos ? '' : 'disabled'}>Sincronizar planilhas</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('diaria')">Diária FT</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Indicadores FT</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico FT</button>
+                        </div>
+                        <div id="lancamentos-actions-troca" class="lanc-action-group hidden">
+                            <button class="btn btn-secondary btn-small" onclick="syncTrocaSheetLaunches(false)">Sincronizar trocas</button>
+                            <button class="btn btn-secondary btn-small" onclick="renderLancamentosTroca()">Ver erros de troca</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosMode('ft')">Voltar para FT</button>
+                        </div>
                     </div>
                 </div>
-                <div class="lancamentos-tabs">
-                    <button class="lancamentos-tab" data-tab="dashboard" onclick="switchLancamentosTab('dashboard')">Dashboard <span class="tab-badge" id="lancamentos-tab-total">0</span></button>
+                <div class="lancamentos-tabs" id="lancamentos-tabs-ft">
+                    <button class="lancamentos-tab daily-focus" data-tab="diaria" onclick="switchLancamentosTab('diaria')">Diária <span class="tab-badge" id="lancamentos-tab-today">0</span></button>
+                    <button class="lancamentos-tab" data-tab="dashboard" onclick="switchLancamentosTab('dashboard')">Indicadores <span class="tab-badge" id="lancamentos-tab-total">0</span></button>
                     <button class="lancamentos-tab" data-tab="historico" onclick="switchLancamentosTab('historico')">Histórico <span class="tab-badge" id="lancamentos-tab-pending">0</span></button>
-                    <button class="lancamentos-tab" data-tab="novo" onclick="switchLancamentosTab('novo')">Novo</button>
                 </div>
                 <div id="lancamentos-filters-wrap" class="lancamentos-filters-wrap"></div>
+                <div id="lancamentos-panel-diaria" class="lancamentos-panel hidden"></div>
+                <div id="lancamentos-panel-troca" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-dashboard" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-historico" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-novo" class="lancamentos-panel hidden">
@@ -2932,10 +3676,10 @@ function renderDashboard() {
 
                 <div id="config-content" class="hidden">
                         <div class="config-tabs">
-                            <button class="config-tab active" onclick="switchConfigTab('access')">Acesso</button>
-                            <button class="config-tab" onclick="switchConfigTab('datasource')">Fonte de Banco de Dados</button>
-                            <button class="config-tab" onclick="switchConfigTab('ft')">FT</button>
-                            <button class="config-tab" onclick="switchConfigTab('supervisao')">Supervisão</button>
+                            <button class="config-tab active" onclick="switchConfigTab('access', this)">Acesso</button>
+                            <button class="config-tab" onclick="switchConfigTab('datasource', this)">Fonte de Banco de Dados</button>
+                            <button class="config-tab" onclick="switchConfigTab('ft', this)">FT</button>
+                            <button class="config-tab" onclick="switchConfigTab('supervisao', this)">Supervisão</button>
                         </div>
 
                     <div id="config-pane-access" class="config-pane">
@@ -3105,6 +3849,17 @@ function renderDashboard() {
                                         </div>
                                         <div id="sheet-validator-status" class="validator-status"></div>
                                         <div id="sheet-validator-preview" class="validator-preview"></div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card">
+                                    <div class="config-card-header">
+                                        <div class="card-title">Roadmap de melhorias</div>
+                                        <button class="card-toggle" onclick="toggleConfigCard(this)" aria-label="Recolher">${ICONS.chevronUp}</button>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="config-note">Status vivo das evoluções priorizadas para a operação.</div>
+                                        <div id="roadmap-list" class="roadmap-list"></div>
                                     </div>
                                 </div>
 
@@ -3511,12 +4266,12 @@ function renderDashboard() {
         <div id="address-modal" class="modal hidden">
             <div class="modal-content" style="max-width: 760px;">
                 <div class="modal-header sticky-modal-header">
-                    <h3>Endereços das Unidades</h3>
+                    <h3 id="address-modal-title">Endereços das Unidades</h3>
                     <button class="close-modal" onclick="closeAddressModal()">${ICONS.close}</button>
                 </div>
                 <div class="help-content">
                     <div class="form-group">
-                        <label>Buscar unidade</label>
+                        <label id="address-modal-search-label">Buscar unidade</label>
                         <input type="text" id="address-search" class="search-input" placeholder="Digite a unidade...">
                     </div>
                     <div id="address-list" class="address-list"></div>
@@ -3752,6 +4507,13 @@ function renderDashboard() {
     searchInput.addEventListener('input', () => handleSearchTokenSuggest());
     searchInput.addEventListener('click', () => handleSearchTokenSuggest());
     searchInput.addEventListener('keyup', () => handleSearchTokenSuggest());
+    const searchDateFrom = document.getElementById('search-date-from');
+    const searchDateTo = document.getElementById('search-date-to');
+    if (searchDateFrom && searchDateTo) {
+        const onSearchDateChange = () => setSearchDateFilter(searchDateFrom.value, searchDateTo.value);
+        searchDateFrom.addEventListener('change', onSearchDateChange);
+        searchDateTo.addEventListener('change', onSearchDateChange);
+    }
 
     const searchUnitInput = document.getElementById('search-unit-target');
     if (searchUnitInput) {
@@ -3772,6 +4534,13 @@ function renderDashboard() {
     // Configurar busca de unidades
     const unitSearchInput = document.getElementById('unit-search-input');
     unitSearchInput.addEventListener('input', () => renderizarUnidades());
+    const unitDateFrom = document.getElementById('unit-date-from');
+    const unitDateTo = document.getElementById('unit-date-to');
+    if (unitDateFrom && unitDateTo) {
+        const onUnitDateChange = () => setUnitDateFilter(unitDateFrom.value, unitDateTo.value);
+        unitDateFrom.addEventListener('change', onUnitDateChange);
+        unitDateTo.addEventListener('change', onUnitDateChange);
+    }
 
     
     const bulkSelect = document.getElementById('bulk-action-select');
@@ -3801,6 +4570,7 @@ function renderDashboard() {
         });
     }
 
+    updateSearchFilterUI();
     searchInput.focus(); // Foco automático
 
     // Renderizar lista de unidades (já deixa pronto, mas oculto)
@@ -3898,6 +4668,10 @@ function switchTab(tabName) {
 
     if (tabName === 'busca') {
         document.getElementById('search-input').focus();
+        realizarBusca();
+    }
+    if (tabName === 'unidades') {
+        renderizarUnidades();
     }
     if (tabName === 'avisos') {
         renderAvisos();
@@ -3979,12 +4753,17 @@ function toggleEscalaInvertida() {
     showToast(escalaInvertida ? 'Escala invertida ativada.' : 'Escala invertida desativada.', 'success');
 }
 
-function switchConfigTab(tabName) {
+function switchConfigTab(tabName, sourceBtn = null) {
     document.querySelectorAll('.config-tab').forEach(btn => btn.classList.remove('active'));
-    if (typeof event !== 'undefined' && event?.target) {
-        event.target.classList.add('active');
+    if (sourceBtn?.classList) {
+        sourceBtn.classList.add('active');
     } else {
-        document.querySelector(`.config-tab[onclick="switchConfigTab('${tabName}')"]`)?.classList.add('active');
+        document.querySelectorAll('.config-tab').forEach(btn => {
+            const onclick = btn.getAttribute('onclick') || '';
+            if (onclick.includes(`switchConfigTab('${tabName}'`)) {
+                btn.classList.add('active');
+            }
+        });
     }
     document.getElementById('config-pane-access').classList.add('hidden');
     document.getElementById('config-pane-datasource').classList.add('hidden');
@@ -4004,6 +4783,7 @@ function realizarBusca() {
     const termo = document.getElementById('search-input').value;
     const filterStatus = searchFilterStatus || 'all';
     const hideAbsence = !!searchHideAbsence;
+    const hasDateFilter = hasDateRangeFilter(searchDateFilter);
     const resultsContainer = document.getElementById('search-results');
 
     if (isSubstituteSearchEnabled()) {
@@ -4011,7 +4791,7 @@ function realizarBusca() {
         return;
     }
     
-    if (!termo && filterStatus === 'all') {
+    if (!termo && filterStatus === 'all' && !hasDateFilter) {
         resultsContainer.innerHTML = '<p class="empty-state">Digite para buscar ou selecione um filtro...</p>';
         return;
     }
@@ -4031,6 +4811,7 @@ function realizarBusca() {
 
 function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
     const termoLimpo = termo.toUpperCase();
+    const dateRange = normalizeDateRange(searchDateFilter.from, searchDateFilter.to);
     
     let resultados = currentData.filter(item => {
         // Verifica se o posto está oculto
@@ -4059,8 +4840,15 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         resultados = resultados.filter(item => !item.rotulo);
     }
 
+    if (hasDateRangeFilter(dateRange)) {
+        resultados = resultados.filter(item => matchesFtDateFilterForCollaborator(item.re, dateRange));
+    }
+
     if (resultados.length === 0) {
-        resultsContainer.innerHTML = '<p class="empty-state">Nenhum resultado encontrado.</p>';
+        const dateHint = hasDateRangeFilter(dateRange)
+            ? ' com o filtro de data aplicado'
+            : '';
+        resultsContainer.innerHTML = `<p class="empty-state">Nenhum resultado encontrado${dateHint}.</p>`;
         return;
     }
 
@@ -4073,10 +4861,29 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
             ? `<div class="ft-link ${ftRelation.type}"><strong>FT:</strong> ${ftRelation.type === 'covering' ? 'Cobrindo' : 'Coberto por'} ${ftRelation.label}${ftRelation.unit ? ` • ${ftRelation.unit}` : ''}</div>`
             : '';
         const ftDetailHtml = buildFtDetailsHtml(item.re);
+        const ftWeekPreview = buildFtWeekPreviewHtmlForRe(item.re);
         const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
         const recIcon = recSummary
             ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
             : '';
+        const roleLabel = getCollaboratorRoleLabel(item);
+        const reJs = JSON.stringify(item.re || '');
+        const nameJs = JSON.stringify(item.nome || '');
+        const phoneJs = JSON.stringify(item.telefone || '');
+        const unitJs = JSON.stringify(item.posto || '');
+        const reJsAttr = escapeHtml(reJs);
+        const nameJsAttr = escapeHtml(nameJs);
+        const phoneJsAttr = escapeHtml(phoneJs);
+        const unitJsAttr = escapeHtml(unitJs);
+        const postoLabel = escapeHtml(item.posto || 'N/I');
+        const hasAddress = !!getAddressForCollaborator(item);
+        const canOpenMap = !!(item.re || item.nome || item.posto);
+        const mapBtnClass = canOpenMap
+            ? (hasAddress ? '' : 'map-icon-missing')
+            : 'disabled-icon';
+        const mapTitle = !canOpenMap
+            ? 'Colaborador indisponível'
+            : (hasAddress ? 'Ver endereço do colaborador' : 'Endereço não cadastrado no nexti');
         
         // Tratamento de Múltiplos Rótulos
         let rotulosHtml = '';
@@ -4113,21 +4920,24 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
                         ${retornoInfo}
                     </div>
                     <div class="header-right">
+                        <button class="edit-btn-icon map-icon ${mapBtnClass}" onclick="openAddressModalForCollaborator(${reJsAttr}, ${nameJsAttr}, ${unitJsAttr})" title="${mapTitle}" ${canOpenMap ? '' : 'disabled'}>${ICONS.mapPin}</button>
+                        <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal(${nameJsAttr}, ${phoneJsAttr})" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                         <button class="edit-btn-icon" onclick="openEditModal(${item.id})">${ICONS.edit}</button>
-                        <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal('${item.nome}', '${item.telefone || ''}')" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                     </div>
                 </div>
                 <div class="card-details-grid">
-                    <div><strong>RE:</strong> ${item.re}</div>
-                    <div><strong>Posto:</strong> <span class="unit-link" onclick="navigateToUnit('${item.posto}')">${item.posto}</span></div>
-                    <div><strong>Grupo:</strong> ${item.grupoLabel || 'N/I'}</div>
-                    <div><strong>Escala:</strong> ${item.tipoEscala ? `<span class="scale-badge">${item.tipoEscala}</span>` : ''}</div>
-                    <div>   
+                    <div class="card-info-line"><strong>RE:</strong> ${item.re}</div>
+                    <div class="card-info-line"><strong>Posto:</strong> <span class="unit-link" onclick="navigateToUnit(${unitJsAttr})">${postoLabel}</span></div>
+                    <div class="card-info-line"><strong>Grupo:</strong> ${item.grupoLabel || 'N/I'}</div>
+                    <div class="card-info-line"><strong>Cargo:</strong> ${escapeHtml(roleLabel)}</div>
+                    <div class="card-info-line"><strong>Escala:</strong> ${item.tipoEscala ? `<span class="scale-badge">${item.tipoEscala}</span>` : ''}</div>
+                    <div class="card-info-line">   
                         <strong>Horário:</strong> ${item.escala || 'N/I'} 
                         ${turnoInfo ? `<div style="margin-top: 4px;">${turnoInfo}</div>` : ''}
                     </div>
                     ${ftRelationHtml}
                     ${ftDetailHtml}
+                    ${ftWeekPreview}
                 </div>
             </div>
         `;
@@ -4279,7 +5089,7 @@ async function sortCandidatesByProximity(list, target, mode) {
     return { list: withDistance.concat(withoutDistance), note, modeUsed: targetInfo.modeUsed, osrmNote };
 }
 
-function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hideAbsence, osrmNote = '') {
+function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hideAbsence, osrmNote = '', dateRange = null) {
     let proximityLabel = 'Desligada';
     if (modeUsed === 'posto') proximityLabel = 'Posto de trabalho';
     if (modeUsed === 'endereco') proximityLabel = 'Endereço do colaborador';
@@ -4304,12 +5114,16 @@ function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hi
     };
     const filterLabel = filterLabelMap[filterStatus] || 'Todos';
     const hideLabel = hideAbsence ? ' | Sem afastamento' : '';
+    const normalizedRange = dateRange ? normalizeDateRange(dateRange.from, dateRange.to) : { from: '', to: '' };
+    const dateLabel = hasDateRangeFilter(normalizedRange)
+        ? ` • Data FT: ${normalizedRange.from || '...'} até ${normalizedRange.to || '...'}`
+        : '';
     return `
         <div class="result-card">
             <h4>Buscar substituto</h4>
             <div class="meta">Alvo: ${target.nome} (RE ${target.re})${unitInfo}. Proximidade: ${proximityLabel}.</div>
             ${noteText ? `<div class="meta">${noteText}</div>` : ''}
-            <div class="meta">Filtro: ${filterLabel}${hideLabel}.</div>
+            <div class="meta">Filtro: ${filterLabel}${hideLabel}${dateLabel}.</div>
             <div class="meta">Resultados: ${total}</div>
         </div>
     `;
@@ -4319,6 +5133,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
     if (!resultsContainer) return;
     const seq = ++substituteSearchSeq;
     const termUpper = (termo || '').trim().toUpperCase();
+    const dateRange = normalizeDateRange(searchDateFilter.from, searchDateFilter.to);
     const target = getSubstituteTarget();
 
     if (!target) {
@@ -4334,6 +5149,13 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
         });
         if (!results.length) {
             resultsContainer.innerHTML = '<p class="empty-state">Nenhum colaborador encontrado para fixar o alvo.</p>';
+            return;
+        }
+        if (hasDateRangeFilter(dateRange)) {
+            results = results.filter(item => matchesFtDateFilterForCollaborator(item.re, dateRange));
+        }
+        if (!results.length) {
+            resultsContainer.innerHTML = '<p class="empty-state">Nenhum colaborador no intervalo de data selecionado.</p>';
             return;
         }
         results = results.slice(0, 20);
@@ -4354,6 +5176,9 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
     }
     list = list.map(item => ({ ...item, _statusInfoSnapshot: getStatusInfo(item) }));
     list = applyAiFilters(list, filterStatus, hideAbsence);
+    if (hasDateRangeFilter(dateRange)) {
+        list = list.filter(item => matchesFtDateFilterForCollaborator(item.re, dateRange));
+    }
 
     if (!list.length) {
         resultsContainer.innerHTML = '<p class="empty-state">Nenhum resultado com os filtros atuais.</p>';
@@ -4380,11 +5205,11 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
         });
     }
 
-    const metaCard = buildSubstituteMetaCard(target, modeUsed, proximityNote, list.length, filterStatus, hideAbsence, osrmNote);
+    const metaCard = buildSubstituteMetaCard(target, modeUsed, proximityNote, list.length, filterStatus, hideAbsence, osrmNote, dateRange);
     resultsContainer.innerHTML = metaCard + list.map(item => {
         const statusInfo = item._statusInfoSnapshot || getStatusInfo(item);
         const addressOk = !!getAddressForCollaborator(item);
-        const badgeHtml = `<span class="address-status-badge ${addressOk ? 'ok' : 'missing'}">${addressOk ? 'Endereço OK' : 'Sem endereço'}</span>`;
+        const badgeHtml = `<span class="address-status-badge ${addressOk ? 'ok' : 'missing'}">${addressOk ? 'Endereço OK' : 'endereço não cadastrado no nexti'}</span>`;
         let sourceText = 'desligada';
         if (modeUsed !== 'off') {
             const source = item._distanceSource || modeUsed;
@@ -4418,7 +5243,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
 function getFtTodayByUnit(unitName, groupKey) {
     const today = getTodayKey();
     const target = normalizeUnitKey(unitName);
-    return ftLaunches.filter(item => {
+    return getFtOperationalItems(ftLaunches).filter(item => {
         if (!isFtActive(item)) return false;
         if (!item.date || item.date !== today) return false;
         if (groupKey && groupKey !== 'all' && item.group && item.group !== groupKey) return false;
@@ -4433,6 +5258,7 @@ function renderizarUnidades() {
     const groupFilter = document.getElementById('unit-group-filter')?.value || 'all';
     const statusFilter = document.getElementById('unit-status-filter')?.value || 'all';
     const labelFilter = document.getElementById('unit-label-filter')?.value || 'all';
+    const dateRange = normalizeDateRange(unitDateFilter.from, unitDateFilter.to);
     
     // Atualizar Estatísticas
     atualizarEstatisticas(currentData, groupFilter);
@@ -4511,44 +5337,60 @@ function renderizarUnidades() {
         const ftBadge = ftTodayItems.length
             ? `<span class="unit-ft-badge">FT hoje: ${ftTodayItems.length}</span>`
             : '';
+        const weekPreview = buildFtWeekPreviewHtmlForUnit(posto, groupFilter === 'all' ? '' : groupFilter);
+        const unitRangeItems = hasDateRangeFilter(dateRange)
+            ? getFtItemsForUnitInRange(posto, dateRange.from, dateRange.to, groupFilter === 'all' ? '' : groupFilter)
+            : [];
+        if (hasDateRangeFilter(dateRange) && !unitRangeItems.length) return '';
+        const applyDateFilter = (list) => {
+            if (!hasDateRangeFilter(dateRange)) return list;
+            return list.filter(p => matchesFtDateFilterForCollaborator(p.re, dateRange));
+        };
+        const filteredPlantaoWithDate = applyDateFilter(filteredPlantao);
+        const filteredFolgaWithDate = applyDateFilter(filteredFolga);
+        if (filteredPlantaoWithDate.length === 0 && filteredFolgaWithDate.length === 0) return '';
+
         const postoJs = JSON.stringify(posto);
+        const postoJsAttr = escapeHtml(postoJs);
+        const postoAttr = escapeHtml(posto);
         return `
-            <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}" data-unit-name="${posto}">
+            <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}" data-unit-name="${postoAttr}">
                 <h3 class="unit-title">
-                    <span>${posto} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${ftBadge} ${avisosBadge} ${lembretesBadge}</span>
+                    <span>${postoAttr} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${ftBadge} ${avisosBadge} ${lembretesBadge}</span>
                     <div class="unit-actions">
-                        <button class="action-btn" onclick="openAddressModal(${postoJs})" title="Endereço">
+                        <button class="action-btn" onclick="openAddressModal(${postoJsAttr})" title="Endereço">
                             ${ICONS.mapPin}
                         </button>
-                        <button class="action-btn" onclick="openAvisosForUnit('${posto}')" title="Avisos da unidade">
+                        <button class="action-btn" onclick="openAvisosForUnit(${postoJsAttr})" title="Avisos da unidade">
                             ${ICONS.bell}
                         </button>
-                        <button class="action-btn" onclick="exportUnitPrompt('${posto}')" title="Exportar unidade">
+                        <button class="action-btn" onclick="exportUnitPrompt(${postoJsAttr})" title="Exportar unidade">
                             ${ICONS.download}
                         </button>
-                        <button class="action-btn" onclick="openEditUnitModal('${posto}')" title="Editar Unidade">
+                        <button class="action-btn" onclick="openEditUnitModal(${postoJsAttr})" title="Editar Unidade">
                             ${ICONS.settings}
                         </button>
-                        <button class="action-btn" onclick="toggleUnitMinimize('${posto}')" title="${isMinimized ? 'Expandir' : 'Minimizar'}">
+                        <button class="action-btn" onclick="toggleUnitMinimize(${postoJsAttr})" title="${isMinimized ? 'Expandir' : 'Minimizar'}">
                             ${isMinimized ? ICONS.chevronDown : ICONS.chevronUp}
                         </button>
-                        <button class="action-btn ${isHidden ? 'hidden-unit' : ''}" onclick="toggleUnitVisibility('${posto}')" title="${isHidden ? 'Mostrar na busca' : 'Ocultar da busca'}">
+                        <button class="action-btn ${isHidden ? 'hidden-unit' : ''}" onclick="toggleUnitVisibility(${postoJsAttr})" title="${isHidden ? 'Mostrar na busca' : 'Ocultar da busca'}">
                             ${isHidden ? ICONS.eyeOff : ICONS.eye}
                         </button>
                     </div>
                 </h3>
+                ${weekPreview}
                 
                 <div class="unit-teams-container ${isMinimized ? 'hidden' : ''}">
                     <!-- Time Plantão -->
                     <div class="team-block team-plantao">
-                        <h4 class="team-header header-plantao">EM PLANTÃO (${filteredPlantao.length})</h4>
-                        ${renderUnitTable(filteredPlantao)}
+                        <h4 class="team-header header-plantao">EM PLANTÃO (${filteredPlantaoWithDate.length})</h4>
+                        ${renderUnitTable(filteredPlantaoWithDate)}
                     </div>
 
                     <!-- Time Folga -->
                     <div class="team-block team-folga">
-                        <h4 class="team-header header-folga">NA FOLGA (${filteredFolga.length})</h4>
-                        ${renderUnitTable(filteredFolga)}
+                        <h4 class="team-header header-folga">NA FOLGA (${filteredFolgaWithDate.length})</h4>
+                        ${renderUnitTable(filteredFolgaWithDate)}
                     </div>
                 </div>
             </div>
@@ -5371,7 +6213,6 @@ async function renderReciclagem() {
         }
         return true;
     });
-    renderReciclagemSummary(filteredByDetail);
     if (typeCountsEl) {
         const typeCounts = {};
         if (reciclagemTab === 'colab') {
@@ -5759,33 +6600,136 @@ function closeHelpModal() {
     document.getElementById('help-modal')?.classList.add('hidden');
 }
 
+function setAddressModalModeUi(mode) {
+    const isCollab = mode === 'collab';
+    const title = document.getElementById('address-modal-title');
+    const label = document.getElementById('address-modal-search-label');
+    const input = document.getElementById('address-search');
+    if (title) title.textContent = isCollab ? 'Endereço do Colaborador' : 'Endereços das Unidades';
+    if (label) label.textContent = isCollab ? 'Buscar colaborador' : 'Buscar unidade';
+    if (input) input.placeholder = isCollab ? 'Digite nome, RE ou unidade...' : 'Digite a unidade...';
+}
+
 function openAddressModal(unitName = '') {
+    openAddressModalForUnit(unitName);
+}
+
+function openAddressModalForUnit(unitName = '') {
+    addressModalState = {
+        mode: 'unit',
+        filter: String(unitName || ''),
+        collabRe: '',
+        collabName: '',
+        unitName: String(unitName || '')
+    };
     const modal = document.getElementById('address-modal');
     if (!modal) return;
     modal.classList.remove('hidden');
+    setAddressModalModeUi('unit');
     const input = document.getElementById('address-search');
     if (input) {
-        input.value = unitName || '';
+        input.value = addressModalState.filter;
         if (!input.dataset.bound) {
-            input.addEventListener('input', () => renderAddressList(input.value));
+            input.addEventListener('input', () => {
+                addressModalState.filter = input.value || '';
+                renderAddressList(addressModalState.filter);
+            });
             input.dataset.bound = '1';
         }
         setTimeout(() => input.focus(), 0);
     }
-    renderAddressList(unitName || '');
+    renderAddressList(addressModalState.filter);
+}
+
+function openAddressModalForCollaborator(collabRe = '', collabName = '', unitName = '') {
+    addressModalState = {
+        mode: 'collab',
+        filter: String(collabName || collabRe || unitName || ''),
+        collabRe: String(collabRe || ''),
+        collabName: String(collabName || ''),
+        unitName: String(unitName || '')
+    };
+    const modal = document.getElementById('address-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    setAddressModalModeUi('collab');
+    const input = document.getElementById('address-search');
+    if (input) {
+        input.value = addressModalState.filter;
+        if (!input.dataset.bound) {
+            input.addEventListener('input', () => {
+                addressModalState.filter = input.value || '';
+                renderAddressList(addressModalState.filter);
+            });
+            input.dataset.bound = '1';
+        }
+        setTimeout(() => input.focus(), 0);
+    }
+    renderAddressList(addressModalState.filter);
+    loadCollaboratorAddressDb().then(() => {
+        if (addressModalState.mode === 'collab') {
+            renderAddressList(addressModalState.filter);
+        }
+    }).catch(() => {});
 }
 
 function closeAddressModal() {
     document.getElementById('address-modal')?.classList.add('hidden');
 }
 
-function buildAddressEntries() {
+function buildAddressEntriesForUnit() {
     const units = [...new Set(currentData.map(d => d.posto).filter(Boolean))]
         .sort((a, b) => a.localeCompare(b, 'pt-BR'));
     return units.map(unit => {
         const address = getAddressForUnit(unit) || '';
-        return { unit, address };
+        return {
+            kind: 'unit',
+            title: unit,
+            subtitle: '',
+            unit,
+            address,
+            mapQuery: address || unit,
+            portalQuery: unit
+        };
     });
+}
+
+function buildAddressEntriesForCollaborator() {
+    const list = [];
+    const seen = new Set();
+    const source = []
+        .concat(currentData || [])
+        .concat(allCollaboratorsCache.items || []);
+    source.forEach(item => {
+        if (!item) return;
+        const re = String(item.re || '').trim();
+        const reKey = normalizeReKey(re);
+        const name = String(item.nome || '').trim();
+        const unit = String(item.posto || '').trim();
+        const uniqueKey = reKey || `${normalizeUnitKey(name)}:${normalizeUnitKey(unit)}`;
+        if (!uniqueKey || seen.has(uniqueKey)) return;
+        seen.add(uniqueKey);
+        const address = getAddressForCollaborator(item) || '';
+        const title = name ? `${name}${re ? ` (${re})` : ''}` : (re ? `RE ${re}` : 'Colaborador');
+        list.push({
+            kind: 'collab',
+            title,
+            subtitle: unit ? `Unidade: ${unit}` : '',
+            unit,
+            collabRe: re,
+            collabName: name,
+            address,
+            mapQuery: address || unit || name || re,
+            portalQuery: address || `${name} ${unit}`.trim() || re
+        });
+    });
+    return list.sort((a, b) => a.title.localeCompare(b.title, 'pt-BR'));
+}
+
+function buildAddressEntries() {
+    return addressModalState.mode === 'collab'
+        ? buildAddressEntriesForCollaborator()
+        : buildAddressEntriesForUnit();
 }
 
 function renderAddressList(term = '') {
@@ -5793,30 +6737,54 @@ function renderAddressList(term = '') {
     if (!list) return;
     const entries = buildAddressEntries();
     const filter = normalizeUnitKey(term || '');
-    const filtered = filter
-        ? entries.filter(e => normalizeUnitKey(e.unit).includes(filter) || normalizeUnitKey(e.address || '').includes(filter))
+    const normalizedFilter = filter.trim();
+    let filtered = normalizedFilter
+        ? entries.filter(e => {
+            const haystack = [
+                e.title,
+                e.subtitle,
+                e.unit,
+                e.address,
+                e.collabRe,
+                e.collabName
+            ].join(' ');
+            return normalizeUnitKey(haystack).includes(normalizedFilter);
+        })
         : entries;
+    if (addressModalState.mode === 'collab' && !normalizedFilter && addressModalState.collabRe) {
+        const selected = entries.filter(e => matchesRe(e.collabRe, addressModalState.collabRe));
+        if (selected.length) filtered = selected;
+    }
     if (!filtered.length) {
-        list.innerHTML = `<p class="empty-state">Nenhuma unidade encontrada.</p>`;
+        list.innerHTML = `<p class="empty-state">${addressModalState.mode === 'collab' ? 'Nenhum colaborador encontrado.' : 'Nenhuma unidade encontrada.'}</p>`;
         return;
     }
     list.innerHTML = filtered.map(e => {
         const addr = e.address || '';
-        const addrHtml = addr ? addr : 'Endereço não encontrado.';
+        const addrHtml = addr ? escapeHtml(addr) : 'Endereço não cadastrado no nexti';
         const addrJs = JSON.stringify(addr);
-        const unitJs = JSON.stringify(e.unit);
+        const mapQuery = e.mapQuery || '';
+        const mapJs = JSON.stringify(mapQuery);
+        const portalQuery = e.portalQuery || '';
+        const portalJs = JSON.stringify(portalQuery);
+        const hasMap = !!mapQuery;
+        const hasPortal = !!portalQuery;
         const hasAddress = !!addr;
+        const subtitleHtml = e.subtitle ? `<div class="address-subtitle">${escapeHtml(e.subtitle)}</div>` : '';
         return `
             <div class="address-card">
                 <div class="address-header">
-                    <div class="address-title">${e.unit}</div>
+                    <div>
+                        <div class="address-title">${escapeHtml(e.title || '')}</div>
+                        ${subtitleHtml}
+                    </div>
                     ${hasAddress ? `<span class="address-badge">OK</span>` : `<span class="address-badge missing">Sem endereço</span>`}
                 </div>
                 <div class="address-text">${addrHtml}</div>
-                <div class="address-actions">
+                <div class="address-actions menu-actions-row">
                     <button class="btn btn-secondary btn-small" onclick="copyAddressText(${addrJs})" ${hasAddress ? '' : 'disabled'}>Copiar</button>
-                    <button class="btn btn-secondary btn-small" onclick="openAddressInMaps(${addrJs}, ${unitJs})">Ver no mapa</button>
-                    <button class="btn btn-secondary btn-small" onclick="openAddressPortal(${unitJs})">Portal</button>
+                    <button class="btn btn-secondary btn-small" onclick="openAddressInMaps(${mapJs}, '')" ${hasMap ? '' : 'disabled'}>Ver no mapa</button>
+                    <button class="btn btn-secondary btn-small" onclick="openAddressPortal(${portalJs})" ${hasPortal ? '' : 'disabled'}>Portal</button>
                 </div>
             </div>
         `;
@@ -5966,9 +6934,10 @@ async function renderRouteMap(origin, dest, labels = {}, seq = 0) {
     if (metaEl) metaEl.textContent = `Origem: ${labels.originLabel || ''} • Destino: ${labels.destLabel || ''} • ${line}`;
 }
 
-function openAddressPortal(unitName) {
+function openAddressPortal(query = '') {
     const base = 'https://gustauvm.github.io/ENDERECOS-DUNAMIS/';
-    const url = unitName ? `${base}?q=${encodeURIComponent(unitName)}` : base;
+    const q = String(query || '').trim();
+    const url = q ? `${base}?q=${encodeURIComponent(q)}` : base;
     window.open(url, '_blank');
 }
 
@@ -6152,6 +7121,12 @@ function renderUnitTable(lista) {
                             ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
                             : '';
                         const ftDetailHtml = buildFtDetailsHtml(p.re);
+                        const ftWeekPreview = buildFtWeekPreviewHtmlForRe(p.re);
+                        const roleLabel = getCollaboratorRoleLabel(p);
+                        const nameJs = JSON.stringify(p.nome || '');
+                        const phoneJs = JSON.stringify(p.telefone || '');
+                        const nameJsAttr = escapeHtml(nameJs);
+                        const phoneJsAttr = escapeHtml(phoneJs);
                         return `
                             <tr class="${homenageado ? 'homenageado-row' : ''}">
                                 <td>
@@ -6168,7 +7143,9 @@ function renderUnitTable(lista) {
                                             `).join('')}
                                             ${p.rotuloFim ? `<span class="mini-date">Até ${formatDate(p.rotuloFim)}</span>` : ''}
                                         ` : ''}
+                                        <div class="unit-colab-meta"><strong>Cargo:</strong> ${escapeHtml(roleLabel)}</div>
                                         ${ftDetailHtml}
+                                        ${ftWeekPreview}
                                     </div>
                                 </td>
                                 <td>${p.re}</td>
@@ -6179,7 +7156,7 @@ function renderUnitTable(lista) {
                                 </td>
                                 <td style="text-align: center;">
                                     <button class="edit-btn-icon small" onclick="openEditModal(${p.id})">${ICONS.edit}</button>
-                                    <button class="edit-btn-icon small ${p.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal('${p.nome}', '${p.telefone || ''}')" title="${p.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
+                                    <button class="edit-btn-icon small ${p.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal(${nameJsAttr}, ${phoneJsAttr})" title="${p.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                                 </td>
                             </tr>
                         `;
@@ -7231,10 +8208,234 @@ function isFtToday(item) {
     return item && item.date === getTodayKey();
 }
 
+function normalizeDateRange(from, to) {
+    const fromKey = normalizeFtDateKey(from) || '';
+    const toKey = normalizeFtDateKey(to) || '';
+    if (fromKey && toKey && fromKey > toKey) {
+        return { from: toKey, to: fromKey };
+    }
+    return { from: fromKey, to: toKey };
+}
+
+function hasDateRangeFilter(range = {}) {
+    const normalized = normalizeDateRange(range.from, range.to);
+    return !!(normalized.from || normalized.to);
+}
+
+function isDateInsideRange(dateKey, from, to) {
+    if (!dateKey) return false;
+    if (from && dateKey < from) return false;
+    if (to && dateKey > to) return false;
+    return true;
+}
+
+function getFtStatusRank(status) {
+    if (status === 'launched') return 3;
+    if (status === 'submitted') return 2;
+    if (status === 'pending') return 1;
+    return 0;
+}
+
+function getFtPreviewCode(status) {
+    if (status === 'launched') return 'V';
+    if (status === 'submitted') return 'E';
+    if (status === 'pending') return 'D';
+    return '-';
+}
+
+function getFtPreviewLabel(status) {
+    if (status === 'launched') return 'Lançada no Nexti';
+    if (status === 'submitted') return 'Confirmada';
+    if (status === 'pending') return 'Pendente';
+    return 'Sem FT';
+}
+
+function getDateKeyWithOffset(baseDateKey, offsetDays) {
+    const base = normalizeFtDateKey(baseDateKey) || getTodayKey();
+    const date = new Date(`${base}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return base;
+    date.setDate(date.getDate() + offsetDays);
+    return toDateInputValue(date);
+}
+
+function getWeekStartMonday(dateKey = '') {
+    const base = normalizeFtDateKey(dateKey) || getTodayKey();
+    const date = new Date(`${base}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return getTodayKey();
+    const dayIndex = (date.getDay() + 6) % 7; // segunda=0 ... domingo=6
+    date.setDate(date.getDate() - dayIndex);
+    return toDateInputValue(date);
+}
+
+function getWeekdayShortPt(index) {
+    const labels = ['SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB', 'DOM'];
+    return labels[index] || '';
+}
+
+function resolveFtPreviewFromItems(items) {
+    if (!items || !items.length) {
+        return { status: '', code: '-', count: 0, label: 'Sem FT' };
+    }
+    let selected = '';
+    let rank = -1;
+    items.forEach(item => {
+        const value = getFtStatusRank(item?.status);
+        if (value > rank) {
+            rank = value;
+            selected = item?.status || '';
+        }
+    });
+    return {
+        status: selected,
+        code: getFtPreviewCode(selected),
+        count: items.length,
+        label: getFtPreviewLabel(selected)
+    };
+}
+
+function getFtItemsForReInRange(re, fromKey, toKey) {
+    if (!re) return [];
+    return getFtOperationalItems(ftLaunches).filter(item => {
+        const dateKey = normalizeFtDateKey(item?.date);
+        if (!isDateInsideRange(dateKey, fromKey, toKey)) return false;
+        return matchesRe(item?.collabRe, re) || matchesRe(item?.coveringRe, re);
+    });
+}
+
+function getFtItemsForUnitInRange(unitName, fromKey, toKey, groupKey = '') {
+    const target = normalizeUnitKey(unitName);
+    if (!target) return [];
+    return getFtOperationalItems(ftLaunches).filter(item => {
+        const dateKey = normalizeFtDateKey(item?.date);
+        if (!isDateInsideRange(dateKey, fromKey, toKey)) return false;
+        if (groupKey && groupKey !== 'all' && item?.group && item.group !== groupKey) return false;
+        const unit = normalizeUnitKey(item?.unitTarget || item?.unitCurrent || '');
+        return unit && unit === target;
+    });
+}
+
+function resolveCollaboratorByRe(re) {
+    return currentData.find(c => matchesRe(c.re, re))
+        || (allCollaboratorsCache.items || []).find(c => matchesRe(c.re, re))
+        || null;
+}
+
+function verificarEscalaPorData(turma, dateKey) {
+    const dayKey = normalizeFtDateKey(dateKey);
+    if (!dayKey) return false;
+    const date = new Date(`${dayKey}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return false;
+    const dayNumber = date.getDate();
+    const isImpar = dayNumber % 2 !== 0;
+    let trabalha = null;
+    if (turma == 1) trabalha = isImpar;
+    if (turma == 2) trabalha = !isImpar;
+    if (trabalha === null) return false;
+    if (escalaInvertida) trabalha = !trabalha;
+    return trabalha;
+}
+
+function getDutyForecastForDate(collab, dateKey) {
+    if (!collab) return { code: '-', label: 'Sem informação', className: 'unknown' };
+    const key = normalizeFtDateKey(dateKey);
+    if (!key) return { code: '-', label: 'Sem informação', className: 'unknown' };
+    const labels = String(collab.rotulo || '')
+        .split(',')
+        .map(v => v.trim())
+        .filter(Boolean);
+    if (labels.length) {
+        const start = normalizeFtDateKey(collab.rotuloInicio);
+        const end = normalizeFtDateKey(collab.rotuloFim);
+        if (start && end && isDateInsideRange(key, start, end)) {
+            if (labels.includes('FT')) return { code: 'P', label: 'Plantão extra (FT)', className: 'plantao' };
+            return { code: 'F', label: 'Indisponível no período', className: 'folga' };
+        }
+    }
+    const onDuty = verificarEscalaPorData(collab.turma, key);
+    return onDuty
+        ? { code: 'P', label: 'Plantão previsto', className: 'plantao' }
+        : { code: 'F', label: 'Folga prevista', className: 'folga' };
+}
+
+function buildFtWeekPreviewHtmlForRe(re, options = {}) {
+    const start = getWeekStartMonday(options.startDate);
+    const days = 7;
+    const collab = resolveCollaboratorByRe(re);
+    const chips = [];
+    for (let i = 0; i < days; i++) {
+        const dayKey = getDateKeyWithOffset(start, i);
+        const date = new Date(`${dayKey}T00:00:00`);
+        const weekday = getWeekdayShortPt(i);
+        const dayNumber = Number.isNaN(date.getTime()) ? '--' : String(date.getDate()).padStart(2, '0');
+        const duty = getDutyForecastForDate(collab, dayKey);
+        const items = getFtItemsForReInRange(re, dayKey, dayKey);
+        const preview = resolveFtPreviewFromItems(items);
+        const css = preview.code === 'V' ? 'v' : (preview.code === 'E' ? 'e' : (preview.code === 'D' ? 'd' : 'none'));
+        const title = `${formatFtDate(dayKey)} • ${duty.label}: ${preview.count ? `${preview.count} FT (${preview.label})` : 'Sem FT'}`;
+        chips.push(`
+            <span class="ft-week-chip ${css}" title="${title}">
+                <span class="ft-week-day">${weekday} ${dayNumber}</span>
+                <span class="ft-week-duty ${duty.className}">${duty.code}</span>
+                ${preview.count ? `<span class="ft-week-ft ${css}">FT${preview.count > 1 ? ` ${preview.count}` : ''}</span>` : ''}
+            </span>
+        `);
+    }
+    return `
+        <div class="ft-week-preview">
+            <div class="ft-week-track">${chips.join('')}</div>
+        </div>
+    `;
+}
+
+function buildFtWeekPreviewHtmlForUnit(unitName, groupKey = '', options = {}) {
+    const start = getWeekStartMonday(options.startDate);
+    const days = 7;
+    const chips = [];
+    for (let i = 0; i < days; i++) {
+        const dayKey = getDateKeyWithOffset(start, i);
+        const date = new Date(`${dayKey}T00:00:00`);
+        const weekday = getWeekdayShortPt(i);
+        const dayNumber = Number.isNaN(date.getTime()) ? '--' : String(date.getDate()).padStart(2, '0');
+        const items = getFtItemsForUnitInRange(unitName, dayKey, dayKey, groupKey);
+        const preview = resolveFtPreviewFromItems(items);
+        const css = preview.code === 'V' ? 'v' : (preview.code === 'E' ? 'e' : (preview.code === 'D' ? 'd' : 'none'));
+        const title = `${formatFtDate(dayKey)}: ${preview.count ? `${preview.count} FT (${preview.label})` : 'Sem FT'}`;
+        chips.push(`
+            <span class="ft-week-chip ${css}" title="${title}">
+                <span class="ft-week-day">${weekday} ${dayNumber}</span>
+                ${preview.count ? `<span class="ft-week-ft ${css}">FT${preview.count > 1 ? ` ${preview.count}` : ''}</span>` : ''}
+            </span>
+        `);
+    }
+    return `
+        <div class="ft-week-preview unit">
+            <div class="ft-week-track">${chips.join('')}</div>
+        </div>
+    `;
+}
+
+function getCollaboratorAddressLabel(collab) {
+    const address = getAddressForCollaborator(collab);
+    return address || 'endereço não cadastrado no nexti';
+}
+
+function getCollaboratorRoleLabel(collab) {
+    const role = (collab?.cargo || '').trim();
+    return role || 'Cargo não informado';
+}
+
+function matchesFtDateFilterForCollaborator(re, range = {}) {
+    const normalized = normalizeDateRange(range.from, range.to);
+    if (!hasDateRangeFilter(normalized)) return true;
+    const items = getFtItemsForReInRange(re, normalized.from, normalized.to);
+    return items.length > 0;
+}
+
 function refreshFtLabelsForToday() {
     const today = getTodayKey();
+    const sourceItems = getFtOperationalItems(ftLaunches);
     const activeCoverers = new Set(
-        ftLaunches
+        sourceItems
             .filter(item => isFtActive(item) && item.date === today)
             .map(item => normalizeFtRe(item.collabRe))
             .filter(Boolean)
@@ -7265,7 +8466,7 @@ function refreshFtLabelsForToday() {
         }
     });
     if (changed) saveLocalState();
-    ftLaunches
+    sourceItems
         .filter(item => isFtActive(item) && item.date === today)
         .forEach(item => applyFtToCollaborator(item));
 }
@@ -7274,7 +8475,7 @@ function getFtRelationsForRe(re, options = {}) {
     if (!re) return [];
     const onlyToday = options.onlyToday !== false;
     const today = getTodayKey();
-    const items = ftLaunches.filter(item => {
+    const items = getFtOperationalItems(ftLaunches).filter(item => {
         if (!isFtActive(item)) return false;
         if (onlyToday) {
             if (!item.date || item.date !== today) return false;
@@ -7333,10 +8534,31 @@ function renderAiResultCard(item, target, options = {}) {
         ? `<div class="ft-link ${ftRelation.type}"><strong>FT:</strong> ${ftRelation.type === 'covering' ? 'Cobrindo' : 'Coberto por'} ${ftRelation.label}${ftRelation.unit ? ` • ${ftRelation.unit}` : ''}</div>`
         : '';
     const ftDetailHtml = buildFtDetailsHtml(item.re);
+    const ftWeekPreview = buildFtWeekPreviewHtmlForRe(item.re);
     const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
     const recIcon = recSummary
         ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
         : '';
+    const roleLabel = getCollaboratorRoleLabel(item);
+    const reJs = JSON.stringify(item.re || '');
+    const nameJs = JSON.stringify(item.nome || '');
+    const phoneJs = JSON.stringify(item.telefone || '');
+    const unitJs = JSON.stringify(item.posto || '');
+    const reJsAttr = escapeHtml(reJs);
+    const nameJsAttr = escapeHtml(nameJs);
+    const phoneJsAttr = escapeHtml(phoneJs);
+    const unitJsAttr = escapeHtml(unitJs);
+    const postoLabel = escapeHtml(item.posto || 'N/I');
+    const hasAddress = !!getAddressForCollaborator(item);
+    const canOpenMap = !!(item.re || item.nome || item.posto);
+    const mapBtnClass = canOpenMap
+        ? (hasAddress ? '' : 'map-icon-missing')
+        : 'disabled-icon';
+    const mapTitle = !canOpenMap
+        ? 'Colaborador indisponível'
+        : (hasAddress ? 'Ver endereço do colaborador' : 'Endereço não cadastrado no nexti');
+    const canEdit = SiteAuth.mode === 'edit' && item?.id != null;
+    const editTargetId = item?.id != null ? item.id : -1;
     let rotulosHtml = '';
     if (item.rotulo) {
         const rotulos = item.rotulo.split(',');
@@ -7382,20 +8604,24 @@ function renderAiResultCard(item, target, options = {}) {
                     ${headerBadges}
                     ${routeBadge}
                     ${distanceBadge}
-                    <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal('${item.nome}', '${item.telefone || ''}')" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
+                    <button class="edit-btn-icon map-icon ${mapBtnClass}" onclick="openAddressModalForCollaborator(${reJsAttr}, ${nameJsAttr}, ${unitJsAttr})" title="${mapTitle}" ${canOpenMap ? '' : 'disabled'}>${ICONS.mapPin}</button>
+                    <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal(${nameJsAttr}, ${phoneJsAttr})" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
+                    <button class="edit-btn-icon" onclick="openEditModal(${editTargetId})" ${canEdit ? '' : 'disabled'}>${ICONS.edit}</button>
                 </div>
             </div>
             <div class="card-details-grid">
-                <div><strong>RE:</strong> ${item.re}</div>
-                <div><strong>Posto:</strong> <span class="unit-link" onclick="navigateToUnit('${item.posto}')">${item.posto}</span></div>
-                <div><strong>Grupo:</strong> ${item.grupoLabel || 'N/I'}</div>
-                <div><strong>Escala:</strong> ${item.tipoEscala ? `<span class="scale-badge">${item.tipoEscala}</span>` : ''}</div>
-                <div>
+                <div class="card-info-line"><strong>RE:</strong> ${item.re}</div>
+                <div class="card-info-line"><strong>Posto:</strong> <span class="unit-link" onclick="navigateToUnit(${unitJsAttr})">${postoLabel}</span></div>
+                <div class="card-info-line"><strong>Grupo:</strong> ${item.grupoLabel || 'N/I'}</div>
+                <div class="card-info-line"><strong>Cargo:</strong> ${escapeHtml(roleLabel)}</div>
+                <div class="card-info-line"><strong>Escala:</strong> ${item.tipoEscala ? `<span class="scale-badge">${item.tipoEscala}</span>` : ''}</div>
+                <div class="card-info-line">
                     <strong>Horário:</strong> ${item.escala || 'N/I'}
                     ${turnoInfo ? `<div style="margin-top: 4px;">${turnoInfo}</div>` : ''}
                 </div>
                 ${ftRelationHtml}
                 ${ftDetailHtml}
+                ${ftWeekPreview}
                 <div class="ai-reason">${reason}${reasonNote}</div>
             </div>
             ${actionHtml ? `<div class="result-actions">${actionHtml}</div>` : ''}
@@ -9788,23 +11014,12 @@ function mergeAvisosFromShadow(remoteAvisos) {
 }
 
 function mergeFtLaunchesFromShadow(remoteLaunches) {
-    const byId = {};
-    ftLaunches.forEach(a => { byId[a.id] = a; });
-    remoteLaunches.forEach(a => {
-        const existing = byId[a.id];
-        if (!existing) {
-            byId[a.id] = a;
-            return;
-        }
-        const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
-        const eTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
-        byId[a.id] = aTime >= eTime ? a : existing;
-    });
-    let merged = Object.values(byId);
+    const mergedInput = ([]).concat(ftLaunches || [], remoteLaunches || []);
+    let merged = normalizeFtLaunchEntries(mergedInput);
     if (ftRemovedIds.size) {
         merged = merged.filter(item => !ftRemovedIds.has(item.id));
     }
-    ftLaunches = merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    ftLaunches = merged.sort((a, b) => getFtItemUpdatedTime(b) - getFtItemUpdatedTime(a));
     saveFtLaunches(true);
 }
 
@@ -9928,11 +11143,24 @@ function startReminderMonitor() {
 // ==========================================================================
 
 function switchLancamentosTab(tab) {
-    if (tab === 'novo' && !isAdminRole()) {
-        showToast("Apenas admins podem criar lançamentos.", "error");
-        tab = 'dashboard';
+    if (currentLancamentosMode === 'troca') {
+        currentLancamentosTab = 'diaria';
+        renderLancamentos();
+        return;
+    }
+    if (tab === 'novo') {
+        showToast("Fluxo manual de lançamento está desativado. Use a planilha FT atual.", "info");
+        tab = 'diaria';
     }
     currentLancamentosTab = tab;
+    renderLancamentos();
+}
+
+function switchLancamentosMode(mode = 'ft') {
+    currentLancamentosMode = mode === 'troca' ? 'troca' : 'ft';
+    if (currentLancamentosTab === 'novo') {
+        currentLancamentosTab = 'diaria';
+    }
     renderLancamentos();
 }
 
@@ -10200,8 +11428,19 @@ function formatFtDateTime(value) {
     }
 }
 
+function isFtSheetSource(item) {
+    if (!item) return false;
+    if (item.source === 'sheet') return true;
+    const id = String(item.id || '');
+    return !item.source && id.startsWith('ft-sheet-');
+}
+
+function getFtOperationalItems(list = ftLaunches) {
+    return (list || []).filter(isFtSheetSource);
+}
+
 function applyFtFilters(list) {
-    let items = list.slice();
+    let items = getFtOperationalItems(list);
     if (ftFilter.from || ftFilter.to) {
         items = items.filter(i => {
             const key = normalizeFtDateKey(i?.date);
@@ -10229,22 +11468,20 @@ function getFtCollabLabel(item) {
 }
 
 function getFtStatusLabel(item) {
-    const isSheet = item?.source === 'sheet';
     if (item?.status === 'launched') return 'LANÇADO NO NEXTI';
-    if (item?.status === 'submitted') return 'CONFIRMADO (Forms)';
-    return isSheet ? 'PENDENTE (PLANILHA)' : 'AGUARDANDO CONFIRMAÇÃO';
+    if (item?.status === 'submitted') return 'CONFIRMADO';
+    return 'PENDENTE';
 }
 
 function getFtSourceInfo(item, options = {}) {
-    const isSheet = item?.source === 'sheet';
+    const isSheet = isFtSheetSource(item);
     if (isSheet) {
         const group = item?.sourceGroup || item?.group || '';
         const showGroup = options.showGroup !== false;
-        const label = showGroup && group ? `Planilha • ${String(group).toUpperCase()}` : 'Planilha';
+        const label = showGroup && group ? `Planilha FT • ${String(group).toUpperCase()}` : 'Planilha FT';
         return { label, className: 'source-sheet' };
     }
-    if (item?.formLink) return { label: 'Forms', className: 'source-forms' };
-    return { label: 'Manual', className: 'source-manual' };
+    return { label: 'Origem antiga', className: 'source-manual' };
 }
 
 function buildFtHistorySearchText(item) {
@@ -10418,12 +11655,22 @@ function toggleFtPendingOnly() {
     renderLancamentos();
 }
 
+function syncLancamentosSheets() {
+    syncFtSheetLaunches(false);
+    syncTrocaSheetLaunches(false);
+}
+
 function updateLancamentosHeader() {
     const statusEl = document.getElementById('lancamentos-sync-status');
     const lastEl = document.getElementById('lancamentos-last-sync');
+    const isSyncing = ftSheetSyncInProgress || trocaSheetSyncInProgress;
+    const ftSyncTs = ftLastSyncAt ? Date.parse(ftLastSyncAt) : 0;
+    const trocaSyncTs = trocaLastSyncAt ? Date.parse(trocaLastSyncAt) : 0;
+    const lastSyncTs = Math.max(ftSyncTs || 0, trocaSyncTs || 0);
+    const lastSyncValue = lastSyncTs ? new Date(lastSyncTs).toISOString() : '';
     if (statusEl) {
-        if (ftSheetSyncInProgress) {
-            statusEl.textContent = 'Sincronizando...';
+        if (isSyncing) {
+            statusEl.textContent = 'Sincronizando planilhas...';
             statusEl.classList.add('syncing');
         } else {
             statusEl.textContent = 'Auto sync ativa';
@@ -10431,10 +11678,10 @@ function updateLancamentosHeader() {
         }
     }
     if (lastEl) {
-        lastEl.textContent = ftLastSyncAt ? formatFtDateTime(ftLastSyncAt) : '—';
+        lastEl.textContent = lastSyncValue ? formatFtDateTime(lastSyncValue) : '—';
     }
     document.querySelectorAll('.ft-sync-info').forEach(el => {
-        el.textContent = ftLastSyncAt ? formatFtDateTime(ftLastSyncAt) : '—';
+        el.textContent = lastSyncValue ? formatFtDateTime(lastSyncValue) : '—';
     });
 }
 
@@ -10442,8 +11689,12 @@ function updateLancamentosTabs() {
     const items = applyFtFilters(ftLaunches);
     const total = items.length;
     const pending = items.filter(i => i.status === 'pending').length;
+    const today = getTodayKey();
+    const todayCount = getFtOperationalItems(ftLaunches).filter(i => normalizeFtDateKey(i?.date) === today).length;
+    const todayEl = document.getElementById('lancamentos-tab-today');
     const totalEl = document.getElementById('lancamentos-tab-total');
     const pendingEl = document.getElementById('lancamentos-tab-pending');
+    if (todayEl) todayEl.textContent = todayCount;
     if (totalEl) totalEl.textContent = total;
     if (pendingEl) pendingEl.textContent = pending;
     document.querySelectorAll('.lancamentos-tab').forEach(btn => {
@@ -10457,7 +11708,8 @@ function updateLancamentosTabs() {
 function renderLancamentosFilters() {
     const wrap = document.getElementById('lancamentos-filters-wrap');
     if (!wrap) return;
-    const show = currentLancamentosTab !== 'novo';
+    const show = currentLancamentosMode === 'ft'
+        && currentLancamentosTab !== 'diaria';
     wrap.classList.toggle('hidden', !show);
     if (!show) return;
     wrap.innerHTML = `
@@ -10475,7 +11727,7 @@ function renderLancamentosFilters() {
                 <select id="ft-filter-status">
                     <option value="all" ${ftFilter.status === 'all' ? 'selected' : ''}>Todos</option>
                     <option value="pending" ${ftFilter.status === 'pending' ? 'selected' : ''}>Pendentes</option>
-                    <option value="submitted" ${ftFilter.status === 'submitted' ? 'selected' : ''}>Confirmados (Forms)</option>
+                    <option value="submitted" ${ftFilter.status === 'submitted' ? 'selected' : ''}>Confirmados</option>
                     <option value="launched" ${ftFilter.status === 'launched' ? 'selected' : ''}>Lançados no Nexti</option>
                 </select>
             </div>
@@ -10540,11 +11792,30 @@ function getFtWeekdayLabel(dateStr) {
 }
 
 function renderLancamentos() {
+    ftLaunches = normalizeFtLaunchEntries(ftLaunches);
+    const panelDiaria = document.getElementById('lancamentos-panel-diaria');
+    const panelTroca = document.getElementById('lancamentos-panel-troca');
     const panelDashboard = document.getElementById('lancamentos-panel-dashboard');
     const panelHistorico = document.getElementById('lancamentos-panel-historico');
     const panelNovo = document.getElementById('lancamentos-panel-novo');
-    if (!panelDashboard || !panelHistorico || !panelNovo) return;
+    if (!panelDiaria || !panelTroca || !panelDashboard || !panelHistorico || !panelNovo) return;
 
+    const isFtMode = currentLancamentosMode !== 'troca';
+    if (currentLancamentosTab === 'novo') {
+        currentLancamentosTab = 'diaria';
+    }
+    const mainTitle = document.getElementById('lancamentos-main-title');
+    if (mainTitle) mainTitle.textContent = isFtMode ? 'Lançamentos FT (Planilha Atual)' : 'Lançamentos Troca de folga';
+    document.querySelectorAll('.lancamentos-mode-btn').forEach(btn => {
+        const mode = btn.getAttribute('data-mode');
+        btn.classList.toggle('active', mode === (isFtMode ? 'ft' : 'troca'));
+    });
+    document.getElementById('lancamentos-tabs-ft')?.classList.toggle('hidden', !isFtMode);
+    document.getElementById('lancamentos-actions-ft')?.classList.toggle('hidden', !isFtMode);
+    document.getElementById('lancamentos-actions-troca')?.classList.toggle('hidden', isFtMode);
+
+    panelDiaria.classList.add('hidden');
+    panelTroca.classList.add('hidden');
     panelDashboard.classList.add('hidden');
     panelHistorico.classList.add('hidden');
     panelNovo.classList.add('hidden');
@@ -10552,22 +11823,31 @@ function renderLancamentos() {
     updateLancamentosHeader();
     updateLancamentosTabs();
     renderLancamentosFilters();
+    maybeShowMonthlyGidReminder();
 
-    if (currentLancamentosTab === 'dashboard') {
+    if (!isFtMode) {
+        panelTroca.classList.remove('hidden');
+        renderLancamentosTroca();
+    } else if (currentLancamentosTab === 'diaria') {
+        panelDiaria.classList.remove('hidden');
+        renderLancamentosDiaria();
+    } else if (currentLancamentosTab === 'dashboard') {
         panelDashboard.classList.remove('hidden');
         renderLancamentosDashboard();
     } else if (currentLancamentosTab === 'historico') {
         panelHistorico.classList.remove('hidden');
         renderLancamentosHistorico();
     } else {
-        panelNovo.classList.remove('hidden');
-        renderLancamentosNovo();
+        currentLancamentosTab = 'diaria';
+        panelDiaria.classList.remove('hidden');
+        renderLancamentosDiaria();
     }
 
     if (!ftSyncTimer) startFtAutoSync();
 
     if (currentTab === 'lancamentos') {
         syncFtSheetLaunches(true);
+        syncTrocaSheetLaunches(true);
     }
 }
 
@@ -10591,6 +11871,75 @@ function getFtSheetSources() {
         if (url) sources.push({ group: currentGroup || 'todos', url });
     }
     return sources;
+}
+
+function getTrocaSheetSources() {
+    const sources = [];
+    const sheets = CONFIG?.trocaSheets && typeof CONFIG.trocaSheets === 'object' ? CONFIG.trocaSheets : null;
+    if (sheets) {
+        Object.entries(sheets).forEach(([group, url]) => {
+            if (url) sources.push({ group, url });
+        });
+    }
+    if (!sources.length) {
+        const url = CONFIG?.trocaSheet?.url || '';
+        if (url) sources.push({ group: 'atual', url });
+    }
+    return sources;
+}
+
+function normalizeMonthSheetToken(value) {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+function getCurrentMonthSheetAliases(date = new Date()) {
+    const pt = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    const en = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const year = String(date.getFullYear());
+    const idx = date.getMonth();
+    const mm = String(idx + 1).padStart(2, '0');
+    return [
+        `${pt[idx]}_${year}`,
+        `${en[idx]}_${year}`,
+        `${year}_${mm}`,
+        `${mm}_${year}`,
+        `${year}${mm}`
+    ].map(normalizeMonthSheetToken);
+}
+
+function hasCurrentMonthGidConfigured(sheets, date = new Date()) {
+    if (!sheets || typeof sheets !== 'object') return false;
+    const aliases = getCurrentMonthSheetAliases(date);
+    const keys = Object.keys(sheets).map(normalizeMonthSheetToken);
+    return keys.some(key => aliases.some(alias => key.includes(alias)));
+}
+
+function getMonthlyGidChecklistStatus(date = new Date()) {
+    const monthLabel = date.toLocaleDateString('pt-BR', { month: '2-digit', year: 'numeric' });
+    return {
+        monthLabel,
+        monthKey: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
+        ftOk: hasCurrentMonthGidConfigured(CONFIG?.ftSheets || {}, date),
+        trocaOk: hasCurrentMonthGidConfigured(CONFIG?.trocaSheets || {}, date)
+    };
+}
+
+function maybeShowMonthlyGidReminder() {
+    const status = getMonthlyGidChecklistStatus(new Date());
+    const storageKey = `gid-month-check:${status.monthKey}`;
+    if (localStorage.getItem(storageKey) === '1') return;
+    if (!status.ftOk || !status.trocaOk) {
+        const missing = [];
+        if (!status.ftOk) missing.push('FT');
+        if (!status.trocaOk) missing.push('Troca');
+        showToast(`Lembrete ${status.monthLabel}: atualizar GID mensal em ${missing.join(' e ')}.`, 'info');
+    }
+    localStorage.setItem(storageKey, '1');
 }
 
 function normalizeFtHeaderLabel(value) {
@@ -10644,7 +11993,13 @@ function parseFtSheetDateTime(value) {
 
 function normalizeFtStatus(value) {
     const raw = cleanFtText(value).toUpperCase();
-    return raw.includes('LANÇADO') ? 'launched' : 'pending';
+    const norm = raw
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+    if (norm.includes('LANCAD')) return 'launched';
+    if (norm.includes('CONFIRM') || norm.includes('SUBMIT') || norm.includes('FORMS')) return 'submitted';
+    if (norm.includes('PEND')) return 'pending';
+    return 'pending';
 }
 
 function normalizeFtReason(value) {
@@ -10780,6 +12135,219 @@ function mapFtSheetRow(row, idx, collabMap, sourceGroup) {
     return item;
 }
 
+function findTrocaHeaderRow(rows) {
+    const limit = Math.min(rows.length, 25);
+    for (let i = 0; i < limit; i++) {
+        const normalized = (rows[i] || []).map(normalizeFtHeaderLabel);
+        const hasStatus = normalized.some(h => h.includes('status'));
+        const hasSwap = normalized.some(h => h.includes('troca') || h.includes('permuta') || h.includes('solicitante'));
+        if (hasStatus && hasSwap) return i;
+    }
+    return 0;
+}
+
+function resolveTrocaSheetIndexes(header) {
+    const find = (predicate) => header.findIndex(predicate);
+    return {
+        requestedAt: find(h => h.includes('carimbo') || (h.includes('data') && h.includes('hora'))),
+        requestDate: find(h => h.includes('solicitacao')),
+        unit: find(h => h.includes('posto') || h.includes('permuta') || h.includes('unidade')),
+        swapDate: find(h => h.includes('data da troca') || (h.includes('troca') && h.includes('data'))),
+        paymentDate: find(h => h.includes('pagamento')),
+        re1: find(h => h.includes('re do solicitante') && h.includes('1')),
+        name1: find(h => h.includes('nome do solicitante') && h.includes('1')),
+        re2: find(h => h.includes('re do solicitante') && h.includes('2')),
+        name2: find(h => h.includes('nome do solicitante') && h.includes('2')),
+        party1: find(h => h === '4745' || h.includes('solicitante 1') || h.includes('solicitante. 1')),
+        party2: find(h => h === '4682' || h.includes('solicitante 2') || h.includes('solicitante. 2')),
+        status: find(h => h.includes('status')),
+        ref: find(h => h === 'ref' || h.includes('refer'))
+    };
+}
+
+function extractReFromTextLoose(value) {
+    const raw = cleanFtText(value);
+    if (!raw) return '';
+    const tagged = raw.match(/\bRE\b[:\s-]*([0-9]{3,6})\b/i);
+    if (tagged?.[1]) return normalizeFtRe(tagged[1]);
+    const nums = raw.match(/\b[0-9]{3,6}\b/g);
+    if (nums && nums.length) return normalizeFtRe(nums[nums.length - 1]);
+    return '';
+}
+
+function cleanupTrocaName(value) {
+    let text = cleanFtText(value);
+    if (!text) return '';
+    text = text
+        .replace(/\bRE\b[:\s-]*\d{3,6}\b/ig, ' ')
+        .replace(/\b\d{3,6}\b/g, ' ')
+        .replace(/[-,]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return text;
+}
+
+function isValidFtDateKeyStrict(value) {
+    const parts = parseFtDateParts(value);
+    if (!parts) return false;
+    const nowYear = new Date().getFullYear();
+    if (parts.y < 2020 || parts.y > nowYear + 2) return false;
+    const date = new Date(parts.y, parts.m - 1, parts.d);
+    return date.getFullYear() === parts.y
+        && date.getMonth() === parts.m - 1
+        && date.getDate() === parts.d;
+}
+
+function classifyTrocaItemErrors(item) {
+    if (!item || item.status !== 'launched') return [];
+    const errors = [];
+    if (!item.ref) errors.push('Sem REF');
+    if (!item.unit) errors.push('Sem unidade');
+    if (!item.requesterRe) errors.push('Sem RE solicitante 1');
+    if (!item.counterpartRe) errors.push('Sem RE solicitante 2');
+    if (item.requesterRe && item.counterpartRe && matchesRe(item.requesterRe, item.counterpartRe)) {
+        errors.push('RE duplicado');
+    }
+    if (!item.requestDate || !isValidFtDateKeyStrict(item.requestDateRaw || item.requestDate)) {
+        errors.push('Data solicitação inválida');
+    }
+    if (!item.swapDate || !isValidFtDateKeyStrict(item.swapDateRaw || item.swapDate)) {
+        errors.push('Data troca inválida');
+    }
+    if (!item.paymentDate || !isValidFtDateKeyStrict(item.paymentDateRaw || item.paymentDate)) {
+        errors.push('Data pagamento inválida');
+    }
+    return errors;
+}
+
+function mapTrocaSheetRow(row, idx, sourceGroup) {
+    if (!row?.some(cell => String(cell || '').trim())) return null;
+    const statusRaw = cleanFtText(row[idx.status] || '');
+    const status = normalizeFtStatus(statusRaw);
+    const ref = cleanFtText(row[idx.ref] || '');
+    const unitRaw = cleanFtText(row[idx.unit] || '');
+    const unit = unitRaw ? unitRaw.toUpperCase() : '';
+    const requestedAt = cleanFtText(row[idx.requestedAt] || '');
+    const requestDateRaw = cleanFtText(row[idx.requestDate] || requestedAt);
+    const swapDateRaw = cleanFtText(row[idx.swapDate] || '');
+    const paymentDateRaw = cleanFtText(row[idx.paymentDate] || '');
+    const requestDate = normalizeFtDateKey(requestDateRaw);
+    const swapDate = normalizeFtDateKey(swapDateRaw);
+    const paymentDate = normalizeFtDateKey(paymentDateRaw);
+
+    const party1Raw = cleanFtText(row[idx.name1] || row[idx.party1] || '');
+    const party2Raw = cleanFtText(row[idx.name2] || row[idx.party2] || '');
+    const re1Raw = cleanFtText(row[idx.re1] || '');
+    const re2Raw = cleanFtText(row[idx.re2] || '');
+    const requesterRe = normalizeFtRe(re1Raw) || extractReFromTextLoose(party1Raw);
+    const counterpartRe = normalizeFtRe(re2Raw) || extractReFromTextLoose(party2Raw);
+    const requesterName = cleanupTrocaName(party1Raw);
+    const counterpartName = cleanupTrocaName(party2Raw);
+
+    if (!statusRaw && !unit && !party1Raw && !party2Raw) return null;
+
+    const idBase = [
+        sourceGroup || '',
+        requestDate || requestDateRaw || '',
+        swapDate || swapDateRaw || '',
+        unit,
+        requesterRe || requesterName,
+        counterpartRe || counterpartName,
+        ref
+    ].join('|');
+    const item = {
+        id: `troca-sheet-${hashString(idBase)}`,
+        source: 'troca_sheet',
+        sourceGroup: sourceGroup || '',
+        status,
+        statusRaw,
+        ref,
+        unit,
+        requestedAt,
+        requestDate,
+        requestDateRaw,
+        swapDate,
+        swapDateRaw,
+        paymentDate,
+        paymentDateRaw,
+        requesterRe,
+        requesterName,
+        counterpartRe,
+        counterpartName,
+        errors: []
+    };
+    item.errors = classifyTrocaItemErrors(item);
+    return item;
+}
+
+function dedupeTrocaLaunches(items = []) {
+    const byId = new Map();
+    items.forEach(item => {
+        if (!item?.id) return;
+        byId.set(item.id, item);
+    });
+    return Array.from(byId.values());
+}
+
+function buildTrocaDashboardStats(items = trocaLaunches) {
+    const launchedItems = (items || []).filter(item => item.status === 'launched');
+    const errorItems = launchedItems.filter(item => (item.errors || []).length > 0);
+    const byType = {};
+    errorItems.forEach(item => {
+        (item.errors || []).forEach(err => {
+            byType[err] = (byType[err] || 0) + 1;
+        });
+    });
+    const topErrors = Object.entries(byType)
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, value]) => ({ label, value }));
+    const errorRate = launchedItems.length ? Math.round((errorItems.length / launchedItems.length) * 100) : 0;
+    return {
+        total: (items || []).length,
+        launched: launchedItems.length,
+        errors: errorItems.length,
+        errorRate,
+        topErrors
+    };
+}
+
+async function syncTrocaSheetLaunches(silent = false) {
+    const sources = getTrocaSheetSources();
+    if (!sources.length) return;
+    if (trocaSheetSyncInProgress) return;
+    trocaSheetSyncInProgress = true;
+    try {
+        const merged = [];
+        for (const src of sources) {
+            const csv = await fetchSheetData(src.url);
+            if (!csv) continue;
+            const rows = parseCSV(csv);
+            if (!rows.length) continue;
+            const headerRow = findTrocaHeaderRow(rows);
+            const header = (rows[headerRow] || []).map(normalizeFtHeaderLabel);
+            const idx = resolveTrocaSheetIndexes(header);
+            if (idx.status < 0) continue;
+            for (let i = headerRow + 1; i < rows.length; i++) {
+                const item = mapTrocaSheetRow(rows[i], idx, src.group);
+                if (!item) continue;
+                merged.push(item);
+            }
+        }
+        trocaLaunches = dedupeTrocaLaunches(merged);
+        trocaLastSyncAt = new Date().toISOString();
+        if (!silent && currentTab === 'lancamentos' && currentLancamentosMode === 'troca') {
+            showToast("Planilha de Troca sincronizada.", "success");
+        }
+        if (currentTab === 'lancamentos' && currentLancamentosMode === 'troca') {
+            renderLancamentosTroca();
+        } else if (currentTab === 'lancamentos' && currentLancamentosTab === 'dashboard') {
+            renderLancamentosDashboard();
+        }
+    } finally {
+        trocaSheetSyncInProgress = false;
+    }
+}
+
 async function syncFtSheetLaunches(silent = false) {
     const sources = getFtSheetSources();
     if (!sources.length) {
@@ -10837,7 +12405,7 @@ async function syncFtSheetLaunches(silent = false) {
         if (ftRemovedIds.size) {
             merged = merged.filter(item => !ftRemovedIds.has(item.id));
         }
-        ftLaunches = merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        ftLaunches = normalizeFtLaunchEntries(merged).sort((a, b) => getFtItemUpdatedTime(b) - getFtItemUpdatedTime(a));
         refreshFtLabelsForToday();
         if (added || updated) {
             saveFtLaunches();
@@ -10889,7 +12457,7 @@ async function syncFtFormResponses(silent = false) {
     });
     if (updated) {
         saveFtLaunches();
-        showToast("Confirmações atualizadas.", "success");
+        if (!silent) showToast("Confirmações atualizadas.", "success");
     } else if (!silent) {
         showToast("Nenhuma FT nova confirmada.", "info");
     }
@@ -10901,20 +12469,20 @@ async function syncFtFormResponses(silent = false) {
 function startFtAutoSync() {
     if (ftSyncTimer) return;
     ftSyncTimer = setInterval(() => {
-        syncFtFormResponses(true);
         syncFtSheetLaunches(true);
+        syncTrocaSheetLaunches(true);
     }, 60000);
     if (!ftAutoSyncBound) {
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                syncFtFormResponses(true);
                 syncFtSheetLaunches(true);
+                syncTrocaSheetLaunches(true);
             }
         });
         ftAutoSyncBound = true;
     }
-    syncFtFormResponses(true);
     syncFtSheetLaunches(true);
+    syncTrocaSheetLaunches(true);
 }
 
 async function renderLancamentosNovo() {
@@ -10961,7 +12529,7 @@ function buildFtDashboardStats(items) {
     const byShift = {};
     const byTime = {};
     const byWeekday = {};
-    const bySource = {};
+    const byGroup = {};
     const pendingByUnit = {};
     let missingUnit = 0;
     let missingRe = 0;
@@ -10986,14 +12554,14 @@ function buildFtDashboardStats(items) {
             shift = 'N/I';
         }
         const weekday = getFtWeekdayLabel(normalizeFtDateKey(i?.date));
-        const source = i.source === 'sheet' ? 'Planilha' : (i.formLink ? 'Forms' : 'Manual');
+        const sourceGroup = String(i.sourceGroup || i.group || 'N/I').toUpperCase();
         byUnit[unit] = (byUnit[unit] || 0) + 1;
         byPerson[name] = (byPerson[name] || 0) + 1;
         byReason[reason] = (byReason[reason] || 0) + 1;
         byShift[shift] = (byShift[shift] || 0) + 1;
         byTime[time] = (byTime[time] || 0) + 1;
         if (weekday) byWeekday[weekday] = (byWeekday[weekday] || 0) + 1;
-        bySource[source] = (bySource[source] || 0) + 1;
+        byGroup[sourceGroup] = (byGroup[sourceGroup] || 0) + 1;
         if (i.status === 'pending') pendingByUnit[unit] = (pendingByUnit[unit] || 0) + 1;
         if (!i.unitTarget && !i.unitCurrent) missingUnit++;
         if (!i.collabRe) missingRe++;
@@ -11016,7 +12584,7 @@ function buildFtDashboardStats(items) {
         .sort((a, b) => b[1] - a[1])
         .slice(0, 6)
         .map(([label, value]) => ({ label, value }));
-    const topSources = Object.entries(bySource).sort((a, b) => b[1] - a[1])
+    const topGroups = Object.entries(byGroup).sort((a, b) => b[1] - a[1])
         .map(([label, value]) => ({ label, value }));
     const topPendingUnits = Object.entries(pendingByUnit).sort((a, b) => b[1] - a[1]).slice(0, 6)
         .map(([label, value]) => ({ label, value }));
@@ -11055,7 +12623,7 @@ function buildFtDashboardStats(items) {
         topReasons,
         topShifts,
         topTimes,
-        topSources,
+        topGroups,
         topPendingUnits,
         weekdayEntries,
         recentPending,
@@ -11066,12 +12634,193 @@ function buildFtDashboardStats(items) {
     };
 }
 
+function renderLancamentosDiaria() {
+    const panel = document.getElementById('lancamentos-panel-diaria');
+    if (!panel) return;
+    const today = getTodayKey();
+    const todayLabel = formatFtDate(today);
+    const allFt = getFtOperationalItems(ftLaunches);
+    const ftToday = allFt.filter(item => normalizeFtDateKey(item?.date) === today);
+    const ftPending = ftToday.filter(i => i.status === 'pending').length;
+    const ftSubmitted = ftToday.filter(i => i.status === 'submitted').length;
+    const ftLaunched = ftToday.filter(i => i.status === 'launched').length;
+    const next7Limit = toDateInputValue(new Date(Date.parse(`${today}T00:00:00`) + (7 * 86400000)));
+    const next7 = allFt
+        .filter(item => {
+            const key = normalizeFtDateKey(item?.date);
+            return !!key && key > today && key <= next7Limit;
+        })
+        .sort((a, b) => getFtItemDateValue(a) - getFtItemDateValue(b));
+    const overdue = allFt
+        .filter(item => {
+            const key = normalizeFtDateKey(item?.date);
+            return item.status === 'pending' && !!key && key < today;
+        })
+        .sort((a, b) => getFtItemDateValue(a) - getFtItemDateValue(b));
+    const qualityIssues = allFt.filter(item => !item?.date || !item?.collabRe || !getFtUnitLabel(item) || getFtUnitLabel(item) === 'N/I');
+
+    const renderFtCompactRow = (item, options = {}) => {
+        const tags = [];
+        const dateKey = normalizeFtDateKey(item?.date);
+        if (options.showDate !== false && dateKey) tags.push(`<span class="diaria-tag">${formatFtDateShort(dateKey)}</span>`);
+        if (!item?.collabRe) tags.push('<span class="diaria-tag danger">Sem RE</span>');
+        if (!item?.unitTarget && !item?.unitCurrent) tags.push('<span class="diaria-tag danger">Sem unidade</span>');
+        if (!item?.date) tags.push('<span class="diaria-tag danger">Sem data</span>');
+        return `
+            <div class="diaria-item ft ${options.critical ? 'critical' : ''}">
+                <div class="diaria-item-top">
+                    <strong>${getFtCollabLabel(item)}</strong>
+                    <span class="diaria-status status-${item.status}">${getFtStatusLabel(item)}</span>
+                </div>
+                <div class="diaria-item-meta">
+                    <span><strong>Unidade:</strong> ${getFtUnitLabel(item)}</span>
+                    <span><strong>Turno:</strong> ${item.shift || 'N/I'} • <strong>Horário:</strong> ${item.ftTime || 'N/I'}</span>
+                </div>
+                ${tags.length ? `<div class="diaria-item-tags">${tags.join('')}</div>` : ''}
+            </div>
+        `;
+    };
+
+    const ftListHtml = ftToday.length
+        ? ftToday.slice(0, 24).map(item => renderFtCompactRow(item, { showDate: false })).join('')
+        : `<p class="empty-state">Nenhuma FT registrada para hoje.</p>`;
+    const next7Html = next7.length
+        ? next7.slice(0, 24).map(item => renderFtCompactRow(item, { showDate: true })).join('')
+        : `<p class="empty-state">Sem FT programada para os próximos 7 dias.</p>`;
+    const criticalRows = overdue.slice(0, 12)
+        .map(item => renderFtCompactRow(item, { showDate: true, critical: true }))
+        .concat(qualityIssues.slice(0, 6).map(item => renderFtCompactRow(item, { showDate: true, critical: true })));
+    const criticalHtml = criticalRows.length
+        ? criticalRows.join('')
+        : `<p class="empty-state">Sem pendências críticas no momento.</p>`;
+
+    panel.innerHTML = `
+        <div class="lanc-diaria-shell">
+            <div class="lanc-diaria-hero">
+                <div>
+                    <div class="dashboard-title">FOCO DIÁRIO</div>
+                    <h4>${todayLabel}</h4>
+                    <p>Execução FT baseada somente na planilha atual, com fila crítica e visão de próximos dias.</p>
+                </div>
+                <div class="lanc-diaria-actions menu-actions-row">
+                    <button class="btn btn-secondary btn-small" onclick="syncLancamentosSheets()">Sincronizar agora</button>
+                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Indicadores FT</button>
+                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico FT</button>
+                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosMode('troca')">Troca de folga</button>
+                </div>
+            </div>
+            <div class="lanc-diaria-kpi">
+                <div class="kpi-card"><div class="kpi-label">FT hoje</div><div class="kpi-value">${ftToday.length}</div><div class="kpi-sub">Operação do dia</div></div>
+                <div class="kpi-card"><div class="kpi-label">Pendentes</div><div class="kpi-value">${ftPending}</div><div class="kpi-sub">Aguardando ação</div></div>
+                <div class="kpi-card"><div class="kpi-label">Confirmadas</div><div class="kpi-value">${ftSubmitted}</div><div class="kpi-sub">Status confirmado</div></div>
+                <div class="kpi-card"><div class="kpi-label">Lançadas</div><div class="kpi-value">${ftLaunched}</div><div class="kpi-sub">Lançado no Nexti</div></div>
+                <div class="kpi-card"><div class="kpi-label">Próximos 7 dias</div><div class="kpi-value">${next7.length}</div><div class="kpi-sub">Planejamento futuro</div></div>
+                <div class="kpi-card"><div class="kpi-label">Pendências críticas</div><div class="kpi-value">${overdue.length + qualityIssues.length}</div><div class="kpi-sub">Atrasos e dados faltantes</div></div>
+            </div>
+            <div class="lanc-diaria-board">
+                <div class="report-card diaria-card">
+                    <div class="report-title">FT de hoje</div>
+                    <div class="diaria-list">${ftListHtml}</div>
+                </div>
+                <div class="report-card diaria-card">
+                    <div class="report-title">Próximos 7 dias</div>
+                    <div class="diaria-list">${next7Html}</div>
+                </div>
+                <div class="report-card diaria-card">
+                    <div class="report-title">Pendências críticas</div>
+                    <div class="diaria-list">${criticalHtml}</div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function getTrocaPrimaryDate(item) {
+    if (!item) return '';
+    return normalizeFtDateKey(item.swapDate)
+        || normalizeFtDateKey(item.requestDate)
+        || normalizeFtDateKey(item.paymentDate)
+        || normalizeFtDateKey(item.createdAt)
+        || '';
+}
+
+function renderLancamentosTroca() {
+    const panel = document.getElementById('lancamentos-panel-troca');
+    if (!panel) return;
+    const today = getTodayKey();
+    const allItems = trocaLaunches.slice();
+    const launchedItems = allItems.filter(item => item.status === 'launched');
+    const errorItems = launchedItems.filter(item => (item.errors || []).length > 0);
+    const todayItems = allItems.filter(item => getTrocaPrimaryDate(item) === today);
+    const sorted = allItems.sort((a, b) => {
+        const db = Date.parse(`${getTrocaPrimaryDate(b)}T00:00:00`);
+        const da = Date.parse(`${getTrocaPrimaryDate(a)}T00:00:00`);
+        return (Number.isFinite(db) ? db : 0) - (Number.isFinite(da) ? da : 0);
+    });
+    const listHtml = sorted.length
+        ? sorted.slice(0, 40).map(item => {
+            const errors = item.errors || [];
+            const dateKey = getTrocaPrimaryDate(item);
+            const dateLabel = dateKey ? formatFtDate(dateKey) : 'N/I';
+            const createdLabel = item.createdAt ? formatFtDateTime(item.createdAt) : 'N/I';
+            return `
+                <div class="diaria-item troca ${errors.length ? 'has-error' : ''}">
+                    <div class="diaria-item-top">
+                        <strong>${item.unit || 'Unidade não informada'}</strong>
+                        <span class="diaria-status status-${item.status}">${getFtStatusLabel(item)}</span>
+                    </div>
+                    <div class="diaria-item-meta">
+                        <span><strong>REF:</strong> ${item.ref || 'N/I'}</span>
+                        <span><strong>Solicitante 1:</strong> ${item.requesterName || 'N/I'} (${item.requesterRe || 'N/I'})</span>
+                        <span><strong>Solicitante 2:</strong> ${item.counterpartName || 'N/I'} (${item.counterpartRe || 'N/I'})</span>
+                        <span><strong>Data troca:</strong> ${dateLabel}</span>
+                        <span><strong>Registro:</strong> ${createdLabel}</span>
+                        ${errors.length ? `<span class="troca-errors"><strong>Erros:</strong> ${errors.join(' • ')}</span>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : `<p class="empty-state">Nenhuma troca sincronizada.</p>`;
+
+    panel.innerHTML = `
+        <div class="lanc-diaria-shell">
+            <div class="lanc-diaria-hero">
+                <div>
+                    <div class="dashboard-title">TROCA DE FOLGA</div>
+                    <h4>Controle operacional</h4>
+                    <p>Painel dedicado de trocas com foco em lançadas e validação de erros.</p>
+                </div>
+                <div class="lanc-diaria-actions menu-actions-row">
+                    <button class="btn btn-secondary btn-small" onclick="syncTrocaSheetLaunches(false)">Sincronizar trocas</button>
+                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosMode('ft')">Voltar para FT</button>
+                </div>
+            </div>
+            <div class="lanc-diaria-kpi">
+                <div class="kpi-card"><div class="kpi-label">Trocas hoje</div><div class="kpi-value">${todayItems.length}</div><div class="kpi-sub">Data de troca no dia</div></div>
+                <div class="kpi-card"><div class="kpi-label">Trocas lançadas</div><div class="kpi-value">${launchedItems.length}</div><div class="kpi-sub">Status lançado</div></div>
+                <div class="kpi-card"><div class="kpi-label">Erros (lançadas)</div><div class="kpi-value">${errorItems.length}</div><div class="kpi-sub">Somente lançadas</div></div>
+                <div class="kpi-card"><div class="kpi-label">Total sincronizado</div><div class="kpi-value">${allItems.length}</div><div class="kpi-sub">Todas as trocas</div></div>
+            </div>
+            <div class="report-card diaria-card">
+                <div class="report-title">Trocas recentes</div>
+                <div class="diaria-list">${listHtml}</div>
+            </div>
+        </div>
+    `;
+}
+
 function renderLancamentosDashboard() {
     const panel = document.getElementById('lancamentos-panel-dashboard');
     if (!panel) return;
 
     const items = applyFtFilters(ftLaunches);
     const stats = buildFtDashboardStats(items);
+    const gidStatus = getMonthlyGidChecklistStatus(new Date());
+    const gidMissing = [];
+    if (!gidStatus.ftOk) gidMissing.push('FT');
+    const gidReminderHtml = gidMissing.length
+        ? `<div class="lancamentos-gid-alert">Lembrete ${gidStatus.monthLabel}: faltando cadastrar GID mensal de FT (config.js).</div>`
+        : '';
     const {
         pending,
         submitted,
@@ -11084,7 +12833,7 @@ function renderLancamentosDashboard() {
         topReasons,
         topShifts,
         topTimes,
-        topSources,
+        topGroups,
         topPendingUnits,
         weekdayEntries,
         recentPending,
@@ -11099,6 +12848,7 @@ function renderLancamentosDashboard() {
             <div class="dashboard-title">Visão executiva</div>
             <button class="btn btn-ghost btn-small" onclick="exportFtDashboard()">Exportar dashboard</button>
         </div>
+        ${gidReminderHtml}
         <div class="lancamentos-kpi">
             <div class="kpi-card">
                 <div class="kpi-label">Pendentes</div>
@@ -11108,7 +12858,7 @@ function renderLancamentosDashboard() {
             <div class="kpi-card">
                 <div class="kpi-label">Confirmadas</div>
                 <div class="kpi-value">${submitted}</div>
-                <div class="kpi-sub">Forms confirmadas</div>
+                <div class="kpi-sub">Status confirmado</div>
             </div>
             <div class="kpi-card">
                 <div class="kpi-label">Lançadas</div>
@@ -11131,7 +12881,6 @@ function renderLancamentosDashboard() {
                 <div class="kpi-sub">Dias com FT</div>
             </div>
         </div>
-        ${getFtResponseUrls().length ? '' : '<p class="empty-state">Para confirmação automática, publique a planilha de respostas (CSV) e preencha em config.js.</p>'}
         <div class="lancamentos-report-grid">
             <div class="report-card">
                 <div class="report-title">Por Unidade (Top 8)</div>
@@ -11158,8 +12907,8 @@ function renderLancamentosDashboard() {
                 <div class="report-list">${buildReportRows(weekdayEntries)}</div>
             </div>
             <div class="report-card">
-                <div class="report-title">Por Origem</div>
-                <div class="report-list">${buildReportRows(topSources)}</div>
+                <div class="report-title">Por Grupo</div>
+                <div class="report-list">${buildReportRows(topGroups)}</div>
             </div>
             <div class="report-card">
                 <div class="report-title">Pendências por Unidade</div>
@@ -11195,7 +12944,7 @@ function exportFtDashboard() {
     const toRows = (list) => list.map(i => ({ "Item": i.label, "Quantidade": i.value }));
     const resumo = [
         { "Indicador": "Pendentes", "Valor": stats.pending },
-        { "Indicador": "Confirmadas (Forms)", "Valor": stats.submitted },
+        { "Indicador": "Confirmadas", "Valor": stats.submitted },
         { "Indicador": "Lançadas", "Valor": stats.launched },
         { "Indicador": "Total filtrado", "Valor": stats.total },
         { "Indicador": "Taxa de lançamento (%)", "Valor": stats.launchRate },
@@ -11218,7 +12967,7 @@ function exportFtDashboard() {
         "Motivo": getFtReasonLabel(i.reason, i.reasonOther) || i.reasonRaw || '',
         "Detalhe": i.reasonDetail || '',
         "Cobrindo": i.coveringOther || (i.coveringName ? `${i.coveringName} (${i.coveringRe})` : (i.coveringRe || '')),
-        "Origem": i.source === 'sheet' ? 'Planilha' : (i.formLink ? 'Forms' : 'Manual'),
+        "Origem": 'Planilha FT',
         "Grupo": i.group || i.sourceGroup || ''
     }));
 
@@ -11230,7 +12979,7 @@ function exportFtDashboard() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topShifts)), "Por Turno");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topTimes)), "Por Horario");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.weekdayEntries)), "Por Dia Semana");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topSources)), "Por Origem");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topGroups)), "Por Grupo");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.topPendingUnits)), "Pendências Unidade");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.recentPending)), "Pendências Recentes");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(stats.recentLaunched)), "Lançadas Recentes");
@@ -11282,7 +13031,8 @@ function exportFtHistorico() {
 function renderLancamentosHistorico() {
     const panel = document.getElementById('lancamentos-panel-historico');
     if (!panel) return;
-    if (!ftLaunches.length) {
+    const operationalItems = getFtOperationalItems(ftLaunches);
+    if (!operationalItems.length) {
         panel.innerHTML = `<p class="empty-state">Nenhum lançamento registrado.</p>`;
         return;
     }
@@ -11295,9 +13045,6 @@ function renderLancamentosHistorico() {
     const pending = filtered.filter(i => i.status === 'pending').length;
     const submitted = filtered.filter(i => i.status === 'submitted').length;
     const launched = filtered.filter(i => i.status === 'launched').length;
-    const sheetCount = filtered.filter(i => i.source === 'sheet').length;
-    const formsCount = filtered.filter(i => i.formLink).length;
-    const manualCount = filtered.filter(i => !i.formLink && i.source !== 'sheet').length;
 
     const unitSet = new Set();
     baseItems.forEach(i => {
@@ -11327,17 +13074,23 @@ function renderLancamentosHistorico() {
             <div class="lanc-card"><div class="label">Pendentes</div><div class="value">${pending}</div></div>
             <div class="lanc-card"><div class="label">Confirmadas</div><div class="value">${submitted}</div></div>
             <div class="lanc-card"><div class="label">Lançadas</div><div class="value">${launched}</div></div>
-            <div class="lanc-card"><div class="label">Planilha</div><div class="value">${sheetCount}</div></div>
-            <div class="lanc-card"><div class="label">Forms</div><div class="value">${formsCount}</div></div>
-            <div class="lanc-card"><div class="label">Manual</div><div class="value">${manualCount}</div></div>
+            <div class="lanc-card"><div class="label">Planilha FT</div><div class="value">${total}</div></div>
         </div>
     `;
 
     const buildCards = (items) => items.map(item => {
-        const isSheet = item.source === 'sheet';
+        const isSheet = isFtSheetSource(item);
         const statusText = getFtStatusLabel(item);
         const canLaunch = item.status === 'submitted' && isAdminRole() && !isSheet;
         const launched = item.status === 'launched';
+        const launchLabel = isSheet
+            ? 'Status via planilha'
+            : (launched ? 'Lançado no Nexti' : 'Marcar Lançado no Nexti');
+        const launchClass = isSheet ? 'btn-secondary' : (launched ? 'btn-ok' : 'btn-secondary');
+        const launchOnClick = isSheet
+            ? `onclick="showToast('Atualize o status na planilha FT e sincronize para refletir aqui.', 'info')"`
+            : `onclick="markFtLaunched('${item.id}')"`;
+        const launchDisabled = isSheet ? '' : (canLaunch ? '' : 'disabled');
         const requestedAt = item.requestedAt ? formatFtDateTime(item.requestedAt) : '';
         const createdAt = item.createdAt ? formatFtDateTime(item.createdAt) : '';
         const sourceInfo = getFtSourceInfo(item, { showGroup: false });
@@ -11378,9 +13131,9 @@ function renderLancamentosHistorico() {
                 <button class="lancamento-toggle" type="button" onclick="toggleFtHistoryDetails('${item.id}')">${expanded ? 'Ocultar detalhes' : 'Ver detalhes'}</button>
                 <div class="lancamento-details ${expanded ? '' : 'hidden'}">
                     <div class="lancamento-steps">
-                        <span class="step ${item.createdAt ? 'done' : ''}">Criada</span>
-                        <span class="step ${item.linkSentAt ? 'done' : ''}">Link enviado</span>
-                        <span class="step ${item.status === 'submitted' || item.status === 'launched' ? 'done' : ''}">Confirmado pelo colaborador</span>
+                        <span class="step ${item.createdAt || item.requestedAt ? 'done' : ''}">Registrada na planilha</span>
+                        <span class="step ${item.status !== 'pending' ? 'done' : ''}">Em validação</span>
+                        <span class="step ${item.status === 'submitted' || item.status === 'launched' ? 'done' : ''}">Confirmada</span>
                         <span class="step ${item.status === 'launched' ? 'done' : ''}">Lançado no Nexti</span>
                     </div>
                     ${reasonDetail ? `<div><strong>Detalhe:</strong> ${reasonDetail}</div>` : ''}
@@ -11392,7 +13145,7 @@ function renderLancamentosHistorico() {
                 </div>
             </div>
             <div class="lancamento-actions">
-                <button class="btn-mini ${launched ? 'btn-ok' : 'btn-secondary'}" onclick="markFtLaunched('${item.id}')" ${canLaunch ? '' : 'disabled'}>${launched ? 'Lançado no Nexti' : 'Marcar Lançado no Nexti'}</button>
+                <button class="btn-mini ${launchClass}" ${launchOnClick} ${launchDisabled}>${launchLabel}</button>
                 <button class="btn-mini btn-danger" onclick="deleteFtLaunch('${item.id}')" ${isAdminRole() ? '' : 'disabled'}>Remover</button>
             </div>
         </div>
@@ -11532,42 +13285,7 @@ function buildFtFromForm() {
 }
 
 function createFtLaunch() {
-    if (!(SiteAuth.logged && SiteAuth.role !== 'supervisor')) {
-        showToast("Apenas admins podem lançar FT.", "error");
-        return;
-    }
-    const data = buildFtFromForm();
-    if (!data.collabRe) {
-        showToast("Selecione o colaborador.", "error");
-        return;
-    }
-    if (!data.date) {
-        showToast("Informe a data da FT.", "error");
-        return;
-    }
-    if (!data.unitTarget) {
-        showToast("Informe a unidade FT.", "error");
-        return;
-    }
-    if (data.reason === 'outro' && !data.reasonOther) {
-        showToast("Descreva o motivo da FT.", "error");
-        return;
-    }
-    const item = {
-        id: `ft-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        createdBy: SiteAuth.user || 'Admin',
-        ...data
-    };
-    item.updatedAt = item.createdAt;
-    item.formLink = getFtFormLink(item);
-    ftLaunches.unshift(item);
-    saveFtLaunches();
-    showToast("FT lançada com sucesso.", "success");
-    lastFtCreatedId = item.id;
-    updateFtPostActions();
-    setTimeout(() => flashLancamentoCard(item.id), 100);
+    showToast("Fluxo manual de FT está desativado. A operação segue somente pela planilha atual.", "info");
 }
 
 function updateFtPostActions() {
@@ -11642,10 +13360,8 @@ function openWhatsApp(phone, text) {
         window.location.href = url;
         return;
     }
-    const win = window.open(url, '_blank', 'noopener');
-    if (!win) {
-        window.location.href = url;
-    }
+    const win = window.open(url, '_blank', 'noopener,noreferrer');
+    if (!win) showToast("Permita pop-ups para abrir o WhatsApp Web em outra aba.", "info");
 }
 
 function buildWhatsUrl(phone, text, mode = 'desktop') {
@@ -11658,7 +13374,7 @@ function buildWhatsUrl(phone, text, mode = 'desktop') {
     if (mode === 'mobile') {
         return `whatsapp://send${query ? `?${query}` : ''}`;
     }
-    return `https://api.whatsapp.com/send${query ? `?${query}` : ''}`;
+    return `https://web.whatsapp.com/send${query ? `?${query}` : ''}`;
 }
 
 function applyFtToCollaborator(item) {
@@ -11811,18 +13527,7 @@ window.onclick = function(event) {
 }
 
 function verificarEscala(turma) {
-    // 🔴 REGRA ABSOLUTA: Lógica de escala (turma 1 = dias ímpares / turma 2 = dias pares)
-    const hoje = new Date().getDate();
-    const isImpar = hoje % 2 !== 0;
-    let trabalha = null;
-
-    // Compara com número (já convertido no parse) ou string
-    if (turma == 1) trabalha = isImpar;
-    if (turma == 2) trabalha = !isImpar;
-
-    if (trabalha === null) return false; // Padrão se não for 1 ou 2
-    if (escalaInvertida) trabalha = !trabalha;
-    return trabalha;
+    return verificarEscalaPorData(turma, getTodayKey());
 }
 
 // ==========================================================================
@@ -12751,6 +14456,7 @@ function updateMenuStatus() {
     renderDataSourceList();
     renderSheetValidatorOptions();
     renderConfigSummary();
+    renderRoadmapList();
     renderAuditList();
     const supervisaoPane = document.getElementById('config-pane-supervisao');
     if (supervisaoPane && !supervisaoPane.classList.contains('hidden')) {
@@ -12827,6 +14533,26 @@ function renderConfigSummary() {
             <span class="summary-chip">Total: ${counts.todos}</span>
         </div>
     `;
+}
+
+function renderRoadmapList() {
+    const el = document.getElementById('roadmap-list');
+    if (!el) return;
+    const statusLabel = {
+        concluido: 'Concluído',
+        andamento: 'Em andamento',
+        planejado: 'Planejado'
+    };
+    el.innerHTML = ROADMAP_ITEMS.map(item => `
+        <div class="roadmap-item">
+            <div class="roadmap-top">
+                <strong>${item.title}</strong>
+                <span class="roadmap-status ${item.status}">${statusLabel[item.status] || item.status}</span>
+            </div>
+            <div class="roadmap-meta">${item.area}</div>
+            <div class="roadmap-detail">${item.detail}</div>
+        </div>
+    `).join('');
 }
 
 // Toggle de Fonte de Dados (Apenas altera flags)
@@ -13037,6 +14763,17 @@ function renderDataSourceList() {
             count
         });
     });
+    const trocaSheetSources = getTrocaSheetSources();
+    trocaSheetSources.forEach(src => {
+        const label = src.group ? `Planilha Troca ${String(src.group).toUpperCase()}` : 'Planilha Troca';
+        const count = trocaLaunches.filter(i => i.source === 'troca_sheet' && (src.group ? i.sourceGroup === src.group : true)).length;
+        sources.push({
+            name: label,
+            status: 'ATIVO',
+            url: toSourceViewUrl(src.url),
+            count
+        });
+    });
 
     if (CONFIG?.reciclagem?.baseCsvUrl) {
         sources.push({
@@ -13129,6 +14866,17 @@ function getSheetValidatorSources() {
             label: group ? `FT Planilha ${String(group).toUpperCase()}` : 'FT Planilha (Geral)',
             url: src.url,
             type: 'ft_sheet',
+            group
+        });
+    });
+    const trocaSheetSources = getTrocaSheetSources();
+    trocaSheetSources.forEach(src => {
+        const group = src.group || '';
+        sources.push({
+            id: `troca-sheet:${group || 'geral'}`,
+            label: group ? `Troca Planilha ${String(group).toUpperCase()}` : 'Troca Planilha (Geral)',
+            url: src.url,
+            type: 'troca_sheet',
             group
         });
     });
@@ -13361,6 +15109,35 @@ function validateSheetRows(source, rows, csvText = '') {
             i.shift || '',
             i.ftTime || '',
             i.coveringRe || ''
+        ]));
+        return finalizeValidatorResult(messages, previewColumns, previewRows);
+    }
+
+    if (source.type === 'troca_sheet') {
+        const headerRow = findTrocaHeaderRow(rows);
+        const header = (rows[headerRow] || []).map(normalizeFtHeaderLabel);
+        const idx = resolveTrocaSheetIndexes(header);
+        if (idx.status < 0) {
+            messages.push({ type: 'error', text: 'Coluna obrigatória ausente: Status.' });
+            return finalizeValidatorResult(messages, [], []);
+        }
+        const dataRows = rows.slice(headerRow + 1);
+        const items = dataRows.map(row => mapTrocaSheetRow(row, idx, source.group || '')).filter(Boolean);
+        const launchedItems = items.filter(i => i.status === 'launched');
+        const erroredLaunched = launchedItems.filter(i => (i.errors || []).length > 0);
+        messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
+        messages.push({ type: 'info', text: `Registros válidos: ${items.length}` });
+        messages.push({ type: 'info', text: `Lançadas: ${launchedItems.length}` });
+        messages.push({ type: 'info', text: `Erros (somente lançadas): ${erroredLaunched.length}` });
+        const previewColumns = ['Status', 'REF', 'Unidade', 'Solicitante 1 (RE)', 'Solicitante 2 (RE)', 'Data Troca', 'Erros'];
+        const previewRows = items.slice(0, 10).map(i => ([
+            i.statusRaw || i.status || '',
+            i.ref || '',
+            i.unit || '',
+            `${i.requesterName || '-'} (${i.requesterRe || 'N/I'})`,
+            `${i.counterpartName || '-'} (${i.counterpartRe || 'N/I'})`,
+            i.swapDate || '',
+            (i.errors || []).join(' | ')
         ]));
         return finalizeValidatorResult(messages, previewColumns, previewRows);
     }
