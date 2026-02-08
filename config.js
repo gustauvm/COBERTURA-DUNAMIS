@@ -9,7 +9,7 @@ const CONFIG = {
     },
     api: {
         baseUrl: 'https://api.nexti.com.br/api/v1', // URL Base da API (Verificar URL correta do ambiente)
-        token: 'SEU_TOKEN_AQUI' // Token de acesso Bearer
+        token: 'SEU_TOKEN_AQUI' // Evite token real no frontend; prefira runtime (__NEXTI_API_TOKEN__) ou proxy backend
     },
     sheets: {
         bombeiros: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS29f9zGs72Lf557GYyR3H601ZXF94CHAejfp_mUnIbqESE7NFTvzxNQF9eyvMDROC4HZDEtWnSHRbx/pub?output=csv',
@@ -180,7 +180,11 @@ async function fetchSheetData(url) {
         // Retorna o texto cru do CSV para ser processado pela lógica existente
         return text;
     } catch (error) {
-        console.error("Erro ao carregar planilha:", error);
+        if (typeof window !== 'undefined' && window.AppErrorHandler?.capture) {
+            window.AppErrorHandler.capture(error, { scope: 'fetch-sheet-data', url: String(url || '') }, { silent: true });
+        } else {
+            console.error("Erro ao carregar planilha:", error);
+        }
         alert("Erro ao carregar dados. Verifique sua conexão.");
         return null;
     }

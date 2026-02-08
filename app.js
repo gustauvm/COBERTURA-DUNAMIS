@@ -25,6 +25,8 @@ let routeMapMarkers = [];
 let routeMapSeq = 0;
 let routeModalState = null;
 let addressModalState = { mode: 'unit', filter: '', collabRe: '', collabName: '', unitName: '' };
+let ftPreviewModalState = { mode: 'collab', re: '', name: '', unit: '', groupKey: '', monthKey: '', selectedDate: '' };
+let performanceModalState = { re: '', name: '' };
 let shadowReady = false;
 let shadowSyncTimer = null;
 let shadowAutoPullTimer = null;
@@ -53,6 +55,11 @@ let currentLancamentosTab = 'diaria';
 let ftFilter = { from: '', to: '', status: 'all' };
 let ftHistoryFilter = { search: '', unit: '', collab: '', sort: 'date_desc', grouped: true };
 let ftHistoryExpanded = new Set();
+let trocaHistoryFilter = { search: '', unit: '', status: 'all', sort: 'date_desc' };
+let lancamentosPlanningState = {
+    ft: { range: 'week', anchor: '', selected: '' },
+    troca: { range: 'week', anchor: '', selected: '' }
+};
 let ftReasons = [];
 let lastFtCreatedId = null;
 let ftSyncTimer = null;
@@ -94,6 +101,599 @@ let supervisaoOpenMessages = new Set();
 let gerenciaDataCache = [];
 let gerenciaFilter = { group: 'all', from: '', to: '' };
 let commandPaletteState = { open: false, activeIndex: 0, filtered: [] };
+const SEARCH_DEBOUNCE_MS = 350;
+let searchInputComposing = false;
+let searchInputDebounceId = null;
+let uiTooltipInitialized = false;
+let activeTooltipEl = null;
+let activeTooltipTarget = null;
+let appLifecycleBound = false;
+const APP_TIMERS = Object.freeze({
+    shadowSync: 'shadow-sync',
+    shadowAutoPull: 'shadow-auto-pull',
+    ftSync: 'ft-sync',
+    reciclagemSync: 'reciclagem-sync',
+    reminderCheck: 'reminder-check',
+    autoEscala: 'auto-escala',
+    searchDebounce: 'search-debounce'
+});
+const APP_LOG_LEVELS = Object.freeze({
+    error: 0,
+    warn: 1,
+    info: 2,
+    debug: 3
+});
+const APP_LOG_LEVEL = APP_LOG_LEVELS.info;
+const AppTimerManager = {
+    timers: new Map(),
+    setInterval(name, callback, delay) {
+        this.clear(name);
+        const id = setInterval(callback, delay);
+        this.timers.set(name, { kind: 'interval', id });
+        return id;
+    },
+    setTimeout(name, callback, delay) {
+        this.clear(name);
+        const id = setTimeout(() => {
+            this.timers.delete(name);
+            callback();
+        }, delay);
+        this.timers.set(name, { kind: 'timeout', id });
+        return id;
+    },
+    clear(name) {
+        const timer = this.timers.get(name);
+        if (!timer) return;
+        if (timer.kind === 'interval') {
+            clearInterval(timer.id);
+        } else {
+            clearTimeout(timer.id);
+        }
+        this.timers.delete(name);
+    },
+    clearAll() {
+        Array.from(this.timers.keys()).forEach(name => this.clear(name));
+    }
+};
+const AppEventManager = {
+    listeners: [],
+    _normalizeOptions(options) {
+        if (options == null) return false;
+        if (typeof options === 'boolean') return options;
+        return options;
+    },
+    _sameOptions(a, b) {
+        if (a === b) return true;
+        if (!a || !b) return false;
+        if (typeof a === 'boolean' || typeof b === 'boolean') return a === b;
+        return !!a.capture === !!b.capture
+            && !!a.once === !!b.once
+            && !!a.passive === !!b.passive;
+    },
+    on(target, type, handler, options = false, meta = {}) {
+        if (!target || typeof target.addEventListener !== 'function' || typeof handler !== 'function') return null;
+        const normalizedOptions = this._normalizeOptions(options);
+        const scope = meta.scope || 'global';
+        const key = meta.key || '';
+        if (key) {
+            const existing = this.listeners.find(l => l.scope === scope && l.key === key);
+            if (existing) return existing.handler;
+        }
+        target.addEventListener(type, handler, normalizedOptions);
+        this.listeners.push({ target, type, handler, options: normalizedOptions, scope, key });
+        return handler;
+    },
+    once(target, type, handler, options = false, meta = {}) {
+        if (!target || typeof handler !== 'function') return null;
+        const wrapped = (ev) => {
+            this.off(target, type, wrapped, options);
+            handler(ev);
+        };
+        return this.on(target, type, wrapped, options, meta);
+    },
+    off(target, type, handler, options = false) {
+        const normalizedOptions = this._normalizeOptions(options);
+        const idx = this.listeners.findIndex(l => l.target === target && l.type === type && l.handler === handler && this._sameOptions(l.options, normalizedOptions));
+        if (idx < 0) return;
+        const item = this.listeners[idx];
+        item.target.removeEventListener(item.type, item.handler, item.options);
+        this.listeners.splice(idx, 1);
+    },
+    offScope(scope) {
+        const remaining = [];
+        this.listeners.forEach(item => {
+            if (item.scope === scope) {
+                item.target.removeEventListener(item.type, item.handler, item.options);
+            } else {
+                remaining.push(item);
+            }
+        });
+        this.listeners = remaining;
+    },
+    offAll() {
+        this.listeners.forEach(item => {
+            item.target.removeEventListener(item.type, item.handler, item.options);
+        });
+        this.listeners = [];
+    }
+};
+const AppStateManager = {
+    bindings: new Map(),
+    subscribers: new Map(),
+    register(key, getter, setter, options = {}) {
+        if (!key || typeof getter !== 'function' || typeof setter !== 'function') return;
+        this.bindings.set(key, {
+            getter,
+            setter,
+            validator: typeof options.validator === 'function' ? options.validator : null
+        });
+    },
+    has(key) {
+        return this.bindings.has(key);
+    },
+    get(key, fallback = undefined) {
+        const binding = this.bindings.get(key);
+        if (!binding) return fallback;
+        try {
+            return binding.getter();
+        } catch {
+            return fallback;
+        }
+    },
+    set(key, value, options = {}) {
+        const binding = this.bindings.get(key);
+        if (!binding) return false;
+        if (binding.validator && !binding.validator(value)) return false;
+        const previous = this.get(key);
+        binding.setter(value);
+        if (options.silent) return true;
+        this._notify(key, this.get(key), previous);
+        return true;
+    },
+    patch(partial = {}, options = {}) {
+        if (!partial || typeof partial !== 'object') return;
+        Object.keys(partial).forEach(key => {
+            this.set(key, partial[key], options);
+        });
+    },
+    snapshot(keys = null) {
+        const selected = Array.isArray(keys) && keys.length ? keys : Array.from(this.bindings.keys());
+        const snap = {};
+        selected.forEach(key => {
+            snap[key] = this.get(key);
+        });
+        return snap;
+    },
+    subscribe(key, callback) {
+        if (!key || typeof callback !== 'function') return () => {};
+        const list = this.subscribers.get(key) || [];
+        list.push(callback);
+        this.subscribers.set(key, list);
+        return () => {
+            const cur = this.subscribers.get(key) || [];
+            this.subscribers.set(key, cur.filter(fn => fn !== callback));
+        };
+    },
+    _notify(key, nextValue, prevValue) {
+        const list = this.subscribers.get(key) || [];
+        list.forEach(fn => {
+            try {
+                fn(nextValue, prevValue, key);
+            } catch {}
+        });
+    }
+};
+const AppCacheManager = {
+    stores: new Map(),
+    defineStore(name, options = {}) {
+        if (!name) return null;
+        const current = this.stores.get(name);
+        const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : 0;
+        if (current) {
+            current.ttlMs = ttlMs;
+            return current;
+        }
+        const store = { name, ttlMs, items: new Map() };
+        this.stores.set(name, store);
+        return store;
+    },
+    ensureStore(name) {
+        return this.stores.get(name) || this.defineStore(name, {});
+    },
+    set(name, key, value, options = {}) {
+        const store = this.ensureStore(name);
+        if (!store) return value;
+        const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : store.ttlMs;
+        const expiresAt = ttlMs > 0 ? Date.now() + ttlMs : 0;
+        store.items.set(String(key), { value, expiresAt });
+        return value;
+    },
+    get(name, key, fallback = undefined) {
+        const store = this.stores.get(name);
+        if (!store) return fallback;
+        const entry = store.items.get(String(key));
+        if (!entry) return fallback;
+        if (entry.expiresAt > 0 && entry.expiresAt < Date.now()) {
+            store.items.delete(String(key));
+            return fallback;
+        }
+        return entry.value;
+    },
+    has(name, key) {
+        return this.get(name, key, undefined) !== undefined;
+    },
+    delete(name, key) {
+        const store = this.stores.get(name);
+        if (!store) return;
+        store.items.delete(String(key));
+    },
+    clear(name) {
+        const store = this.stores.get(name);
+        if (!store) return;
+        store.items.clear();
+    },
+    clearAll() {
+        this.stores.forEach(store => store.items.clear());
+    },
+    entries(name) {
+        const store = this.stores.get(name);
+        if (!store) return [];
+        const now = Date.now();
+        const rows = [];
+        store.items.forEach((entry, key) => {
+            if (entry.expiresAt > 0 && entry.expiresAt < now) return;
+            rows.push([key, entry.value]);
+        });
+        return rows;
+    }
+};
+let appStateBindingsReady = false;
+let appCacheHydrated = false;
+
+function registerAppStateBindings() {
+    if (appStateBindingsReady) return;
+    appStateBindingsReady = true;
+    const bind = (key, getter, setter, validator = null) => {
+        AppStateManager.register(key, getter, setter, validator ? { validator } : {});
+    };
+    bind('currentData', () => currentData, (v) => { currentData = Array.isArray(v) ? v : []; }, Array.isArray);
+    bind('currentGroup', () => currentGroup, (v) => { currentGroup = String(v || ''); });
+    bind('currentTab', () => currentTab, (v) => { currentTab = String(v || 'busca'); });
+    bind('hiddenUnits', () => hiddenUnits, (v) => { hiddenUnits = v instanceof Set ? v : new Set(v || []); });
+    bind('unitMetadata', () => unitMetadata, (v) => { unitMetadata = v && typeof v === 'object' ? v : {}; });
+    bind('collaboratorEdits', () => collaboratorEdits, (v) => { collaboratorEdits = v && typeof v === 'object' ? v : {}; });
+    bind('changeHistory', () => changeHistory, (v) => { changeHistory = Array.isArray(v) ? v : []; }, Array.isArray);
+    bind('minimizedUnits', () => minimizedUnits, (v) => { minimizedUnits = v instanceof Set ? v : new Set(v || []); });
+    bind('lastUpdatedAt', () => lastUpdatedAt, (v) => { lastUpdatedAt = v || null; });
+    bind('unitGeoCache', () => unitGeoCache, (v) => { unitGeoCache = v && typeof v === 'object' ? v : {}; });
+    bind('allCollaboratorsCache', () => allCollaboratorsCache, (v) => { allCollaboratorsCache = v && typeof v === 'object' ? v : { items: null, updatedAt: 0 }; });
+    bind('shadowStatus', () => shadowStatus, (v) => { shadowStatus = v && typeof v === 'object' ? v : shadowStatus; });
+    bind('avisos', () => avisos, (v) => { avisos = Array.isArray(v) ? v : []; }, Array.isArray);
+    bind('ftLaunches', () => ftLaunches, (v) => { ftLaunches = Array.isArray(v) ? v : []; }, Array.isArray);
+    bind('trocaLaunches', () => trocaLaunches, (v) => { trocaLaunches = Array.isArray(v) ? v : []; }, Array.isArray);
+    bind('searchFilterStatus', () => searchFilterStatus, (v) => { searchFilterStatus = String(v || 'all'); });
+    bind('searchHideAbsence', () => searchHideAbsence, (v) => { searchHideAbsence = !!v; });
+    bind('searchDateFilter', () => searchDateFilter, (v) => { searchDateFilter = v && typeof v === 'object' ? v : { from: '', to: '' }; });
+    bind('unitDateFilter', () => unitDateFilter, (v) => { unitDateFilter = v && typeof v === 'object' ? v : { from: '', to: '' }; });
+    bind('reciclagemData', () => reciclagemData, (v) => { reciclagemData = v && typeof v === 'object' ? v : {}; });
+    bind('reciclagemLoadedAt', () => reciclagemLoadedAt, (v) => { reciclagemLoadedAt = v || null; });
+    bind('reciclagemRenderCache', () => reciclagemRenderCache, (v) => { reciclagemRenderCache = Array.isArray(v) ? v : []; }, Array.isArray);
+    bind('commandPaletteState', () => commandPaletteState, (v) => { commandPaletteState = v && typeof v === 'object' ? v : { open: false, activeIndex: 0, filtered: [] }; });
+}
+
+function ensureCoreCacheStores() {
+    AppCacheManager.defineStore('all-collaborators', { ttlMs: 5 * 60 * 1000 });
+    AppCacheManager.defineStore('unit-geo', { ttlMs: 0 });
+    AppCacheManager.defineStore('osrm-route', { ttlMs: 0 });
+    AppCacheManager.defineStore('osrm-table', { ttlMs: 0 });
+    AppCacheManager.defineStore('reciclagem-render', { ttlMs: 0 });
+}
+
+function hydrateManagedCachesFromLegacy() {
+    ensureCoreCacheStores();
+    const now = Date.now();
+    if (allCollaboratorsCache?.items && Array.isArray(allCollaboratorsCache.items)) {
+        const age = Math.max(0, now - Number(allCollaboratorsCache.updatedAt || 0));
+        const ttlLeft = Math.max(1, (5 * 60 * 1000) - age);
+        AppCacheManager.set('all-collaborators', 'items', allCollaboratorsCache.items, { ttlMs: ttlLeft });
+    }
+    if (unitGeoCache && typeof unitGeoCache === 'object') {
+        Object.entries(unitGeoCache).forEach(([key, value]) => {
+            if (!key || !value) return;
+            AppCacheManager.set('unit-geo', key, value);
+        });
+    }
+    if (osrmRouteCache instanceof Map) {
+        osrmRouteCache.forEach((value, key) => {
+            if (!key || !value) return;
+            AppCacheManager.set('osrm-route', key, value);
+        });
+    }
+    if (osrmTableCache instanceof Map) {
+        osrmTableCache.forEach((value, key) => {
+            if (!key || !value) return;
+            AppCacheManager.set('osrm-table', key, value);
+        });
+    }
+    if (Array.isArray(reciclagemRenderCache)) {
+        AppCacheManager.set('reciclagem-render', 'items', reciclagemRenderCache);
+    }
+}
+
+function initializeCoreManagers() {
+    registerAppStateBindings();
+    ensureCoreCacheStores();
+    if (!appCacheHydrated) {
+        hydrateManagedCachesFromLegacy();
+        appCacheHydrated = true;
+    }
+}
+
+function getAppState(key, fallback = undefined) {
+    initializeCoreManagers();
+    return AppStateManager.get(key, fallback);
+}
+
+function setAppState(key, value, options = {}) {
+    initializeCoreManagers();
+    return AppStateManager.set(key, value, options);
+}
+
+function getCachedAllCollaborators() {
+    initializeCoreManagers();
+    const cached = AppCacheManager.get('all-collaborators', 'items', null);
+    if (!Array.isArray(cached)) return null;
+    return cached;
+}
+
+function setCachedAllCollaborators(items, ttlMs = 5 * 60 * 1000) {
+    initializeCoreManagers();
+    if (!Array.isArray(items)) return;
+    AppCacheManager.set('all-collaborators', 'items', items, { ttlMs });
+    allCollaboratorsCache = { items, updatedAt: Date.now() };
+}
+
+function getCachedUnitGeo(address) {
+    initializeCoreManagers();
+    const key = String(address || '');
+    if (!key) return null;
+    const managed = AppCacheManager.get('unit-geo', key, null);
+    if (managed) return managed;
+    const legacy = unitGeoCache[key];
+    if (legacy) {
+        AppCacheManager.set('unit-geo', key, legacy);
+        return legacy;
+    }
+    return null;
+}
+
+function setCachedUnitGeo(address, coords) {
+    initializeCoreManagers();
+    const key = String(address || '');
+    if (!key || !coords) return;
+    AppCacheManager.set('unit-geo', key, coords);
+    unitGeoCache[key] = coords;
+}
+
+function getCachedOsrmTable(key) {
+    initializeCoreManagers();
+    const managed = AppCacheManager.get('osrm-table', key, null);
+    if (managed) return managed;
+    if (osrmTableCache.has(key)) {
+        const legacy = osrmTableCache.get(key);
+        AppCacheManager.set('osrm-table', key, legacy);
+        return legacy;
+    }
+    return null;
+}
+
+function setCachedOsrmTable(key, value) {
+    initializeCoreManagers();
+    if (!key || !value) return;
+    AppCacheManager.set('osrm-table', key, value);
+    osrmTableCache.set(key, value);
+}
+
+function getCachedOsrmRoute(key) {
+    initializeCoreManagers();
+    const managed = AppCacheManager.get('osrm-route', key, null);
+    if (managed) return managed;
+    if (osrmRouteCache.has(key)) {
+        const legacy = osrmRouteCache.get(key);
+        AppCacheManager.set('osrm-route', key, legacy);
+        return legacy;
+    }
+    return null;
+}
+
+function setCachedOsrmRoute(key, value) {
+    initializeCoreManagers();
+    if (!key || !value) return;
+    AppCacheManager.set('osrm-route', key, value);
+    osrmRouteCache.set(key, value);
+}
+
+function clearAllAppTimers(options = {}) {
+    AppTimerManager.clearAll();
+    shadowSyncTimer = null;
+    shadowAutoPullTimer = null;
+    ftSyncTimer = null;
+    reciclagemSyncTimer = null;
+    reminderCheckTimer = null;
+    autoEscalaTimer = null;
+    searchInputDebounceId = null;
+    if (options.clearEvents) {
+        AppEventManager.offAll();
+    }
+}
+
+function bindAppLifecycle() {
+    if (appLifecycleBound) return;
+    appLifecycleBound = true;
+    initializeCoreManagers();
+    AppEventManager.on(window, 'beforeunload', () => clearAllAppTimers({ clearEvents: true }), false, { scope: 'lifecycle', key: 'beforeunload-clear-all' });
+    AppEventManager.on(window, 'error', (event) => {
+        const err = event?.error || new Error(event?.message || 'Unhandled error event');
+        AppErrorHandler.capture(err, { scope: 'window-error', file: event?.filename || '', line: event?.lineno || 0, col: event?.colno || 0 }, { silent: true });
+    }, false, { scope: 'lifecycle', key: 'window-error-capture' });
+    AppEventManager.on(window, 'unhandledrejection', (event) => {
+        const reason = event?.reason instanceof Error ? event.reason : new Error(String(event?.reason || 'Unhandled promise rejection'));
+        AppErrorHandler.capture(reason, { scope: 'window-unhandledrejection' }, { silent: true });
+    }, false, { scope: 'lifecycle', key: 'window-unhandledrejection-capture' });
+}
+
+function scheduleSearchExecution() {
+    AppTimerManager.clear(APP_TIMERS.searchDebounce);
+    searchInputDebounceId = AppTimerManager.setTimeout(APP_TIMERS.searchDebounce, () => {
+        searchInputDebounceId = null;
+        if (searchInputComposing) return;
+        realizarBusca();
+    }, SEARCH_DEBOUNCE_MS);
+}
+
+function flushSearchExecution() {
+    AppTimerManager.clear(APP_TIMERS.searchDebounce);
+    searchInputDebounceId = null;
+    realizarBusca();
+}
+
+function clearTabScopedTimers(nextTab = '') {
+    const target = String(nextTab || '');
+    if (target !== 'busca') {
+        AppTimerManager.clear(APP_TIMERS.searchDebounce);
+        searchInputDebounceId = null;
+        searchInputComposing = false;
+    }
+    if (target !== 'lancamentos') {
+        AppTimerManager.clear(APP_TIMERS.ftSync);
+        ftSyncTimer = null;
+    }
+}
+
+const AppLogger = {
+    log(level, message, payload) {
+        const numeric = APP_LOG_LEVELS[level] ?? APP_LOG_LEVELS.info;
+        if (numeric > APP_LOG_LEVEL) return;
+        const stamp = new Date().toISOString();
+        const text = `[${stamp}] [${String(level || 'info').toUpperCase()}] ${message}`;
+        if (payload !== undefined) {
+            if (level === 'error') console.error(text, payload);
+            else if (level === 'warn') console.warn(text, payload);
+            else console.log(text, payload);
+            return;
+        }
+        if (level === 'error') console.error(text);
+        else if (level === 'warn') console.warn(text);
+        else console.log(text);
+    },
+    error(message, payload) { this.log('error', message, payload); },
+    warn(message, payload) { this.log('warn', message, payload); },
+    info(message, payload) { this.log('info', message, payload); },
+    debug(message, payload) { this.log('debug', message, payload); }
+};
+
+const AppErrorHandler = {
+    capture(error, context = {}, options = {}) {
+        const scope = context?.scope || 'app';
+        const errObj = error instanceof Error ? error : new Error(String(error || 'Erro desconhecido'));
+        const details = {
+            scope,
+            message: errObj.message,
+            stack: errObj.stack || '',
+            context
+        };
+        if (!options.silent) {
+            AppLogger.error(`${scope}: ${errObj.message}`, details);
+        } else {
+            AppLogger.debug(`${scope}: ${errObj.message}`, details);
+        }
+        if (options.toastMessage && typeof showToast === 'function') {
+            showToast(options.toastMessage, 'error');
+        }
+        return details;
+    }
+};
+if (typeof window !== 'undefined') {
+    window.AppLogger = AppLogger;
+    window.AppErrorHandler = AppErrorHandler;
+    window.AppTimerManager = AppTimerManager;
+    window.AppEventManager = AppEventManager;
+    window.AppState = AppStateManager;
+    window.AppCache = AppCacheManager;
+}
+
+function resolveNextiApiToken() {
+    let runtimeToken = '';
+    try {
+        runtimeToken = String(window.__NEXTI_API_TOKEN__ || localStorage.getItem('nextiApiToken') || sessionStorage.getItem('nextiApiToken') || '').trim();
+    } catch {}
+    const configToken = String(CONFIG?.api?.token || '').trim();
+    return runtimeToken || configToken;
+}
+
+function getNextiAuthHeaders() {
+    const token = resolveNextiApiToken();
+    return {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+    };
+}
+
+function isLikelyConfiguredToken(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return false;
+    if (raw === 'SEU_TOKEN_AQUI') return false;
+    return raw.length >= 16;
+}
+
+function warnIfNextiTokenExposedInConfig() {
+    const configToken = String(CONFIG?.api?.token || '').trim();
+    if (!isLikelyConfiguredToken(configToken)) return;
+    const runtimeToken = resolveNextiApiToken();
+    if (runtimeToken && runtimeToken !== configToken) return;
+    AppLogger.warn('Token Nexti configurado no frontend (config.js). Prefira injeção por runtime ou proxy backend.');
+}
+
+function validateFtSheetLaunchData(item) {
+    if (!item || typeof item !== 'object') return false;
+    const id = String(item.id || '').trim();
+    const collabRe = normalizeFtRe(item.collabRe || '');
+    const collabName = String(item.collabName || '').trim();
+    const unitTarget = String(item.unitTarget || '').trim();
+    const dateKey = normalizeFtDateKey(item.date || '');
+    if (!id) return false;
+    if (!collabRe && !collabName) return false;
+    if (dateKey) item.date = dateKey;
+    if (!['pending', 'submitted', 'launched'].includes(item.status)) {
+        item.status = normalizeFtStatus(item.status);
+    }
+    if (!unitTarget && item.status === 'launched') return false;
+    return true;
+}
+
+function validateTrocaSheetLaunchData(item) {
+    if (!item || typeof item !== 'object') return false;
+    const id = String(item.id || '').trim();
+    const hasPeople = !!(normalizeFtRe(item.requesterRe || '') || normalizeFtRe(item.counterpartRe || '') || String(item.requesterName || '').trim() || String(item.counterpartName || '').trim());
+    const hasUnit = !!String(item.unit || '').trim();
+    if (!id) return false;
+    if (!hasPeople && !hasUnit) return false;
+    if (!['pending', 'submitted', 'launched'].includes(item.status)) {
+        item.status = normalizeFtStatus(item.status);
+    }
+    return true;
+}
+
+function validateReciclagemEntry(item) {
+    if (!item || typeof item !== 'object') return false;
+    const re = normalizeReValueLoose(item.re || '');
+    const name = String(item.name || '').trim();
+    const unit = String(item.unit || '').trim();
+    if (!re && !name && !unit) return false;
+    if (item.expiry && !(item.expiry instanceof Date)) return false;
+    if (item.expiry instanceof Date && Number.isNaN(item.expiry.getTime())) return false;
+    return true;
+}
 
 // ==========================================================================
 // 🔐 GERENCIAMENTO & AUTENTICAÇÃO (SITE-ONLY)
@@ -260,21 +860,68 @@ function updateBreadcrumb() {
     }
 }
 
+function computeSearchFilterCounts(term = '') {
+    const termUpper = String(term || '').toUpperCase().trim();
+    const base = (currentData || []).filter(item => {
+        if (!item) return false;
+        if (hiddenUnits.has(item.posto)) return false;
+        if (termUpper) {
+            const matchesName = item.nome && item.nome.includes(termUpper);
+            const matchesRe = item.re && item.re.includes(termUpper);
+            const matchesUnit = item.posto && item.posto.includes(termUpper);
+            if (!matchesName && !matchesRe && !matchesUnit) return false;
+        }
+        if (searchHideAbsence && item.rotulo) return false;
+        return true;
+    });
+    const counts = { all: base.length, plantao: 0, folga: 0, ft: 0, afastado: 0, noAbsence: 0 };
+    base.forEach(item => {
+        const statusInfo = getStatusInfoForFilter(item);
+        const text = String(statusInfo?.text || '');
+        const isPlantao = text.includes('PLANTÃO') || text.includes('FT');
+        if (isPlantao) counts.plantao += 1;
+        if (!isPlantao) counts.folga += 1;
+        if (text.includes('FT')) counts.ft += 1;
+        if (item.rotulo) counts.afastado += 1;
+        if (!item.rotulo) counts.noAbsence += 1;
+    });
+    return counts;
+}
+
+function updateFilterChipCountLabel(button, count) {
+    if (!button) return;
+    if (!button.dataset.baseLabel) {
+        button.dataset.baseLabel = button.textContent.trim().replace(/\(\d+\)$/g, '').trim();
+    }
+    const baseLabel = button.dataset.baseLabel || '';
+    let countNode = button.querySelector('.chip-count');
+    if (!countNode) {
+        countNode = document.createElement('span');
+        countNode.className = 'chip-count';
+    }
+    countNode.textContent = String(Number.isFinite(count) ? count : 0);
+    button.replaceChildren(document.createTextNode(`${baseLabel} `), countNode);
+}
+
 function updateSearchFilterUI() {
+    const term = document.getElementById('search-input')?.value || '';
+    const counts = computeSearchFilterCounts(term);
     document.querySelectorAll('.filter-chip[data-filter]').forEach(btn => {
         const key = btn.getAttribute('data-filter');
         const active = key === searchFilterStatus;
         btn.classList.toggle('active', active);
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        updateFilterChipCountLabel(btn, counts[key] || 0);
     });
     const hideBtn = document.querySelector('.filter-chip[data-hide]');
     if (hideBtn) {
         hideBtn.classList.toggle('active', searchHideAbsence);
         hideBtn.setAttribute('aria-pressed', searchHideAbsence ? 'true' : 'false');
+        updateFilterChipCountLabel(hideBtn, counts.noAbsence || 0);
     }
     const filterWrap = document.querySelector('.search-filters');
     if (filterWrap) {
-        const hasActive = searchFilterStatus !== 'all' || searchHideAbsence || hasDateRangeFilter(searchDateFilter);
+        const hasActive = searchFilterStatus !== 'all' || searchHideAbsence;
         filterWrap.classList.toggle('filters-active', hasActive);
     }
 }
@@ -292,13 +939,12 @@ function toggleSearchHideAbsence() {
 }
 
 function setSearchDateFilter(from, to) {
-    const normalized = normalizeDateRange(from, to);
-    searchDateFilter.from = normalized.from;
-    searchDateFilter.to = normalized.to;
+    searchDateFilter.from = '';
+    searchDateFilter.to = '';
     const fromInput = document.getElementById('search-date-from');
     const toInput = document.getElementById('search-date-to');
-    if (fromInput && fromInput.value !== searchDateFilter.from) fromInput.value = searchDateFilter.from;
-    if (toInput && toInput.value !== searchDateFilter.to) toInput.value = searchDateFilter.to;
+    if (fromInput && fromInput.value !== '') fromInput.value = '';
+    if (toInput && toInput.value !== '') toInput.value = '';
     updateSearchFilterUI();
     realizarBusca();
 }
@@ -517,7 +1163,7 @@ function renderContextBar() {
 function bindContextSelection() {
     if (contextBound) return;
     contextBound = true;
-    document.addEventListener('click', (e) => {
+    AppEventManager.on(document, 'click', (e) => {
         if (e.target.closest('.context-bar')) return;
         const unitTitle = e.target.closest('.unit-title');
         if (unitTitle && !e.target.closest('.unit-actions')) {
@@ -535,7 +1181,7 @@ function bindContextSelection() {
             }
             if (re) setContextCollab(re);
         }
-    });
+    }, false, { scope: 'context', key: 'context-selection-click' });
 }
 
 function flashAvisoCard(id) {
@@ -801,7 +1447,9 @@ async function shadowRequest(action, payload = {}) {
             });
             const text = await response.text();
             return JSON.parse(text);
-        } catch {}
+        } catch (err) {
+            AppErrorHandler.capture(err, { scope: 'shadow-request-pull', action }, { silent: true });
+        }
     }
 
     return null;
@@ -921,25 +1569,24 @@ function applyShadowState(state) {
 function scheduleShadowSync(reason, options = {}) {
     if (!shadowEnabled()) return;
     if (!options.silent && options.notify !== false) shadowDirty = true;
-    if (shadowSyncTimer) clearTimeout(shadowSyncTimer);
-    shadowSyncTimer = setTimeout(() => {
+    shadowSyncTimer = AppTimerManager.setTimeout(APP_TIMERS.shadowSync, () => {
+        shadowSyncTimer = null;
         shadowPushAll(reason);
     }, 700);
 }
 
 function startShadowAutoPull() {
     if (!shadowEnabled()) return;
-    if (shadowAutoPullTimer) clearInterval(shadowAutoPullTimer);
-    shadowAutoPullTimer = setInterval(() => {
+    shadowAutoPullTimer = AppTimerManager.setInterval(APP_TIMERS.shadowAutoPull, () => {
         shadowPullState(false);
     }, 90000);
 
     if (shadowAutoPullBound) return;
-    document.addEventListener('visibilitychange', () => {
+    AppEventManager.on(document, 'visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             shadowPullState(false);
         }
-    });
+    }, false, { scope: 'shadow', key: 'shadow-autopull-visibility' });
     shadowAutoPullBound = true;
 }
 
@@ -1306,6 +1953,7 @@ const ICONS = {
     bell: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5"/><path d="M9.5 17a2.5 2.5 0 0 0 5 0"/></svg>`,
     launch: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H9"></path><path d="M6 12H4a2 2 0 0 0-2 2v5"></path><rect x="2" y="3" width="7" height="10" rx="1"></rect><path d="M5 7h2"></path><path d="M5 10h2"></path></svg>`,
     recycle: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6v6h-6"></path><path d="M3 18v-6h6"></path><path d="M20 9a8 8 0 0 0-14.4-3.6L3 8"></path><path d="M4 15a8 8 0 0 0 14.4 3.6L21 16"></path></svg>`,
+    performance: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="20" x2="20" y2="20"></line><rect x="6" y="11" width="3" height="6" rx="1"></rect><rect x="11" y="8" width="3" height="9" rx="1"></rect><rect x="16" y="5" width="3" height="12" rx="1"></rect></svg>`,
     whatsapp: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/></svg>`,
     phone: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`,
     shield: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>`,
@@ -1587,54 +2235,101 @@ const SUPERVISAO_DEFAULT_MENU = {
 const gateway = document.getElementById('gateway');
 const appContainer = document.getElementById('app-container');
 const appTitle = document.getElementById('app-title');
-const APP_VERSION = 'v3.9';
+const APP_VERSION = 'v3.9.1';
 const contentArea = document.getElementById('content-area');
+const AppBootstrapper = {
+    booted: false,
+    _runStep(name, fn) {
+        try {
+            const result = fn();
+            if (result && typeof result.then === 'function') {
+                result.catch((err) => {
+                    AppErrorHandler.capture(err, { scope: `bootstrap:${name}` }, { silent: true });
+                });
+            }
+        } catch (err) {
+            AppErrorHandler.capture(err, { scope: `bootstrap:${name}` }, { silent: true });
+        }
+    },
+    boot() {
+        if (this.booted) return;
+        this.booted = true;
+
+        this._runStep('core', () => {
+            bindAppLifecycle();
+            initializeCoreManagers();
+            AppLogger.info('App boot', { version: APP_VERSION });
+            warnIfNextiTokenExposedInConfig();
+            if (localStorage.getItem('compactMode') === '1') {
+                document.body.classList.add('compact-mode');
+            }
+            localStorage.setItem('aiSearchEnabled', '0');
+            localStorage.setItem('substituteSearchEnabled', '0');
+            try {
+                const storedProx = localStorage.getItem('substituteProximityMode');
+                if (storedProx === 'off' || storedProx === 'posto' || storedProx === 'endereco' || storedProx === 'rota') {
+                    substituteProximityMode = storedProx;
+                }
+            } catch {}
+        });
+
+        this._runStep('local-state', () => {
+            initAdmins();
+            loadLocalState();
+            hydrateManagedCachesFromLegacy();
+            loadAvisos();
+            loadFtRemovedIds();
+            loadFtLaunches();
+            refreshFtLabelsForToday();
+            loadFtReasons();
+            loadReciclagemTemplates();
+            loadReciclagemOverrides();
+            loadReciclagemHistory();
+            loadReciclagemNotes();
+            loadSupervisaoMenu();
+            loadSupervisaoHistory();
+            loadSupervisaoFavorites();
+            loadSupervisaoUsage();
+            loadSupervisaoChannelPrefs();
+            loadReciclagemData(false);
+            loadAuthFromStorage();
+        });
+
+        this._runStep('monitors', () => {
+            startAutoEscalaMonitor();
+            startReminderMonitor();
+            startReciclagemAutoRefresh();
+            startFtAutoSync();
+            syncTrocaSheetLaunches(true);
+            shadowPullState(false);
+            startShadowAutoPull();
+        });
+
+        this._runStep('resources', () => {
+            loadUnitAddressDb();
+            loadCollaboratorAddressDb();
+        });
+
+        this._runStep('ui', () => {
+            document.body.classList.add('on-gateway');
+            renderGateway();
+            document.getElementById('context-help-panel')?.remove();
+            ensureCommandPalette();
+            initSmartTooltips();
+            registerPwaSupport();
+            maybeShowMonthlyGidReminder();
+            updateMenuStatus();
+            updateLastUpdatedDisplay();
+        });
+    }
+};
+if (typeof window !== 'undefined') {
+    window.AppBootstrapper = AppBootstrapper;
+}
 
 // Inicialização
 document.addEventListener('DOMContentLoaded', () => {
-    localStorage.setItem('aiSearchEnabled', '0'); // Modo IA sempre inicia desativado
-    localStorage.setItem('substituteSearchEnabled', '0'); // Busca de substituto inicia desativada
-    try {
-        const storedProx = localStorage.getItem('substituteProximityMode');
-        if (storedProx === 'off' || storedProx === 'posto' || storedProx === 'endereco' || storedProx === 'rota') {
-            substituteProximityMode = storedProx;
-        }
-    } catch {}
-    initAdmins();
-    loadLocalState();
-    startAutoEscalaMonitor();
-    loadAvisos();
-    loadFtRemovedIds();
-    loadFtLaunches();
-    refreshFtLabelsForToday();
-    loadFtReasons();
-    loadReciclagemTemplates();
-    loadReciclagemOverrides();
-    loadReciclagemHistory();
-    loadReciclagemNotes();
-    loadSupervisaoMenu();
-    loadSupervisaoHistory();
-    loadSupervisaoFavorites();
-    loadSupervisaoUsage();
-    loadSupervisaoChannelPrefs();
-    loadReciclagemData(false);
-    loadAuthFromStorage();
-    startReminderMonitor();
-    startReciclagemAutoRefresh();
-    loadUnitAddressDb();
-    loadCollaboratorAddressDb();
-    startFtAutoSync();
-    syncTrocaSheetLaunches(true);
-    shadowPullState(false);
-    startShadowAutoPull();
-    document.body.classList.add('on-gateway');
-    renderGateway();
-    document.getElementById('context-help-panel')?.remove();
-    ensureCommandPalette();
-    registerPwaSupport();
-    maybeShowMonthlyGidReminder();
-    updateMenuStatus();
-    updateLastUpdatedDisplay();
+    AppBootstrapper.boot();
 });
 
 function registerPwaSupport() {
@@ -1672,6 +2367,9 @@ function getCommandPaletteCommands() {
     });
     push('Lançamentos • Indicadores FT', 'lancamentos dashboard ft', () => {
         openTabFromCommand('lancamentos', () => switchLancamentosTab('dashboard'));
+    });
+    push('Lançamentos • Planejamento', 'lancamentos planejamento semanal mensal', () => {
+        openTabFromCommand('lancamentos', () => switchLancamentosTab('planejamento'));
     });
     push('Lançamentos • Troca de folga', 'lancamentos troca erros', () => {
         openTabFromCommand('lancamentos', () => switchLancamentosMode('troca'));
@@ -1795,7 +2493,7 @@ function ensureCommandPalette() {
         });
     }
 
-    document.addEventListener('keydown', (ev) => {
+    AppEventManager.on(document, 'keydown', (ev) => {
         const isShortcut = (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k';
         if (isShortcut) {
             ev.preventDefault();
@@ -1810,7 +2508,7 @@ function ensureCommandPalette() {
             ev.preventDefault();
             closeCommandPalette();
         }
-    });
+    }, false, { scope: 'command-palette', key: 'command-palette-shortcut' });
 }
 
 // Botão de Scroll Top
@@ -1824,11 +2522,12 @@ window.onscroll = function() {
 };
 
 function openSupervisaoPage() {
+    clearTabScopedTimers('supervisao');
     appContainer.style.display = 'block';
     gateway.classList.add('hidden');
     document.body.classList.remove('on-gateway');
     document.body.classList.remove('utility-open');
-    currentTab = 'supervisao';
+    setAppState('currentTab', 'supervisao', { silent: true });
     contentArea.innerHTML = `
         <div class="breadcrumb-bar">
             <div class="breadcrumb-main">
@@ -1852,11 +2551,12 @@ function openSupervisaoPage() {
 }
 
 async function openGerenciaPage(options = {}) {
+    clearTabScopedTimers('gerencia');
     appContainer.style.display = 'block';
     gateway.classList.add('hidden');
     document.body.classList.remove('on-gateway');
     document.body.classList.remove('utility-open');
-    currentTab = 'gerencia';
+    setAppState('currentTab', 'gerencia', { silent: true });
     contentArea.innerHTML = `
         <div class="breadcrumb-bar">
             <div class="breadcrumb-main">
@@ -2510,7 +3210,7 @@ function openDunamisProjects() {
 
 // 2. Carregar Dados (Integração Google Sheets)
 async function loadGroup(groupKey) {
-    currentGroup = groupKey;
+    setAppState('currentGroup', groupKey, { silent: true });
     
     // UI Feedback
     gateway.classList.add('hidden');
@@ -2561,15 +3261,15 @@ async function loadGroup(groupKey) {
             // 🔄 Sincronização de Afastamentos (Camada Nova)
             items = await enrichWithNextiAbsences(items);
             
-            currentData = items.map((item, idx) => ({ ...item, id: idx }));
-            lastUpdatedAt = new Date();
+            setAppState('currentData', items.map((item, idx) => ({ ...item, id: idx })), { silent: true });
+            setAppState('lastUpdatedAt', new Date(), { silent: true });
             
             setAppTitle(`Gerenciamento de Efetivos - ${groupKey === 'todos' ? 'Geral' : groupKey.toUpperCase()}`, '(API)');
             renderDashboard();
             updateLastUpdatedDisplay();
             return;
         } catch (error) {
-            console.error("Erro na API Nexti:", error);
+            AppErrorHandler.capture(error, { scope: 'load-group-nexti', groupKey });
             showToast("Erro ao carregar dados da API. Verifique o console.", "error");
             if (CONFIG.disableCsvFallback) {
                 resetToGateway();
@@ -2588,7 +3288,7 @@ async function loadGroup(groupKey) {
     ]);
     const phoneMap = processPhoneData(phoneCsv);
 
-    currentData = [];
+    setAppState('currentData', [], { silent: true });
     
     if (groupKey === 'todos') {
         const keys = Object.keys(CONFIG.sheets).filter(k => k !== 'phones');
@@ -2609,8 +3309,8 @@ async function loadGroup(groupKey) {
 
         allItems = mergeLocalCollaborators(allItems, 'todos');
         
-        currentData = allItems.map((item, idx) => ({ ...item, id: idx }));
-        lastUpdatedAt = new Date();
+        setAppState('currentData', allItems.map((item, idx) => ({ ...item, id: idx })), { silent: true });
+        setAppState('lastUpdatedAt', new Date(), { silent: true });
         setAppTitle('Gerenciamento de Efetivos - Geral');
     } else {
         const csv = await fetchSheetData(CONFIG.sheets[groupKey]);
@@ -2620,8 +3320,8 @@ async function loadGroup(groupKey) {
             // Vincula telefones automáticos para todos os grupos
             let items = mapRowsToObjects(rows, groupKey, keepChanges, phoneMap, addressMap);
             items = mergeLocalCollaborators(items, groupKey);
-            currentData = items.map((item, idx) => ({ ...item, id: idx }));
-            lastUpdatedAt = new Date();
+            setAppState('currentData', items.map((item, idx) => ({ ...item, id: idx })), { silent: true });
+            setAppState('lastUpdatedAt', new Date(), { silent: true });
         }
         setAppTitle(`Gerenciamento de Efetivos - ${groupKey.toUpperCase()}`);
     }
@@ -2633,21 +3333,28 @@ async function loadGroup(groupKey) {
 
 // 3. Voltar ao Gateway
 function resetToGateway() {
+    clearTabScopedTimers('gateway');
     appContainer.style.display = 'none';
     gateway.classList.remove('hidden');
     document.body.classList.add('on-gateway');
     document.body.classList.remove('utility-open');
-    currentData = [];
-    currentGroup = '';
+    setAppState('currentData', [], { silent: true });
+    setAppState('currentGroup', '', { silent: true });
     hiddenUnits.clear();
     minimizedUnits.clear();
     // Não limpamos unitMetadata e collaboratorEdits aqui para permitir persistência na sessão
+    updateLastUpdatedDisplay();
 }
 
 async function getAllCollaborators(force = false) {
     const ttl = 5 * 60 * 1000;
-    if (!force && allCollaboratorsCache.items && (Date.now() - allCollaboratorsCache.updatedAt) < ttl) {
-        return allCollaboratorsCache.items;
+    if (!force) {
+        const managed = getCachedAllCollaborators();
+        if (managed) return managed;
+        if (allCollaboratorsCache.items && (Date.now() - allCollaboratorsCache.updatedAt) < ttl) {
+            setCachedAllCollaborators(allCollaboratorsCache.items, ttl);
+            return allCollaboratorsCache.items;
+        }
     }
     try {
         const [phoneCsv, addressMap] = await Promise.all([
@@ -2666,12 +3373,15 @@ async function getAllCollaborators(force = false) {
         let allItems = [];
         results.forEach(items => allItems = allItems.concat(items));
         allItems = mergeLocalCollaborators(allItems, 'todos');
+        const normalizedItems = allItems.map((item, idx) => ({ ...item, id: idx }));
+        setCachedAllCollaborators(normalizedItems, ttl);
         allCollaboratorsCache = {
-            items: allItems.map((item, idx) => ({ ...item, id: idx })),
+            items: normalizedItems,
             updatedAt: Date.now()
         };
         return allCollaboratorsCache.items;
-    } catch {
+    } catch (err) {
+        AppErrorHandler.capture(err, { scope: 'all-collaborators-load' }, { silent: true });
         return currentData || [];
     }
 }
@@ -2690,10 +3400,7 @@ async function fetchAllNextiPersons() {
     while (!last) {
         const response = await fetch(`${CONFIG.api.baseUrl}/persons/all?page=${page}&size=${size}`, {
             method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${CONFIG.api.token}`,
-                'Content-Type': 'application/json'
-            }
+            headers: getNextiAuthHeaders()
         });
 
         if (!response.ok) throw new Error(`Erro API: ${response.status}`);
@@ -2747,7 +3454,7 @@ function mapNextiToAppFormat(nextiPersons, groupTag, keepChanges) {
             cargo: getCollaboratorRoleByRe(re),
             _nextiId: p.id // ID interno para busca de afastamentos
         };
-    }).filter(item => item && item.nome && item.re);
+    }).filter(validateCollaboratorData);
 }
 
 function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap, addressMap) {
@@ -2797,7 +3504,7 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap, addressMap) {
         };
 
         return obj;
-    }).filter(item => item && item.nome && item.re); // Filtra linhas inválidas
+    }).filter(validateCollaboratorData); // Filtra linhas inválidas
 }
 
 // ==========================================================================
@@ -2814,10 +3521,7 @@ async function fetchNextiPeople() {
     while (hasMore) {
         const response = await fetch(`${CONFIG.api.baseUrl}/persons/all?page=${page}&size=${size}`, {
             method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${CONFIG.api.token}`,
-                'Content-Type': 'application/json'
-            }
+            headers: getNextiAuthHeaders()
         });
 
         if (!response.ok) throw new Error(`Erro API: ${response.status}`);
@@ -2850,10 +3554,7 @@ async function fetchNextiEventsForDate(date) {
         const ref = formatNextiDate(date);
         const response = await fetch(`${CONFIG.api.baseUrl}/timetrackings/eventsperday/${ref}`, {
             method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${CONFIG.api.token}`,
-                'Content-Type': 'application/json'
-            }
+            headers: getNextiAuthHeaders()
         });
 
         if (!response.ok) return null;
@@ -2870,7 +3571,7 @@ async function fetchNextiEventsForDate(date) {
 
         return map;
     } catch (e) {
-        console.error("Erro ao buscar eventos do dia (Nexti)", e);
+        AppErrorHandler.capture(e, { scope: 'nexti-events-for-date', date: String(date || '') }, { silent: true });
         return null;
     }
 }
@@ -2899,10 +3600,7 @@ async function fetchAbsenceSituations() {
     try {
         const response = await fetch(`${CONFIG.api.baseUrl}/absencesituations/all?size=1000`, {
             method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${CONFIG.api.token}`,
-                'Content-Type': 'application/json'
-            }
+            headers: getNextiAuthHeaders()
         });
         if (!response.ok) return {};
         const data = await response.json();
@@ -2916,7 +3614,7 @@ async function fetchAbsenceSituations() {
         absenceSituationsCache = map;
         return map;
     } catch (e) {
-        console.error("Erro ao buscar situações de ausência", e);
+        AppErrorHandler.capture(e, { scope: 'nexti-absence-situations' }, { silent: true });
         return {};
     }
 }
@@ -2942,7 +3640,7 @@ async function enrichWithNextiAbsences(items) {
             try {
                 const url = `${CONFIG.api.baseUrl}/absences/person/${item._nextiId}/start/${startStr}/finish/${finishStr}`;
                 const res = await fetch(url, {
-                    headers: { 'Authorization': `Bearer ${CONFIG.api.token}` }
+                    headers: { 'Authorization': `Bearer ${resolveNextiApiToken()}` }
                 });
                 if (res.ok) {
                     const data = await res.json();
@@ -2954,7 +3652,9 @@ async function enrichWithNextiAbsences(items) {
                         applyAbsenceLabel(item, activeAbsence, name);
                     }
                 }
-            } catch (err) { /* Ignora erro individual */ }
+            } catch (err) {
+                AppErrorHandler.capture(err, { scope: 'nexti-absences-item', personId: item?._nextiId || '' }, { silent: true });
+            }
         }));
     }
     return items;
@@ -3031,7 +3731,7 @@ function mapNextiData(persons, groupTag, keepChanges) {
             endereco: getCollaboratorAddressByRe(re),
             cargo: getCollaboratorRoleByRe(re)
         };
-    }).filter(item => item && item.nome && item.re);
+    }).filter(validateCollaboratorData);
 }
 
 function normalizeHeaderValue(value) {
@@ -3044,6 +3744,24 @@ function normalizeHeaderValue(value) {
 function normalizeReKey(value) {
     if (value == null) return '';
     return String(value).replace(/[^a-zA-Z0-9]/g, '');
+}
+
+function validateCollaboratorData(item) {
+    if (!item || typeof item !== 'object') return false;
+    const nome = String(item.nome || '').trim();
+    const re = normalizeReKey(item.re || '');
+    return !!(nome && re);
+}
+
+function validateAddressData(item) {
+    if (!item || typeof item !== 'object') return false;
+    const unitName = String(item.nome || item.unidade || item.posto || '').trim();
+    const re = normalizeReKey(item.re || item.matricula || '');
+    const address = String(item.endereco || item.address || '').trim();
+    const role = String(item.cargo || item.role || '').trim();
+    if (unitName) return !!address;
+    if (re) return !!(address || role);
+    return false;
 }
 
 function processPhoneData(csvText) {
@@ -3139,6 +3857,7 @@ function processCollaboratorAddressData(csvText) {
         const reRaw = cols[idxRE] || '';
         const address = (cols[idxAddress] || '').trim();
         const role = idxRole >= 0 ? (cols[idxRole] || '').trim().toUpperCase() : '';
+        if (!validateAddressData({ re: reRaw, endereco: address, cargo: role })) return;
         const key = normalizeReKey(reRaw);
         if (!key) return;
         const current = map[key] || { address: '', role: '' };
@@ -3242,19 +3961,6 @@ function renderDashboard() {
                     <button class="filter-chip" data-filter="afastado" onclick="setSearchFilterStatus('afastado')">Afastados</button>
                     <button class="filter-chip" data-hide="1" onclick="toggleSearchHideAbsence()">Sem afastamento</button>
                 </div>
-                <div class="search-date-filters">
-                    <div class="search-date-field">
-                        <label>FT de</label>
-                        <input type="date" id="search-date-from" value="${searchDateFilter.from || ''}">
-                    </div>
-                    <div class="search-date-field">
-                        <label>até</label>
-                        <input type="date" id="search-date-to" value="${searchDateFilter.to || ''}">
-                    </div>
-                    <div class="menu-actions-row search-date-actions">
-                        <button class="btn btn-secondary btn-small" onclick="clearSearchDateFilter()">Limpar data</button>
-                    </div>
-                </div>
                 <div id="substitute-panel" class="substitute-panel hidden">
                     <div class="substitute-target-row">
                         <div class="substitute-target-info">
@@ -3314,7 +4020,7 @@ function renderDashboard() {
                 </div>
                 <div class="search-date-filters unit-date-filters">
                     <div class="search-date-field">
-                        <label>FT de</label>
+                        <label>Data de</label>
                         <input type="date" id="unit-date-from" value="${unitDateFilter.from || ''}">
                     </div>
                     <div class="search-date-field">
@@ -3573,11 +4279,14 @@ function renderDashboard() {
                             <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('diaria')">Diária FT</button>
                             <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Indicadores FT</button>
                             <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico FT</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('planejamento')">Planejamento FT</button>
                         </div>
                         <div id="lancamentos-actions-troca" class="lanc-action-group hidden">
-                            <button class="btn btn-secondary btn-small" onclick="syncTrocaSheetLaunches(false)">Sincronizar trocas</button>
-                            <button class="btn btn-secondary btn-small" onclick="renderLancamentosTroca()">Ver erros de troca</button>
-                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosMode('ft')">Voltar para FT</button>
+                            <button class="btn btn-secondary btn-small" onclick="syncTrocaSheetLaunches(false)" ${canManageLancamentos ? '' : 'disabled'}>Sincronizar trocas</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('diaria')">Diária Troca</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Indicadores Troca</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico Troca</button>
+                            <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('planejamento')">Planejamento Troca</button>
                         </div>
                     </div>
                 </div>
@@ -3585,12 +4294,20 @@ function renderDashboard() {
                     <button class="lancamentos-tab daily-focus" data-tab="diaria" onclick="switchLancamentosTab('diaria')">Diária <span class="tab-badge" id="lancamentos-tab-today">0</span></button>
                     <button class="lancamentos-tab" data-tab="dashboard" onclick="switchLancamentosTab('dashboard')">Indicadores <span class="tab-badge" id="lancamentos-tab-total">0</span></button>
                     <button class="lancamentos-tab" data-tab="historico" onclick="switchLancamentosTab('historico')">Histórico <span class="tab-badge" id="lancamentos-tab-pending">0</span></button>
+                    <button class="lancamentos-tab" data-tab="planejamento" onclick="switchLancamentosTab('planejamento')">Planejamento <span class="tab-badge" id="lancamentos-tab-planning">0</span></button>
+                </div>
+                <div class="lancamentos-tabs hidden" id="lancamentos-tabs-troca">
+                    <button class="lancamentos-tab daily-focus" data-tab="diaria" onclick="switchLancamentosTab('diaria')">Diária <span class="tab-badge" id="lancamentos-tab-troca-today">0</span></button>
+                    <button class="lancamentos-tab" data-tab="dashboard" onclick="switchLancamentosTab('dashboard')">Indicadores <span class="tab-badge" id="lancamentos-tab-troca-total">0</span></button>
+                    <button class="lancamentos-tab" data-tab="historico" onclick="switchLancamentosTab('historico')">Histórico <span class="tab-badge" id="lancamentos-tab-troca-pending">0</span></button>
+                    <button class="lancamentos-tab" data-tab="planejamento" onclick="switchLancamentosTab('planejamento')">Planejamento <span class="tab-badge" id="lancamentos-tab-troca-planning">0</span></button>
                 </div>
                 <div id="lancamentos-filters-wrap" class="lancamentos-filters-wrap"></div>
                 <div id="lancamentos-panel-diaria" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-troca" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-dashboard" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-historico" class="lancamentos-panel hidden"></div>
+                <div id="lancamentos-panel-planejamento" class="lancamentos-panel hidden"></div>
                 <div id="lancamentos-panel-novo" class="lancamentos-panel hidden">
                     <div class="form-group">
                         <label>Buscar colaborador (RE ou nome)</label>
@@ -4279,6 +4996,28 @@ function renderDashboard() {
             </div>
         </div>
 
+        <!-- Modal Escala Completa -->
+        <div id="ft-week-preview-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 860px;">
+                <div class="modal-header sticky-modal-header">
+                    <h3 id="ft-week-preview-title">Escala completa</h3>
+                    <button class="close-modal" onclick="closeFtWeekPreviewModal()">${ICONS.close}</button>
+                </div>
+                <div id="ft-week-preview-body" class="ft-week-modal-body"></div>
+            </div>
+        </div>
+
+        <!-- Modal Performance do Colaborador -->
+        <div id="performance-modal" class="modal hidden">
+            <div class="modal-content" style="max-width: 920px;">
+                <div class="modal-header sticky-modal-header">
+                    <h3 id="performance-modal-title">Performance do colaborador</h3>
+                    <button class="close-modal" onclick="closePerformanceModal()">${ICONS.close}</button>
+                </div>
+                <div id="performance-modal-body" class="performance-modal-body"></div>
+            </div>
+        </div>
+
         <!-- Modal Rota (Substituto) -->
         <div id="route-modal" class="modal hidden">
             <div class="modal-content" style="max-width: 900px;">
@@ -4499,14 +5238,34 @@ function renderDashboard() {
 
     // Configurar evento de busca
     const searchInput = document.getElementById('search-input');
-    const triggerSearch = () => realizarBusca();
-    searchInput.addEventListener('input', triggerSearch);
-    searchInput.addEventListener('change', triggerSearch);
-    searchInput.addEventListener('keyup', triggerSearch);
-    searchInput.addEventListener('compositionend', triggerSearch);
-    searchInput.addEventListener('input', () => handleSearchTokenSuggest());
-    searchInput.addEventListener('click', () => handleSearchTokenSuggest());
-    searchInput.addEventListener('keyup', () => handleSearchTokenSuggest());
+    searchInputComposing = false;
+    AppTimerManager.clear(APP_TIMERS.searchDebounce);
+    searchInputDebounceId = null;
+    if (searchInput) {
+        const onSuggest = () => handleSearchTokenSuggest();
+        searchInput.addEventListener('input', () => {
+            onSuggest();
+            if (searchInputComposing) return;
+            scheduleSearchExecution();
+        });
+        searchInput.addEventListener('compositionstart', () => {
+            searchInputComposing = true;
+        });
+        searchInput.addEventListener('compositionend', () => {
+            searchInputComposing = false;
+            onSuggest();
+            scheduleSearchExecution();
+        });
+        searchInput.addEventListener('change', () => {
+            onSuggest();
+            flushSearchExecution();
+        });
+        searchInput.addEventListener('click', onSuggest);
+        searchInput.addEventListener('keyup', (ev) => {
+            onSuggest();
+            if (ev.key === 'Enter') flushSearchExecution();
+        });
+    }
     const searchDateFrom = document.getElementById('search-date-from');
     const searchDateTo = document.getElementById('search-date-to');
     if (searchDateFrom && searchDateTo) {
@@ -4514,6 +5273,7 @@ function renderDashboard() {
         searchDateFrom.addEventListener('change', onSearchDateChange);
         searchDateTo.addEventListener('change', onSearchDateChange);
     }
+    searchDateFilter = { from: '', to: '' };
 
     const searchUnitInput = document.getElementById('search-unit-target');
     if (searchUnitInput) {
@@ -4640,7 +5400,8 @@ function switchTab(tabName) {
         showToast("Faça login para acessar os avisos.", "error");
         return;
     }
-    currentTab = tabName;
+    clearTabScopedTimers(tabName);
+    setAppState('currentTab', tabName, { silent: true });
     
     // Atualiza botões
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -4681,9 +5442,6 @@ function switchTab(tabName) {
     }
     if (tabName === 'lancamentos') {
         renderLancamentos();
-    } else if (ftSyncTimer) {
-        clearInterval(ftSyncTimer);
-        ftSyncTimer = null;
     }
 
     clearContextBar();
@@ -4728,17 +5486,16 @@ function startAutoEscalaMonitor() {
     if (!shadowEnabled() || shadowReady) {
         applyAutoEscalaInvertida({ silent: true, notify: false });
     }
-    if (autoEscalaTimer) clearInterval(autoEscalaTimer);
-    autoEscalaTimer = setInterval(() => {
+    autoEscalaTimer = AppTimerManager.setInterval(APP_TIMERS.autoEscala, () => {
         applyAutoEscalaInvertida({ silent: true, notify: false });
     }, 60 * 60 * 1000);
 
     if (autoEscalaBound) return;
-    document.addEventListener('visibilitychange', () => {
+    AppEventManager.on(document, 'visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             applyAutoEscalaInvertida({ silent: true, notify: false });
         }
-    });
+    }, false, { scope: 'auto-escala', key: 'auto-escala-visibility' });
     autoEscalaBound = true;
 }
 
@@ -4783,15 +5540,15 @@ function realizarBusca() {
     const termo = document.getElementById('search-input').value;
     const filterStatus = searchFilterStatus || 'all';
     const hideAbsence = !!searchHideAbsence;
-    const hasDateFilter = hasDateRangeFilter(searchDateFilter);
     const resultsContainer = document.getElementById('search-results');
+    updateSearchFilterUI();
 
     if (isSubstituteSearchEnabled()) {
         runSubstituteSearch(termo, resultsContainer, filterStatus, hideAbsence);
         return;
     }
     
-    if (!termo && filterStatus === 'all' && !hasDateFilter) {
+    if (!termo && filterStatus === 'all') {
         resultsContainer.innerHTML = '<p class="empty-state">Digite para buscar ou selecione um filtro...</p>';
         return;
     }
@@ -4811,7 +5568,6 @@ function realizarBusca() {
 
 function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
     const termoLimpo = termo.toUpperCase();
-    const dateRange = normalizeDateRange(searchDateFilter.from, searchDateFilter.to);
     
     let resultados = currentData.filter(item => {
         // Verifica se o posto está oculto
@@ -4840,15 +5596,8 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         resultados = resultados.filter(item => !item.rotulo);
     }
 
-    if (hasDateRangeFilter(dateRange)) {
-        resultados = resultados.filter(item => matchesFtDateFilterForCollaborator(item.re, dateRange));
-    }
-
     if (resultados.length === 0) {
-        const dateHint = hasDateRangeFilter(dateRange)
-            ? ' com o filtro de data aplicado'
-            : '';
-        resultsContainer.innerHTML = `<p class="empty-state">Nenhum resultado encontrado${dateHint}.</p>`;
+        resultsContainer.innerHTML = `<p class="empty-state">Nenhum resultado encontrado.</p>`;
         return;
     }
 
@@ -4920,6 +5669,7 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
                         ${retornoInfo}
                     </div>
                     <div class="header-right">
+                        <button class="edit-btn-icon performance-icon" onclick="openPerformanceModal(${reJsAttr}, ${nameJsAttr})" title="Performance do colaborador">${ICONS.performance}</button>
                         <button class="edit-btn-icon map-icon ${mapBtnClass}" onclick="openAddressModalForCollaborator(${reJsAttr}, ${nameJsAttr}, ${unitJsAttr})" title="${mapTitle}" ${canOpenMap ? '' : 'disabled'}>${ICONS.mapPin}</button>
                         <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal(${nameJsAttr}, ${phoneJsAttr})" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                         <button class="edit-btn-icon" onclick="openEditModal(${item.id})">${ICONS.edit}</button>
@@ -5129,11 +5879,194 @@ function buildSubstituteMetaCard(target, modeUsed, note, total, filterStatus, hi
     `;
 }
 
+function normalizeSubstituteRe(value) {
+    return String(value || '').replace(/\D/g, '');
+}
+
+function getSubstituteAvailabilityBucket(statusText) {
+    const normalized = normalizeText(statusText || '');
+    if (normalized.includes('ferias') || normalized.includes('atestado') || normalized.includes('afastado')) return 'away';
+    if (normalized.includes('folga')) return 'folga';
+    if (normalized.includes('ft')) return 'ft';
+    if (normalized.includes('plantao')) return 'plantao';
+    return 'unknown';
+}
+
+function buildSubstituteCoverageStatsMap(target) {
+    const targetUnit = normalizeUnitKey(target?.posto || '');
+    const map = new Map();
+    getFtOperationalItems(ftLaunches).forEach(item => {
+        const reNorm = normalizeSubstituteRe(item?.collabRe || item?.re || '');
+        if (!reNorm) return;
+        const unitNorm = normalizeUnitKey(item?.unitTarget || item?.unitCurrent || '');
+        const dateKey = normalizeFtDateKey(item?.date || '');
+        const prev = map.get(reNorm) || { total: 0, sameUnit: 0, lastDate: '' };
+        prev.total += 1;
+        if (targetUnit && unitNorm && unitNorm === targetUnit) prev.sameUnit += 1;
+        if (dateKey && (!prev.lastDate || dateKey > prev.lastDate)) prev.lastDate = dateKey;
+        map.set(reNorm, prev);
+    });
+    return map;
+}
+
+function getSubstituteCoverageStats(re, coverageMap) {
+    const reNorm = normalizeSubstituteRe(re);
+    if (!reNorm || !coverageMap?.has(reNorm)) {
+        return { total: 0, sameUnit: 0, lastDate: '' };
+    }
+    return coverageMap.get(reNorm);
+}
+
+function buildSubstituteRecommendation(candidate, target, modeUsed, coverageMap) {
+    const statusInfo = candidate._statusInfoSnapshot || getStatusInfo(candidate);
+    const availability = getSubstituteAvailabilityBucket(statusInfo.text);
+    const highlights = [];
+    const cautions = [];
+    let score = 45;
+
+    if (availability === 'folga') {
+        score += 28;
+        highlights.push('folga hoje');
+    } else if (availability === 'plantao') {
+        score -= 24;
+        cautions.push('já em plantão');
+    } else if (availability === 'ft') {
+        score -= 18;
+        cautions.push('já em FT');
+    } else if (availability === 'away') {
+        score -= 60;
+        cautions.push('afastamento ativo');
+    } else {
+        cautions.push('status sem confirmação');
+    }
+
+    const sameUnit = candidate.posto && target.posto && normalizeUnitKey(candidate.posto) === normalizeUnitKey(target.posto);
+    if (sameUnit) {
+        score += 18;
+        highlights.push('mesma unidade do alvo');
+    }
+    if (candidate.grupo && target.grupo && candidate.grupo === target.grupo) {
+        score += 6;
+        highlights.push('mesmo grupo');
+    }
+
+    const distance = candidate._routeDistanceKm ?? candidate._distanceKm;
+    if (Number.isFinite(distance)) {
+        if (distance <= 5) score += 18;
+        else if (distance <= 10) score += 12;
+        else if (distance <= 20) score += 6;
+        else if (distance > 35) score -= 8;
+        highlights.push(`proximidade ${formatDistanceKm(distance)} km`);
+    } else if (modeUsed !== 'off') {
+        cautions.push('sem distância calculada');
+    }
+
+    const hasAddress = !!getAddressForCollaborator(candidate);
+    if (!hasAddress && (modeUsed === 'endereco' || modeUsed === 'rota')) {
+        score -= 8;
+        cautions.push('endereço não cadastrado');
+    }
+
+    const coverage = getSubstituteCoverageStats(candidate.re, coverageMap);
+    if (coverage.total > 0) {
+        score += Math.min(14, coverage.total * 2);
+        highlights.push(`histórico de ${coverage.total} FT`);
+        if (coverage.sameUnit > 0) {
+            score += Math.min(8, coverage.sameUnit * 2);
+            highlights.push(`${coverage.sameUnit} FT na unidade alvo`);
+        }
+    } else {
+        cautions.push('sem histórico FT');
+    }
+
+    score = Math.max(0, Math.min(100, Math.round(score)));
+    let tier = 'blocked';
+    let rank = 1;
+    let label = 'Baixa aderência';
+    if (availability === 'away') {
+        tier = 'blocked';
+        rank = 0;
+        label = 'Indisponível';
+    } else if (score >= 85) {
+        tier = 'ideal';
+        rank = 3;
+        label = 'Candidato ideal';
+    } else if (score >= 60) {
+        tier = 'caution';
+        rank = 2;
+        label = 'Com ressalvas';
+    }
+
+    return { score, tier, rank, label, highlights, cautions, coverage };
+}
+
+function compareSubstituteRecommendation(a, b) {
+    const recA = a?._substituteRecommendation || { rank: 0, score: 0 };
+    const recB = b?._substituteRecommendation || { rank: 0, score: 0 };
+    if (recA.rank !== recB.rank) return recB.rank - recA.rank;
+    if (recA.score !== recB.score) return recB.score - recA.score;
+    const distA = a?._routeDistanceKm ?? a?._distanceKm ?? Number.POSITIVE_INFINITY;
+    const distB = b?._routeDistanceKm ?? b?._distanceKm ?? Number.POSITIVE_INFINITY;
+    if (distA !== distB) return distA - distB;
+    return String(a?.nome || '').localeCompare(String(b?.nome || ''));
+}
+
+function rankSubstituteCandidates(list, target, modeUsed, coverageMap) {
+    list.forEach(item => {
+        item._substituteRecommendation = buildSubstituteRecommendation(item, target, modeUsed, coverageMap);
+    });
+    return list.sort(compareSubstituteRecommendation);
+}
+
+function buildSubstituteRecommendationBadge(rec) {
+    if (!rec) return '';
+    return `<span class="substitute-score-badge ${rec.tier}">${rec.label} • ${rec.score}%</span>`;
+}
+
+function buildSubstituteRecommendationNote(rec, sourceText) {
+    if (!rec) return `Fonte da proximidade: ${sourceText}.`;
+    const parts = [`Score de cobertura: ${rec.score}% (${rec.label}).`];
+    if (rec.highlights?.length) parts.push(`Pontos fortes: ${rec.highlights.join(', ')}.`);
+    if (rec.cautions?.length) parts.push(`Ressalvas: ${rec.cautions.join(', ')}.`);
+    if (rec.coverage?.total) {
+        const sameUnitNote = rec.coverage.sameUnit ? ` (${rec.coverage.sameUnit} na unidade alvo)` : '';
+        parts.push(`Histórico FT: ${rec.coverage.total}${sameUnitNote}.`);
+    }
+    parts.push(`Fonte da proximidade: ${sourceText}.`);
+    return parts.join(' ');
+}
+
+function buildSubstituteSuggestionSummaryCard(target, list) {
+    const ideal = list.filter(item => item?._substituteRecommendation?.tier === 'ideal').length;
+    const caution = list.filter(item => item?._substituteRecommendation?.tier === 'caution').length;
+    const blocked = list.filter(item => item?._substituteRecommendation?.tier === 'blocked').length;
+    const suggested = list
+        .filter(item => item?._substituteRecommendation?.rank >= 2)
+        .slice(0, 2);
+    const fallbackSuggested = suggested.length ? suggested : list.slice(0, 2);
+    const suggestedText = fallbackSuggested.length
+        ? fallbackSuggested.map(item => `${item.nome} (RE ${item.re})`).join(' + ')
+        : 'Nenhum candidato disponível.';
+
+    return `
+        <div class="result-card substitute-summary-card">
+            <h4>Sugestões automáticas</h4>
+            <div class="meta">Cobertura para ${target.nome} (RE ${target.re}).</div>
+            <div class="substitute-summary-stats">
+                <span class="substitute-tier-badge ideal">Ideais: ${ideal}</span>
+                <span class="substitute-tier-badge caution">Ressalvas: ${caution}</span>
+                <span class="substitute-tier-badge blocked">Não recomendado: ${blocked}</span>
+            </div>
+            <div class="meta">Sugestão automática: ${suggestedText}</div>
+        </div>
+    `;
+}
+
 async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAbsence) {
     if (!resultsContainer) return;
     const seq = ++substituteSearchSeq;
     const termUpper = (termo || '').trim().toUpperCase();
-    const dateRange = normalizeDateRange(searchDateFilter.from, searchDateFilter.to);
+    const dateRange = { from: '', to: '' };
     const target = getSubstituteTarget();
 
     if (!target) {
@@ -5205,11 +6138,16 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
         });
     }
 
+    const coverageMap = buildSubstituteCoverageStatsMap(target);
+    list = rankSubstituteCandidates(list, target, modeUsed, coverageMap);
     const metaCard = buildSubstituteMetaCard(target, modeUsed, proximityNote, list.length, filterStatus, hideAbsence, osrmNote, dateRange);
-    resultsContainer.innerHTML = metaCard + list.map(item => {
+    const summaryCard = buildSubstituteSuggestionSummaryCard(target, list);
+    resultsContainer.innerHTML = metaCard + summaryCard + list.map(item => {
         const statusInfo = item._statusInfoSnapshot || getStatusInfo(item);
         const addressOk = !!getAddressForCollaborator(item);
+        const recommendation = item._substituteRecommendation || null;
         const badgeHtml = `<span class="address-status-badge ${addressOk ? 'ok' : 'missing'}">${addressOk ? 'Endereço OK' : 'endereço não cadastrado no nexti'}</span>`;
+        const recommendationBadge = buildSubstituteRecommendationBadge(recommendation);
         let sourceText = 'desligada';
         if (modeUsed !== 'off') {
             const source = item._distanceSource || modeUsed;
@@ -5228,12 +6166,12 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
                 sourceText = baseMode === 'endereco' ? 'endereço' : 'posto';
             }
         }
-        const reasonNote = `Fonte da proximidade: ${sourceText}.`;
+        const reasonNote = buildSubstituteRecommendationNote(recommendation, sourceText);
         return renderAiResultCard(item, target, {
             statusInfoOverride: statusInfo,
             reasonOverride: buildSubstituteReason(item, target, { proximityMode: modeUsed, statusInfoOverride: statusInfo }),
             reasonNote,
-            headerBadgesHtml: badgeHtml,
+            headerBadgesHtml: `${recommendationBadge}${badgeHtml}`,
             actionHtml: buildSubstituteActionHtml(item, target, modeUsed)
         });
     }).join('');
@@ -5430,8 +6368,120 @@ function atualizarEstatisticas(dados, groupFilter) {
 }
 
 
+function renderSiteFooter() {
+    const footer = document.getElementById('site-footer');
+    if (!footer) return;
+    const year = new Date().getFullYear();
+    const updatedText = lastUpdatedAt ? lastUpdatedAt.toLocaleString() : '—';
+    const groupLabel = currentGroup ? currentGroup.toUpperCase() : 'N/A';
+    footer.innerHTML = `
+        <div class="footer-inner">
+            <span class="footer-item">Cobertura Dunamis ${APP_VERSION}</span>
+            <span class="footer-dot">•</span>
+            <span class="footer-item" id="footer-updated">Ultima sync: ${updatedText}</span>
+            <span class="footer-dot">•</span>
+            <span class="footer-item">Grupo: ${groupLabel}</span>
+            <span class="footer-dot">•</span>
+            <span class="footer-item">(c) ${year}</span>
+            <button type="button" class="footer-link" onclick="openHelpModal()">Ajuda</button>
+            <button type="button" class="footer-link" onclick="openGuideModal()">Guia</button>
+        </div>
+    `;
+}
+
+function ensureTooltipElement() {
+    let el = document.getElementById('app-tooltip');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'app-tooltip';
+        el.className = 'app-tooltip';
+        document.body.appendChild(el);
+    }
+    activeTooltipEl = el;
+    return el;
+}
+
+function resolveTooltipTarget(node) {
+    if (!node || typeof node.closest !== 'function') return null;
+    return node.closest('[title], [data-native-title]');
+}
+
+function positionTooltip(clientX, clientY) {
+    if (!activeTooltipEl) return;
+    const margin = 12;
+    const rect = activeTooltipEl.getBoundingClientRect();
+    const maxX = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxY = Math.max(margin, window.innerHeight - rect.height - margin);
+    const x = Math.min(maxX, Math.max(margin, clientX + 14));
+    const y = Math.min(maxY, Math.max(margin, clientY + 14));
+    activeTooltipEl.style.left = `${x}px`;
+    activeTooltipEl.style.top = `${y}px`;
+}
+
+function hideActiveTooltip() {
+    if (!activeTooltipTarget || !activeTooltipEl) return;
+    const stored = activeTooltipTarget.getAttribute('data-native-title');
+    if (stored && !activeTooltipTarget.getAttribute('title')) {
+        activeTooltipTarget.setAttribute('title', stored);
+    }
+    activeTooltipEl.classList.remove('show');
+    activeTooltipTarget = null;
+}
+
+function showTooltipForTarget(target, x, y) {
+    if (!target) return;
+    if (activeTooltipTarget && activeTooltipTarget !== target) {
+        hideActiveTooltip();
+    }
+    const text = String(target.getAttribute('title') || target.getAttribute('data-native-title') || '').trim();
+    if (!text) return;
+    const el = ensureTooltipElement();
+    if (target.getAttribute('title')) {
+        target.setAttribute('data-native-title', target.getAttribute('title'));
+        target.removeAttribute('title');
+    }
+    activeTooltipTarget = target;
+    el.textContent = text;
+    positionTooltip(x, y);
+    el.classList.add('show');
+}
+
+function initSmartTooltips() {
+    if (uiTooltipInitialized) return;
+    uiTooltipInitialized = true;
+    const hasHover = window.matchMedia && window.matchMedia('(hover: hover)').matches;
+    if (!hasHover) return;
+    document.addEventListener('mouseover', (ev) => {
+        const target = resolveTooltipTarget(ev.target);
+        if (!target) return;
+        showTooltipForTarget(target, ev.clientX, ev.clientY);
+    });
+    document.addEventListener('mousemove', (ev) => {
+        if (!activeTooltipTarget || !activeTooltipEl) return;
+        positionTooltip(ev.clientX, ev.clientY);
+    });
+    document.addEventListener('mouseout', (ev) => {
+        if (!activeTooltipTarget) return;
+        const related = ev.relatedTarget;
+        if (related && activeTooltipTarget.contains(related)) return;
+        hideActiveTooltip();
+    });
+    document.addEventListener('focusin', (ev) => {
+        const target = resolveTooltipTarget(ev.target);
+        if (!target) return;
+        const rect = target.getBoundingClientRect();
+        showTooltipForTarget(target, rect.left + 8, rect.bottom + 4);
+    });
+    document.addEventListener('focusout', () => {
+        hideActiveTooltip();
+    });
+    window.addEventListener('scroll', hideActiveTooltip, { passive: true });
+    window.addEventListener('resize', hideActiveTooltip, { passive: true });
+}
+
 function updateLastUpdatedDisplay() {
     updateBreadcrumb();
+    renderSiteFooter();
 }
 
 // ==========================================================================
@@ -5586,7 +6636,7 @@ function parseReciclagemCsv(csvText, sheetKey) {
         const dataDate = vencDate ? null : parseDateFlexible(dataRaw);
         const baseDate = vencDate || dataDate;
         const expiry = baseDate ? (vencDate ? baseDate : addYears(baseDate, biennial ? 2 : 1)) : null;
-        return {
+        const entry = {
             re,
             name,
             unit,
@@ -5594,7 +6644,8 @@ function parseReciclagemCsv(csvText, sheetKey) {
             expiry,
             expiryIso: expiry ? expiry.toISOString().slice(0, 10) : ''
         };
-    }).filter(r => r.re || r.name || r.unit);
+        return validateReciclagemEntry(entry) ? entry : null;
+    }).filter(Boolean);
 }
 
 function normalizeReValueLoose(value) {
@@ -5729,8 +6780,8 @@ async function loadReciclagemData(force = false) {
         }
         results[key] = { entries: parseReciclagemCsv(csv, key), error: null };
     }
-    reciclagemData = results;
-    reciclagemLoadedAt = new Date();
+    setAppState('reciclagemData', results, { silent: true });
+    setAppState('reciclagemLoadedAt', new Date(), { silent: true });
 }
 
 async function refreshReciclagemIfNeeded() {
@@ -5744,8 +6795,7 @@ async function refreshReciclagemIfNeeded() {
 
 function startReciclagemAutoRefresh() {
     refreshReciclagemIfNeeded();
-    if (reciclagemSyncTimer) clearInterval(reciclagemSyncTimer);
-    reciclagemSyncTimer = setInterval(refreshReciclagemIfNeeded, 10 * 60 * 1000);
+    reciclagemSyncTimer = AppTimerManager.setInterval(APP_TIMERS.reciclagemSync, refreshReciclagemIfNeeded, 10 * 60 * 1000);
 }
 
 function getReciclagemSheetLabel(key) {
@@ -6001,7 +7051,7 @@ async function renderReciclagem() {
     try {
         await loadReciclagemData(false);
     } catch (err) {
-        console.error('Erro ao carregar reciclagem:', err);
+        AppErrorHandler.capture(err, { scope: 'render-reciclagem-load' }, { silent: true });
         list.innerHTML = `<div class="empty-state">Erro ao carregar reciclagem.</div>`;
         return;
     }
@@ -6013,7 +7063,7 @@ async function renderReciclagem() {
         searchInput = document.getElementById('reciclagem-search');
         keys = getReciclagemSheetKeysForTab(reciclagemTab);
     } catch (err) {
-        console.error('Erro ao preparar filtros de reciclagem:', err);
+        AppErrorHandler.capture(err, { scope: 'render-reciclagem-filters' }, { silent: true });
         list.innerHTML = `<div class="empty-state">Erro ao carregar reciclagem.</div>`;
         return;
     }
@@ -6243,10 +7293,12 @@ async function renderReciclagem() {
     if (!filteredByDetail.length) {
         list.innerHTML = `<p class="empty-state">Nenhum registro encontrado.</p>`;
         reciclagemRenderCache = [];
+        AppCacheManager.set('reciclagem-render', 'items', reciclagemRenderCache);
         return;
     }
 
     reciclagemRenderCache = filteredByDetail;
+    AppCacheManager.set('reciclagem-render', 'items', reciclagemRenderCache);
     list.innerHTML = filteredByDetail.map((item, idx) => {
         const statusLabel = {
             ok: 'Em dia',
@@ -6675,6 +7727,314 @@ function openAddressModalForCollaborator(collabRe = '', collabName = '', unitNam
 
 function closeAddressModal() {
     document.getElementById('address-modal')?.classList.add('hidden');
+}
+
+function openFtWeekPreviewModal(collabRe = '', collabName = '') {
+    const modal = document.getElementById('ft-week-preview-modal');
+    const title = document.getElementById('ft-week-preview-title');
+    const body = document.getElementById('ft-week-preview-body');
+    if (!modal || !body) return;
+    const re = String(collabRe || '').trim();
+    const name = String(collabName || '').trim();
+    const display = name ? `${name}${re ? ` (${re})` : ''}` : (re ? `RE ${re}` : 'Colaborador');
+    if (!re) {
+        if (title) title.textContent = 'Escala completa';
+        body.innerHTML = '<p class="empty-state">RE não informado para preview.</p>';
+        modal.classList.remove('hidden');
+        return;
+    }
+    const monthRange = getMonthRangeByDateKey(getTodayKey());
+    ftPreviewModalState = {
+        mode: 'collab',
+        re,
+        name,
+        unit: '',
+        groupKey: '',
+        monthKey: monthRange.start,
+        selectedDate: getTodayKey()
+    };
+    if (title) title.textContent = `Escala completa • ${display}`;
+    body.innerHTML = buildFtMonthCalendarHtmlForRe(re, {
+        monthKey: ftPreviewModalState.monthKey,
+        selectedDate: ftPreviewModalState.selectedDate
+    });
+    openFtMonthDayDetails(ftPreviewModalState.selectedDate);
+    modal.classList.remove('hidden');
+}
+
+function closeFtWeekPreviewModal() {
+    document.getElementById('ft-week-preview-modal')?.classList.add('hidden');
+    ftPreviewModalState = { mode: 'collab', re: '', name: '', unit: '', groupKey: '', monthKey: '', selectedDate: '' };
+}
+
+function getPerformanceRelationLabelForRe(item, re) {
+    const counterpart = getFtCounterpartLabelForRe(item, re);
+    return matchesRe(item?.collabRe, re)
+        ? `Cobrindo ${counterpart}`
+        : `Coberto por ${counterpart}`;
+}
+
+function buildCollaboratorPerformanceSnapshot(collabRe = '', collabName = '') {
+    const re = String(collabRe || '').trim();
+    const fallbackName = String(collabName || '').trim();
+    const collab = resolveCollaboratorByRe(re) || null;
+    const displayName = collab?.nome || fallbackName || `RE ${re || 'N/I'}`;
+    const displayRe = collab?.re || re || 'N/I';
+    const statusInfo = collab ? getStatusInfo(collab) : { text: 'N/I', color: '#64748b' };
+    const roleLabel = collab ? getCollaboratorRoleLabel(collab) : 'N/I';
+    const groupLabel = collab?.grupoLabel || 'N/I';
+    const unitLabel = collab?.posto || 'N/I';
+    const scheduleLabel = collab?.escala || 'N/I';
+
+    const todayKey = getTodayKey();
+    const rollingStart = getDateKeyWithOffset(todayKey, -29);
+    const next30End = getDateKeyWithOffset(todayKey, 30);
+    const monthRange = getMonthRangeByDateKey(todayKey);
+    const related = getFtOperationalItems(ftLaunches).filter(item => (
+        matchesRe(item?.collabRe, re) || matchesRe(item?.coveringRe, re)
+    ));
+    const inRolling = related.filter(item => {
+        const key = getFtItemDateKey(item);
+        return isDateInsideRange(key, rollingStart, todayKey);
+    });
+    const ownRolling = inRolling.filter(item => matchesRe(item?.collabRe, re));
+    const coverageRolling = inRolling.filter(item => matchesRe(item?.coveringRe, re) && !matchesRe(item?.collabRe, re));
+    const ownPending = ownRolling.filter(item => item?.status === 'pending').length;
+    const ownSubmitted = ownRolling.filter(item => item?.status === 'submitted').length;
+    const ownLaunched = ownRolling.filter(item => item?.status === 'launched').length;
+    const ownClosed = ownSubmitted + ownLaunched;
+    const closeRate = ownRolling.length ? Math.round((ownClosed / ownRolling.length) * 100) : 0;
+    const monthTotal = related.filter(item => {
+        const key = getFtItemDateKey(item);
+        return isDateInsideRange(key, monthRange.start, monthRange.end);
+    }).length;
+    const future30 = related
+        .filter(item => {
+            const key = normalizeFtDateKey(item?.date);
+            return !!key && key > todayKey && key <= next30End;
+        })
+        .sort((a, b) => getFtItemDateValue(a) - getFtItemDateValue(b))
+        .slice(0, 6);
+    const recent = related
+        .slice()
+        .sort((a, b) => getFtItemDateValue(b) - getFtItemDateValue(a))
+        .slice(0, 8)
+        .map(item => {
+            const dateKey = getFtItemDateKey(item) || '';
+            const reason = getFtReasonLabel(item?.reason, item?.reasonOther) || item?.reasonRaw || 'N/I';
+            return {
+                date: dateKey ? formatFtDate(dateKey) : 'Sem data',
+                status: getFtStatusLabel(item),
+                relation: getPerformanceRelationLabelForRe(item, re),
+                unit: getFtUnitLabel(item),
+                shift: item?.shift || 'N/I',
+                reason
+            };
+        });
+
+    const weekPlan = [];
+    for (let i = 0; i < 7; i++) {
+        const dayKey = getDateKeyWithOffset(todayKey, i);
+        const duty = getDutyForecastForDate(collab, dayKey);
+        const ftCount = getFtItemsForReInRange(re, dayKey, dayKey).length;
+        weekPlan.push({
+            key: dayKey,
+            label: `${getWeekdayShortPtByDate(dayKey)} ${formatFtDateShort(dayKey)}`,
+            dutyCode: duty.code,
+            dutyClass: duty.className,
+            ftCount
+        });
+    }
+
+    const recSummary = getReciclagemSummaryForCollab(re, displayName);
+    const recStatus = recSummary?.status || 'unknown';
+    const recLines = String(recSummary?.title || 'Reciclagem: sem dados')
+        .split('\n')
+        .map(v => v.trim())
+        .filter(Boolean);
+    const recLabelMap = {
+        ok: 'Em dia',
+        due: 'Próxima do vencimento',
+        expired: 'Vencida',
+        unknown: 'Sem dados'
+    };
+
+    const scopeGroup = currentGroup || 'todos';
+    const pendingAvisos = getPendingAvisosByCollaborator(displayRe, scopeGroup);
+    const pendingReminders = getPendingRemindersByCollaborator(displayRe, scopeGroup);
+
+    return {
+        re: displayRe,
+        name: displayName,
+        unit: unitLabel,
+        group: groupLabel,
+        role: roleLabel,
+        schedule: scheduleLabel,
+        statusInfo,
+        rolling: {
+            start: rollingStart,
+            end: todayKey,
+            total: ownRolling.length,
+            coverage: coverageRolling.length,
+            pending: ownPending,
+            submitted: ownSubmitted,
+            launched: ownLaunched,
+            closeRate
+        },
+        monthTotal,
+        future30,
+        recent,
+        weekPlan,
+        reciclagem: {
+            status: recStatus,
+            label: recLabelMap[recStatus] || 'Sem dados',
+            lines: recLines
+        },
+        avisos: pendingAvisos,
+        reminders: pendingReminders
+    };
+}
+
+function buildCollaboratorPerformanceModalHtml(snapshot) {
+    const weekHtml = snapshot.weekPlan.map(day => `
+        <div class="performance-day ${day.dutyClass}">
+            <div class="performance-day-label">${day.label}</div>
+            <div class="performance-day-duty">${day.dutyCode}</div>
+            <div class="performance-day-ft">${day.ftCount ? `FT ${day.ftCount}` : 'sem FT'}</div>
+        </div>
+    `).join('');
+
+    const upcomingHtml = snapshot.future30.length
+        ? snapshot.future30.map(item => `
+            <div class="performance-line">
+                <strong>${escapeHtml(formatFtDate(item.date || getFtItemDateKey(item) || ''))}</strong>
+                <span>${escapeHtml(getFtStatusLabel(item))}</span>
+                <span>${escapeHtml(getFtUnitLabel(item))}</span>
+                <span>${escapeHtml(item.shift || 'N/I')}</span>
+            </div>
+        `).join('')
+        : '<p class="empty-state">Sem FT futura nos próximos 30 dias.</p>';
+
+    const recentHtml = snapshot.recent.length
+        ? snapshot.recent.map(row => `
+            <div class="performance-line">
+                <strong>${escapeHtml(row.date)}</strong>
+                <span>${escapeHtml(row.status)}</span>
+                <span>${escapeHtml(row.relation)}</span>
+                <span>${escapeHtml(row.unit)}</span>
+                <span>${escapeHtml(row.shift)}</span>
+            </div>
+        `).join('')
+        : '<p class="empty-state">Sem histórico recente de FT.</p>';
+
+    const recHtml = snapshot.reciclagem.lines.length
+        ? `<ul class="performance-list">${snapshot.reciclagem.lines.map(line => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`
+        : '<p class="empty-state">Sem dados de reciclagem.</p>';
+
+    return `
+        <div class="performance-head">
+            <div>
+                <div class="performance-title">${escapeHtml(snapshot.name)} <span class="performance-re">(RE ${escapeHtml(snapshot.re)})</span></div>
+                <div class="performance-meta">Unidade: ${escapeHtml(snapshot.unit)} • Grupo: ${escapeHtml(snapshot.group)} • Cargo: ${escapeHtml(snapshot.role)}</div>
+                <div class="performance-meta">Escala: ${escapeHtml(snapshot.schedule)} • Status atual: <span class="performance-status" style="background:${snapshot.statusInfo.color};">${escapeHtml(snapshot.statusInfo.text)}</span></div>
+            </div>
+            <div class="performance-flags">
+                <span class="perf-flag">Avisos pendentes: ${snapshot.avisos}</span>
+                <span class="perf-flag">Lembretes pendentes: ${snapshot.reminders}</span>
+                <span class="perf-flag reciclagem ${snapshot.reciclagem.status}">Reciclagem: ${escapeHtml(snapshot.reciclagem.label)}</span>
+            </div>
+        </div>
+
+        <div class="performance-kpis">
+            <div class="performance-kpi"><div class="label">FT executadas (30d)</div><div class="value">${snapshot.rolling.total}</div></div>
+            <div class="performance-kpi"><div class="label">FT cobrindo ele (30d)</div><div class="value">${snapshot.rolling.coverage}</div></div>
+            <div class="performance-kpi"><div class="label">Pendentes (30d)</div><div class="value">${snapshot.rolling.pending}</div></div>
+            <div class="performance-kpi"><div class="label">Confirmadas (30d)</div><div class="value">${snapshot.rolling.submitted}</div></div>
+            <div class="performance-kpi"><div class="label">Lançadas (30d)</div><div class="value">${snapshot.rolling.launched}</div></div>
+            <div class="performance-kpi"><div class="label">Taxa de fechamento (30d)</div><div class="value">${snapshot.rolling.closeRate}%</div></div>
+            <div class="performance-kpi"><div class="label">Registros no mês atual</div><div class="value">${snapshot.monthTotal}</div></div>
+            <div class="performance-kpi"><div class="label">Período analisado</div><div class="value">${escapeHtml(formatFtDate(snapshot.rolling.start))} a ${escapeHtml(formatFtDate(snapshot.rolling.end))}</div></div>
+        </div>
+
+        <div class="performance-block">
+            <h4>Planejamento 7 dias</h4>
+            <div class="performance-days">${weekHtml}</div>
+        </div>
+
+        <div class="performance-grid">
+            <div class="performance-block">
+                <h4>Próximas FT (30 dias)</h4>
+                <div class="performance-lines">${upcomingHtml}</div>
+            </div>
+            <div class="performance-block">
+                <h4>Reciclagem</h4>
+                ${recHtml}
+            </div>
+        </div>
+
+        <div class="performance-block">
+            <h4>Histórico recente</h4>
+            <div class="performance-lines">${recentHtml}</div>
+        </div>
+    `;
+}
+
+function openPerformanceModal(collabRe = '', collabName = '') {
+    const modal = document.getElementById('performance-modal');
+    const title = document.getElementById('performance-modal-title');
+    const body = document.getElementById('performance-modal-body');
+    if (!modal || !body) return;
+    const re = String(collabRe || '').trim();
+    const name = String(collabName || '').trim();
+    if (!re) {
+        if (title) title.textContent = 'Performance do colaborador';
+        body.innerHTML = '<p class="empty-state">RE não informado para abrir a performance.</p>';
+        modal.classList.remove('hidden');
+        return;
+    }
+    const snapshot = buildCollaboratorPerformanceSnapshot(re, name);
+    performanceModalState = { re: snapshot.re, name: snapshot.name };
+    if (title) title.textContent = `Performance • ${snapshot.name} (RE ${snapshot.re})`;
+    body.innerHTML = buildCollaboratorPerformanceModalHtml(snapshot);
+    modal.classList.remove('hidden');
+}
+
+function closePerformanceModal() {
+    document.getElementById('performance-modal')?.classList.add('hidden');
+    performanceModalState = { re: '', name: '' };
+}
+
+function openFtMonthDayDetails(dayKey = '') {
+    if (ftPreviewModalState.mode !== 'collab' || !ftPreviewModalState.re) return;
+    const key = normalizeFtDateKey(dayKey) || getTodayKey();
+    ftPreviewModalState.selectedDate = key;
+    document.querySelectorAll('#ft-week-preview-body .ft-month-day').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-day') === key);
+    });
+    const details = document.getElementById('ft-week-preview-day-details');
+    if (!details) return;
+    details.innerHTML = buildFtDayDetailsHtmlForRe(ftPreviewModalState.re, key);
+}
+
+function openFtUnitDayDetailsModal(unitName = '', dayKey = '', groupKey = '') {
+    const modal = document.getElementById('ft-week-preview-modal');
+    const title = document.getElementById('ft-week-preview-title');
+    const body = document.getElementById('ft-week-preview-body');
+    if (!modal || !body) return;
+    const unit = String(unitName || '').trim();
+    const key = normalizeFtDateKey(dayKey) || getTodayKey();
+    ftPreviewModalState = {
+        mode: 'unit',
+        re: '',
+        name: '',
+        unit,
+        groupKey: String(groupKey || '').trim(),
+        monthKey: '',
+        selectedDate: key
+    };
+    if (title) title.textContent = `Escala da unidade • ${unit || 'N/I'} • ${formatFtDate(key)}`;
+    body.innerHTML = buildFtUnitDayDetailsHtml(unit, key, ftPreviewModalState.groupKey);
+    modal.classList.remove('hidden');
 }
 
 function buildAddressEntriesForUnit() {
@@ -7121,10 +8481,11 @@ function renderUnitTable(lista) {
                             ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
                             : '';
                         const ftDetailHtml = buildFtDetailsHtml(p.re);
-                        const ftWeekPreview = buildFtWeekPreviewHtmlForRe(p.re);
                         const roleLabel = getCollaboratorRoleLabel(p);
+                        const reJs = JSON.stringify(p.re || '');
                         const nameJs = JSON.stringify(p.nome || '');
                         const phoneJs = JSON.stringify(p.telefone || '');
+                        const reJsAttr = escapeHtml(reJs);
                         const nameJsAttr = escapeHtml(nameJs);
                         const phoneJsAttr = escapeHtml(phoneJs);
                         return `
@@ -7145,7 +8506,9 @@ function renderUnitTable(lista) {
                                         ` : ''}
                                         <div class="unit-colab-meta"><strong>Cargo:</strong> ${escapeHtml(roleLabel)}</div>
                                         ${ftDetailHtml}
-                                        ${ftWeekPreview}
+                                        <div class="unit-colab-week">
+                                            <button class="btn-mini btn-secondary week-preview-btn" onclick="openFtWeekPreviewModal(${reJsAttr}, ${nameJsAttr})" title="Ver escala completa do mês">ESCALA COMPLETA</button>
+                                        </div>
                                     </div>
                                 </td>
                                 <td>${p.re}</td>
@@ -7527,7 +8890,7 @@ async function aiRemoteSearch(query, container, filterStatus, hideAbsence) {
         container.innerHTML = results.slice(0, 20).map(p => renderAiResultCard(p, p)).join('');
         return true;
     } catch (e) {
-        console.error('Erro IA remota:', e);
+        AppErrorHandler.capture(e, { scope: 'ai-remote-search', query: String(query || '') }, { silent: true });
         renderAiFallbackResponse(query, container, 'Não consegui conectar com a IA agora.');
         return true;
     }
@@ -7548,12 +8911,6 @@ function renderAiFallbackResponse(query, container, note) {
     bindContextSelection();
     renderContextBar();
 }
-
-document.addEventListener('DOMContentLoaded', () => {
-    if (localStorage.getItem('compactMode') === '1') {
-        document.body.classList.add('compact-mode');
-    }
-});
 
 function extractUnitName(text) {
     const patterns = [
@@ -7760,8 +9117,9 @@ function processUnitAddressData(csvText) {
     return rows.slice(headerIndex + 1).map(cols => {
         const nome = (cols[idxUnit] || '').trim().toUpperCase();
         const endereco = (cols[idxAddress] || '').trim();
-        if (!nome) return null;
-        return { nome, endereco };
+        const entry = { nome, endereco };
+        if (!validateAddressData(entry)) return null;
+        return entry;
     }).filter(Boolean);
 }
 
@@ -7798,6 +9156,7 @@ function buildUnitAddressNormMap(entries) {
 }
 
 async function loadUnitAddressDb() {
+    initializeCoreManagers();
     let entries = [];
     let source = '';
 
@@ -7846,6 +9205,11 @@ async function loadUnitAddressDb() {
             unitGeoCache = { ...pre, ...unitGeoCache };
         }
     } catch {}
+    AppCacheManager.clear('unit-geo');
+    Object.entries(unitGeoCache || {}).forEach(([key, value]) => {
+        if (!key || !value) return;
+        AppCacheManager.set('unit-geo', key, value);
+    });
 }
 
 function getAddressForUnit(unitName) {
@@ -7873,7 +9237,8 @@ function getAddressForUnit(unitName) {
 
 async function getCoordsForAddress(address) {
     if (!address) return null;
-    if (unitGeoCache[address]) return unitGeoCache[address];
+    const cached = getCachedUnitGeo(address);
+    if (cached) return cached;
     try {
         const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
         const resp = await fetch(url, { headers: { 'Accept-Language': 'pt-BR' } });
@@ -7882,7 +9247,7 @@ async function getCoordsForAddress(address) {
         if (!data || !data.length) return null;
         const coords = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
         if (!Number.isFinite(coords.lat) || !Number.isFinite(coords.lon)) return null;
-        unitGeoCache[address] = coords;
+        setCachedUnitGeo(address, coords);
         localStorage.setItem('unitGeoCache', JSON.stringify(unitGeoCache));
         scheduleShadowSync('unit-geo-cache', { silent: true });
         return coords;
@@ -7951,7 +9316,8 @@ async function fetchOsrmTable(origin, destinations) {
     if (!cfg.enabled || !origin || !destinations?.length) return null;
     const coords = [origin].concat(destinations);
     const key = coords.map(c => `${c.lat.toFixed(5)},${c.lon.toFixed(5)}`).join('|');
-    if (osrmTableCache.has(key)) return osrmTableCache.get(key);
+    const cached = getCachedOsrmTable(key);
+    if (cached) return cached;
     try {
         const coordsStr = coords.map(c => `${c.lon},${c.lat}`).join(';');
         const destIdx = destinations.map((_, i) => i + 1).join(';');
@@ -7962,7 +9328,7 @@ async function fetchOsrmTable(origin, destinations) {
         const distances = data?.distances?.[0] || [];
         const durations = data?.durations?.[0] || [];
         const result = { distances, durations };
-        osrmTableCache.set(key, result);
+        setCachedOsrmTable(key, result);
         return result;
     } catch {
         return null;
@@ -7973,7 +9339,8 @@ async function fetchOsrmRoute(origin, dest) {
     const cfg = getOsrmConfig();
     if (!cfg.enabled || !origin || !dest) return null;
     const key = buildOsrmKey(origin, dest);
-    if (osrmRouteCache.has(key)) return osrmRouteCache.get(key);
+    const cached = getCachedOsrmRoute(key);
+    if (cached) return cached;
     try {
         const url = `${cfg.base}/route/v1/${cfg.profile}/${origin.lon},${origin.lat};${dest.lon},${dest.lat}?overview=full&geometries=geojson`;
         const resp = await fetch(url);
@@ -7986,7 +9353,7 @@ async function fetchOsrmRoute(origin, dest) {
             durationMin: route.duration / 60,
             geometry: route.geometry
         };
-        osrmRouteCache.set(key, result);
+        setCachedOsrmRoute(key, result);
         return result;
     } catch {
         return null;
@@ -8272,6 +9639,47 @@ function getWeekdayShortPt(index) {
     return labels[index] || '';
 }
 
+function getWeekdayShortPtByDate(dateKey = '') {
+    const key = normalizeFtDateKey(dateKey);
+    if (!key) return '';
+    const date = new Date(`${key}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return '';
+    const labels = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB'];
+    return labels[date.getDay()] || '';
+}
+
+function getWeekdayLongPtByDate(dateKey = '') {
+    const key = normalizeFtDateKey(dateKey);
+    if (!key) return '';
+    const date = new Date(`${key}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return '';
+    const labels = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
+    return labels[date.getDay()] || '';
+}
+
+function getMonthRangeByDateKey(dateKey = '') {
+    const base = normalizeFtDateKey(dateKey) || getTodayKey();
+    const date = new Date(`${base}T00:00:00`);
+    if (Number.isNaN(date.getTime())) {
+        const fallback = new Date();
+        const start = new Date(fallback.getFullYear(), fallback.getMonth(), 1);
+        const end = new Date(fallback.getFullYear(), fallback.getMonth() + 1, 0);
+        return {
+            start: toDateInputValue(start),
+            end: toDateInputValue(end),
+            monthLabel: fallback.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+        };
+    }
+    const start = new Date(date.getFullYear(), date.getMonth(), 1);
+    const end = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+    const monthLabel = date.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    return {
+        start: toDateInputValue(start),
+        end: toDateInputValue(end),
+        monthLabel
+    };
+}
+
 function resolveFtPreviewFromItems(items) {
     if (!items || !items.length) {
         return { status: '', code: '-', count: 0, label: 'Sem FT' };
@@ -8358,14 +9766,14 @@ function getDutyForecastForDate(collab, dateKey) {
 }
 
 function buildFtWeekPreviewHtmlForRe(re, options = {}) {
-    const start = getWeekStartMonday(options.startDate);
+    const start = normalizeFtDateKey(options.startDate) || getTodayKey();
     const days = 7;
     const collab = resolveCollaboratorByRe(re);
     const chips = [];
     for (let i = 0; i < days; i++) {
         const dayKey = getDateKeyWithOffset(start, i);
         const date = new Date(`${dayKey}T00:00:00`);
-        const weekday = getWeekdayShortPt(i);
+        const weekday = getWeekdayShortPtByDate(dayKey);
         const dayNumber = Number.isNaN(date.getTime()) ? '--' : String(date.getDate()).padStart(2, '0');
         const duty = getDutyForecastForDate(collab, dayKey);
         const items = getFtItemsForReInRange(re, dayKey, dayKey);
@@ -8388,29 +9796,159 @@ function buildFtWeekPreviewHtmlForRe(re, options = {}) {
 }
 
 function buildFtWeekPreviewHtmlForUnit(unitName, groupKey = '', options = {}) {
-    const start = getWeekStartMonday(options.startDate);
+    const start = normalizeFtDateKey(options.startDate) || getTodayKey();
     const days = 7;
     const chips = [];
+    const unitJsAttr = escapeHtml(JSON.stringify(unitName || ''));
+    const groupJsAttr = escapeHtml(JSON.stringify(groupKey || ''));
     for (let i = 0; i < days; i++) {
         const dayKey = getDateKeyWithOffset(start, i);
         const date = new Date(`${dayKey}T00:00:00`);
-        const weekday = getWeekdayShortPt(i);
+        const weekday = getWeekdayLongPtByDate(dayKey);
         const dayNumber = Number.isNaN(date.getTime()) ? '--' : String(date.getDate()).padStart(2, '0');
         const items = getFtItemsForUnitInRange(unitName, dayKey, dayKey, groupKey);
         const preview = resolveFtPreviewFromItems(items);
         const css = preview.code === 'V' ? 'v' : (preview.code === 'E' ? 'e' : (preview.code === 'D' ? 'd' : 'none'));
         const title = `${formatFtDate(dayKey)}: ${preview.count ? `${preview.count} FT (${preview.label})` : 'Sem FT'}`;
         chips.push(`
-            <span class="ft-week-chip ${css}" title="${title}">
+            <button type="button" class="ft-week-chip ${css} ${preview.count ? 'has-ft' : ''}" title="${title}" onclick="openFtUnitDayDetailsModal(${unitJsAttr}, '${dayKey}', ${groupJsAttr})">
                 <span class="ft-week-day">${weekday} ${dayNumber}</span>
                 ${preview.count ? `<span class="ft-week-ft ${css}">FT${preview.count > 1 ? ` ${preview.count}` : ''}</span>` : ''}
-            </span>
+            </button>
         `);
     }
     return `
         <div class="ft-week-preview unit">
             <div class="ft-week-track">${chips.join('')}</div>
         </div>
+    `;
+}
+
+function getFtCounterpartLabelForRe(item, re) {
+    const isCovering = matchesRe(item?.collabRe, re);
+    if (isCovering) {
+        return item?.coveringName
+            || (item?.coveringOther && item.coveringOther !== 'Não se aplica' ? item.coveringOther : '')
+            || (item?.coveringRe ? `RE ${item.coveringRe}` : 'N/I');
+    }
+    return item?.collabName || (item?.collabRe ? `RE ${item.collabRe}` : 'N/I');
+}
+
+function buildFtMonthCalendarHtmlForRe(re, options = {}) {
+    const monthRef = normalizeFtDateKey(options.monthKey) || getTodayKey();
+    const selectedKey = normalizeFtDateKey(options.selectedDate) || getTodayKey();
+    const range = getMonthRangeByDateKey(monthRef);
+    const collab = resolveCollaboratorByRe(re);
+    const chips = [];
+    let cursor = range.start;
+    while (cursor <= range.end) {
+        const date = new Date(`${cursor}T00:00:00`);
+        const dayNumber = Number.isNaN(date.getTime()) ? '--' : String(date.getDate()).padStart(2, '0');
+        const weekdayLong = getWeekdayLongPtByDate(cursor);
+        const duty = getDutyForecastForDate(collab, cursor);
+        const items = getFtItemsForReInRange(re, cursor, cursor);
+        const preview = resolveFtPreviewFromItems(items);
+        const css = preview.code === 'V' ? 'v' : (preview.code === 'E' ? 'e' : (preview.code === 'D' ? 'd' : 'none'));
+        const isToday = cursor === getTodayKey();
+        const isActive = cursor === selectedKey;
+        const title = `${formatFtDate(cursor)} • ${duty.label}${preview.count ? ` • ${preview.count} FT (${preview.label})` : ' • Sem FT'}`;
+        chips.push(`
+            <button type="button" data-day="${cursor}" class="ft-month-day ${preview.count ? 'has-ft' : ''} ${isToday ? 'today' : ''} ${isActive ? 'active' : ''}" title="${title}" onclick="openFtMonthDayDetails('${cursor}')">
+                <span class="ft-month-weekday">${weekdayLong}</span>
+                <span class="ft-month-date">${dayNumber}</span>
+                <span class="ft-month-duty ${duty.className}">${duty.code}</span>
+                ${preview.count ? `<span class="ft-month-ft ${css}">FT ${preview.count}</span>` : '<span class="ft-month-ft none">sem FT</span>'}
+            </button>
+        `);
+        cursor = getDateKeyWithOffset(cursor, 1);
+    }
+    return `
+        <div class="ft-month-toolbar">
+            <div class="ft-month-title">${range.monthLabel}</div>
+            <div class="ft-month-subtitle">Planejamento completo do mês</div>
+        </div>
+        <div class="ft-month-grid">${chips.join('')}</div>
+        <div id="ft-week-preview-day-details" class="ft-month-day-details"></div>
+    `;
+}
+
+function buildFtDayDetailsHtmlForRe(re, dayKey) {
+    const key = normalizeFtDateKey(dayKey) || getTodayKey();
+    const collab = resolveCollaboratorByRe(re);
+    const duty = getDutyForecastForDate(collab, key);
+    const weekdayLong = getWeekdayLongPtByDate(key);
+    const items = getFtItemsForReInRange(re, key, key)
+        .slice()
+        .sort((a, b) => getFtStatusRank(b?.status) - getFtStatusRank(a?.status));
+    const listHtml = items.length
+        ? items.map(item => {
+            const statusLabel = getFtStatusLabel(item);
+            const isCovering = matchesRe(item?.collabRe, re);
+            const counterpart = getFtCounterpartLabelForRe(item, re);
+            const relation = isCovering ? `Cobrindo ${counterpart}` : `Coberto por ${counterpart}`;
+            const reasonLabel = getFtReasonLabel(item?.reason, item?.reasonOther) || item?.reasonRaw || 'N/I';
+            const unitLabel = getFtUnitLabel(item);
+            const shift = item?.shift || 'N/I';
+            const time = item?.ftTime || 'N/I';
+            return `
+                <div class="ft-day-item">
+                    <div class="ft-day-item-top">
+                        <span class="diaria-status status-${item?.status || 'pending'}">${statusLabel}</span>
+                        <strong>${relation}</strong>
+                    </div>
+                    <div class="ft-day-item-meta">Unidade: ${unitLabel} • Turno: ${shift} • Horário: ${time}</div>
+                    <div class="ft-day-item-meta">Motivo: ${reasonLabel}</div>
+                </div>
+            `;
+        }).join('')
+        : '<p class="empty-state">Sem FT para este colaborador neste dia.</p>';
+    return `
+        <div class="ft-day-header">
+            <div>
+                <strong>${weekdayLong} • ${formatFtDate(key)}</strong>
+                <div class="ft-day-header-sub">Escala prevista: ${duty.label}</div>
+            </div>
+            <span class="ft-month-duty ${duty.className}">${duty.code}</span>
+        </div>
+        <div class="ft-day-list">${listHtml}</div>
+    `;
+}
+
+function buildFtUnitDayDetailsHtml(unitName, dayKey, groupKey = '') {
+    const key = normalizeFtDateKey(dayKey) || getTodayKey();
+    const items = getFtItemsForUnitInRange(unitName, key, key, groupKey)
+        .slice()
+        .sort((a, b) => getFtStatusRank(b?.status) - getFtStatusRank(a?.status));
+    const weekdayLong = getWeekdayLongPtByDate(key);
+    const listHtml = items.length
+        ? items.map(item => {
+            const coverer = item?.collabName || (item?.collabRe ? `RE ${item.collabRe}` : 'N/I');
+            const covered = item?.coveringName
+                || (item?.coveringOther && item.coveringOther !== 'Não se aplica' ? item.coveringOther : '')
+                || (item?.coveringRe ? `RE ${item.coveringRe}` : '');
+            const relation = covered ? `${coverer} cobrindo ${covered}` : `${coverer}`;
+            const reason = getFtReasonLabel(item?.reason, item?.reasonOther) || item?.reasonRaw || 'N/I';
+            return `
+                <div class="ft-day-item">
+                    <div class="ft-day-item-top">
+                        <span class="diaria-status status-${item?.status || 'pending'}">${getFtStatusLabel(item)}</span>
+                        <strong>${relation}</strong>
+                    </div>
+                    <div class="ft-day-item-meta">Turno: ${item?.shift || 'N/I'} • Horário: ${item?.ftTime || 'N/I'}</div>
+                    <div class="ft-day-item-meta">Motivo: ${reason}</div>
+                </div>
+            `;
+        }).join('')
+        : '<p class="empty-state">Sem FT registrada para esta unidade neste dia.</p>';
+    return `
+        <div class="ft-day-header">
+            <div>
+                <strong>${escapeHtml(unitName || 'Unidade')} • ${weekdayLong} • ${formatFtDate(key)}</strong>
+                <div class="ft-day-header-sub">Detalhamento completo das coberturas do dia</div>
+            </div>
+            <span class="ft-month-ft ${items.length ? 'v' : 'none'}">${items.length ? `FT ${items.length}` : 'sem FT'}</span>
+        </div>
+        <div class="ft-day-list">${listHtml}</div>
     `;
 }
 
@@ -8604,6 +10142,7 @@ function renderAiResultCard(item, target, options = {}) {
                     ${headerBadges}
                     ${routeBadge}
                     ${distanceBadge}
+                    <button class="edit-btn-icon performance-icon" onclick="openPerformanceModal(${reJsAttr}, ${nameJsAttr})" title="Performance do colaborador">${ICONS.performance}</button>
                     <button class="edit-btn-icon map-icon ${mapBtnClass}" onclick="openAddressModalForCollaborator(${reJsAttr}, ${nameJsAttr}, ${unitJsAttr})" title="${mapTitle}" ${canOpenMap ? '' : 'disabled'}>${ICONS.mapPin}</button>
                     <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal(${nameJsAttr}, ${phoneJsAttr})" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
                     <button class="edit-btn-icon" onclick="openEditModal(${editTargetId})" ${canEdit ? '' : 'disabled'}>${ICONS.edit}</button>
@@ -8947,7 +10486,7 @@ function removerColaborador() {
     const id = parseInt(document.getElementById('edit-id').value);
     if(confirm("Tem certeza que deseja remover este colaborador permanentemente?")) {
         const item = currentData.find(d => d.id === id);
-        currentData = currentData.filter(d => d.id !== id);
+        setAppState('currentData', currentData.filter(d => d.id !== id), { silent: true });
         closeEditModal();
         if (currentTab === 'busca') {
             realizarBusca();
@@ -9058,9 +10597,17 @@ function toggleUtilityButtons() {
 
 function showToast(message, type = 'info') {
     const container = document.getElementById('toast-container');
+    if (!container) return;
+    container.setAttribute('aria-live', 'polite');
+    container.setAttribute('aria-atomic', 'true');
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    toast.innerHTML = `<span>${message}</span>`;
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.textContent = type === 'success' ? 'OK' : (type === 'error' ? '!' : 'i');
+    const text = document.createElement('span');
+    text.textContent = String(message || '');
+    toast.append(icon, text);
     
     container.appendChild(toast);
 
@@ -9272,7 +10819,7 @@ function undoLastChange() {
 
     if (undo.type === 'add_colab') {
         const item = undo.item;
-        currentData = currentData.filter(d => d.id !== item.id);
+        setAppState('currentData', currentData.filter(d => d.id !== item.id), { silent: true });
         delete collaboratorEdits[item.re];
         saveLocalState();
         renderizarUnidades();
@@ -11129,13 +12676,12 @@ function checkReminderAlerts() {
 
 function startReminderMonitor() {
     checkReminderAlerts();
-    if (reminderCheckTimer) clearInterval(reminderCheckTimer);
-    reminderCheckTimer = setInterval(checkReminderAlerts, 60000);
-    document.addEventListener('visibilitychange', () => {
+    reminderCheckTimer = AppTimerManager.setInterval(APP_TIMERS.reminderCheck, checkReminderAlerts, 60000);
+    AppEventManager.on(document, 'visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             checkReminderAlerts();
         }
-    });
+    }, false, { scope: 'reminders', key: 'reminders-visibility' });
 }
 
 // ==========================================================================
@@ -11143,11 +12689,6 @@ function startReminderMonitor() {
 // ==========================================================================
 
 function switchLancamentosTab(tab) {
-    if (currentLancamentosMode === 'troca') {
-        currentLancamentosTab = 'diaria';
-        renderLancamentos();
-        return;
-    }
     if (tab === 'novo') {
         showToast("Fluxo manual de lançamento está desativado. Use a planilha FT atual.", "info");
         tab = 'diaria';
@@ -11650,6 +13191,24 @@ function setFtDateRange(range) {
     renderLancamentos();
 }
 
+function getFtQuickRangePreset() {
+    const from = normalizeFtDateKey(ftFilter.from);
+    const to = normalizeFtDateKey(ftFilter.to);
+    if (!from && !to) return 'clear';
+    const todayDate = new Date();
+    const today = toDateInputValue(todayDate);
+    if (from === today && to === today) return 'today';
+    const start7 = new Date(todayDate);
+    start7.setDate(todayDate.getDate() - 6);
+    if (from === toDateInputValue(start7) && to === today) return '7d';
+    const start30 = new Date(todayDate);
+    start30.setDate(todayDate.getDate() - 29);
+    if (from === toDateInputValue(start30) && to === today) return '30d';
+    const monthStart = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
+    if (from === toDateInputValue(monthStart) && to === today) return 'month';
+    return 'custom';
+}
+
 function toggleFtPendingOnly() {
     ftFilter.status = ftFilter.status === 'pending' ? 'all' : 'pending';
     renderLancamentos();
@@ -11686,20 +13245,41 @@ function updateLancamentosHeader() {
 }
 
 function updateLancamentosTabs() {
-    const items = applyFtFilters(ftLaunches);
-    const total = items.length;
-    const pending = items.filter(i => i.status === 'pending').length;
+    const ftItems = applyFtFilters(ftLaunches);
+    const ftTotal = ftItems.length;
+    const ftPending = ftItems.filter(i => i.status === 'pending').length;
+    const ftPlanningDays = new Set(ftItems.map(i => normalizeFtDateKey(i?.date)).filter(Boolean)).size;
     const today = getTodayKey();
-    const todayCount = getFtOperationalItems(ftLaunches).filter(i => normalizeFtDateKey(i?.date) === today).length;
+    const ftToday = getFtOperationalItems(ftLaunches).filter(i => normalizeFtDateKey(i?.date) === today).length;
     const todayEl = document.getElementById('lancamentos-tab-today');
     const totalEl = document.getElementById('lancamentos-tab-total');
     const pendingEl = document.getElementById('lancamentos-tab-pending');
-    if (todayEl) todayEl.textContent = todayCount;
-    if (totalEl) totalEl.textContent = total;
-    if (pendingEl) pendingEl.textContent = pending;
+    const planningEl = document.getElementById('lancamentos-tab-planning');
+    if (todayEl) todayEl.textContent = ftToday;
+    if (totalEl) totalEl.textContent = ftTotal;
+    if (pendingEl) pendingEl.textContent = ftPending;
+    if (planningEl) planningEl.textContent = ftPlanningDays;
+
+    const trocaItems = trocaLaunches.slice();
+    const trocaToday = trocaItems.filter(i => getTrocaPrimaryDate(i) === today).length;
+    const trocaTotal = trocaItems.length;
+    const trocaPending = trocaItems.filter(i => i.status === 'pending').length;
+    const trocaPlanningDays = new Set(trocaItems.map(i => getTrocaPrimaryDate(i)).filter(Boolean)).size;
+    const trocaTodayEl = document.getElementById('lancamentos-tab-troca-today');
+    const trocaTotalEl = document.getElementById('lancamentos-tab-troca-total');
+    const trocaPendingEl = document.getElementById('lancamentos-tab-troca-pending');
+    const trocaPlanningEl = document.getElementById('lancamentos-tab-troca-planning');
+    if (trocaTodayEl) trocaTodayEl.textContent = trocaToday;
+    if (trocaTotalEl) trocaTotalEl.textContent = trocaTotal;
+    if (trocaPendingEl) trocaPendingEl.textContent = trocaPending;
+    if (trocaPlanningEl) trocaPlanningEl.textContent = trocaPlanningDays;
+
+    const isFtMode = currentLancamentosMode !== 'troca';
     document.querySelectorAll('.lancamentos-tab').forEach(btn => {
         const key = btn.getAttribute('data-tab');
-        const active = key === currentLancamentosTab;
+        const parentTabs = btn.closest('.lancamentos-tabs');
+        const isFtTab = parentTabs?.id === 'lancamentos-tabs-ft';
+        const active = key === currentLancamentosTab && (isFtMode ? isFtTab : !isFtTab);
         btn.classList.toggle('active', active);
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
@@ -11712,6 +13292,7 @@ function renderLancamentosFilters() {
         && currentLancamentosTab !== 'diaria';
     wrap.classList.toggle('hidden', !show);
     if (!show) return;
+    const quickPreset = getFtQuickRangePreset();
     wrap.innerHTML = `
         <div class="lancamentos-filters">
             <div class="form-group">
@@ -11737,12 +13318,12 @@ function renderLancamentosFilters() {
             </div>
         </div>
         <div class="lancamentos-quick">
-            <button class="filter-chip ${ftFilter.status === 'pending' ? 'active' : ''}" onclick="toggleFtPendingOnly()">Somente pendentes</button>
-            <button class="filter-chip" onclick="setFtDateRange('today')">Hoje</button>
-            <button class="filter-chip" onclick="setFtDateRange('7d')">7 dias</button>
-            <button class="filter-chip" onclick="setFtDateRange('30d')">30 dias</button>
-            <button class="filter-chip" onclick="setFtDateRange('month')">Este mês</button>
-            <button class="filter-chip" onclick="setFtDateRange('clear')">Limpar datas</button>
+            <button class="filter-chip ${ftFilter.status === 'pending' ? 'active' : ''}" onclick="toggleFtPendingOnly()" aria-pressed="${ftFilter.status === 'pending' ? 'true' : 'false'}">Somente pendentes</button>
+            <button class="filter-chip ${quickPreset === 'today' ? 'active' : ''}" onclick="setFtDateRange('today')" aria-pressed="${quickPreset === 'today' ? 'true' : 'false'}">Hoje</button>
+            <button class="filter-chip ${quickPreset === '7d' ? 'active' : ''}" onclick="setFtDateRange('7d')" aria-pressed="${quickPreset === '7d' ? 'true' : 'false'}">7 dias</button>
+            <button class="filter-chip ${quickPreset === '30d' ? 'active' : ''}" onclick="setFtDateRange('30d')" aria-pressed="${quickPreset === '30d' ? 'true' : 'false'}">30 dias</button>
+            <button class="filter-chip ${quickPreset === 'month' ? 'active' : ''}" onclick="setFtDateRange('month')" aria-pressed="${quickPreset === 'month' ? 'true' : 'false'}">Este mês</button>
+            <button class="filter-chip ${quickPreset === 'clear' ? 'active' : ''}" onclick="setFtDateRange('clear')" aria-pressed="${quickPreset === 'clear' ? 'true' : 'false'}">Limpar datas</button>
         </div>
     `;
     document.getElementById('ft-filter-from')?.addEventListener('change', (e) => {
@@ -11791,14 +13372,355 @@ function getFtWeekdayLabel(dateStr) {
     return map[date.getDay()];
 }
 
+function getLancPlanModeKey() {
+    return currentLancamentosMode === 'troca' ? 'troca' : 'ft';
+}
+
+function ensureLancPlanState(modeKey = 'ft') {
+    const key = modeKey === 'troca' ? 'troca' : 'ft';
+    if (!lancamentosPlanningState || typeof lancamentosPlanningState !== 'object') {
+        lancamentosPlanningState = {};
+    }
+    if (!lancamentosPlanningState[key]) {
+        lancamentosPlanningState[key] = { range: 'week', anchor: '', selected: '' };
+    }
+    const state = lancamentosPlanningState[key];
+    const today = getTodayKey();
+    state.range = state.range === 'month' ? 'month' : 'week';
+    state.anchor = normalizeFtDateKey(state.anchor) || today;
+    state.selected = normalizeFtDateKey(state.selected) || state.anchor;
+    return state;
+}
+
+function getLancPlanRangeDays(state) {
+    if ((state?.range || 'week') === 'month') {
+        const info = getMonthRangeByDateKey(state.anchor);
+        const days = [];
+        const firstDate = new Date(`${info.start}T00:00:00`);
+        const offset = Number.isNaN(firstDate.getTime()) ? 0 : ((firstDate.getDay() + 6) % 7);
+        for (let i = 0; i < offset; i++) {
+            days.push({ key: `pad-start-${i}`, placeholder: true });
+        }
+        let cursor = info.start;
+        while (cursor && cursor <= info.end) {
+            days.push({ key: cursor, placeholder: false });
+            cursor = getDateKeyWithOffset(cursor, 1);
+        }
+        while (days.length % 7 !== 0) {
+            days.push({ key: `pad-end-${days.length}`, placeholder: true });
+        }
+        return { range: 'month', label: info.monthLabel, start: info.start, end: info.end, days };
+    }
+
+    const start = getWeekStartMonday(state?.anchor);
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+        days.push({ key: getDateKeyWithOffset(start, i), placeholder: false });
+    }
+    const end = days[days.length - 1]?.key || start;
+    return {
+        range: 'week',
+        label: `${formatFtDate(start)} até ${formatFtDate(end)}`,
+        start,
+        end,
+        days
+    };
+}
+
+function buildLancPlanIndexByDay(modeKey = 'ft') {
+    const map = {};
+    if (modeKey === 'troca') {
+        const items = trocaLaunches.slice();
+        items.forEach(item => {
+            const key = getTrocaPrimaryDate(item);
+            if (!key) return;
+            if (!map[key]) map[key] = [];
+            map[key].push(item);
+        });
+        return { items, map };
+    }
+    const items = applyFtFilters(ftLaunches);
+    items.forEach(item => {
+        const key = normalizeFtDateKey(item?.date);
+        if (!key) return;
+        if (!map[key]) map[key] = [];
+        map[key].push(item);
+    });
+    return { items, map };
+}
+
+function getLancPlanDaySummary(modeKey, dayItems = []) {
+    const total = dayItems.length;
+    if (modeKey === 'troca') {
+        if (!total) {
+            return { tone: 'tone-critical', badge: 'Sem troca', badgeClass: 'none', meta: 'Nenhum registro' };
+        }
+        const pending = dayItems.filter(item => item?.status === 'pending').length;
+        const withError = dayItems.filter(item => (item?.errors || []).length > 0).length;
+        const launched = dayItems.filter(item => item?.status === 'launched').length;
+        if (pending > 0 || withError > 0) {
+            const badge = withError > 0 ? `${withError} erro${withError > 1 ? 's' : ''}` : `${pending} pend.`;
+            return {
+                tone: 'tone-warning',
+                badge,
+                badgeClass: withError > 0 ? 'd' : 'e',
+                meta: `${total} troca(s), ${launched} lançada(s)`
+            };
+        }
+        return {
+            tone: 'tone-normal',
+            badge: `${total} troca${total > 1 ? 's' : ''}`,
+            badgeClass: 'v',
+            meta: 'Sem alerta no dia'
+        };
+    }
+
+    if (!total) {
+        return { tone: 'tone-critical', badge: 'Sem FT', badgeClass: 'none', meta: 'Sem cobertura registrada' };
+    }
+    const pending = dayItems.filter(item => item?.status === 'pending').length;
+    const submitted = dayItems.filter(item => item?.status === 'submitted').length;
+    const launched = dayItems.filter(item => item?.status === 'launched').length;
+    if (pending > 0) {
+        return {
+            tone: 'tone-warning',
+            badge: `${pending} pend.`,
+            badgeClass: 'd',
+            meta: `${total} FT no dia`
+        };
+    }
+    if (submitted > 0) {
+        return {
+            tone: 'tone-normal',
+            badge: `${submitted} conf.`,
+            badgeClass: 'e',
+            meta: `${launched} lançada(s)`
+        };
+    }
+    return {
+        tone: 'tone-normal',
+        badge: `OK (${launched})`,
+        badgeClass: 'v',
+        meta: `${total} FT lançada(s)`
+    };
+}
+
+function buildLancPlanDetailsFt(dayKey, dayItems = []) {
+    const key = normalizeFtDateKey(dayKey) || getTodayKey();
+    const weekday = getWeekdayLongPtByDate(key);
+    const summary = getLancPlanDaySummary('ft', dayItems);
+    const sorted = dayItems.slice().sort((a, b) => getFtStatusRank(b?.status) - getFtStatusRank(a?.status));
+    const listHtml = sorted.length
+        ? sorted.map(item => {
+            const coverer = item?.collabName || (item?.collabRe ? `RE ${item.collabRe}` : 'N/I');
+            const covered = item?.coveringName
+                || (item?.coveringOther && item.coveringOther !== 'Não se aplica' ? item.coveringOther : '')
+                || (item?.coveringRe ? `RE ${item.coveringRe}` : '');
+            const relation = covered ? `${coverer} cobrindo ${covered}` : coverer;
+            const reason = getFtReasonLabel(item?.reason, item?.reasonOther) || item?.reasonRaw || 'N/I';
+            return `
+                <div class="ft-day-item">
+                    <div class="ft-day-item-top">
+                        <span class="diaria-status status-${item?.status || 'pending'}">${escapeHtml(getFtStatusLabel(item))}</span>
+                        <strong>${escapeHtml(relation)}</strong>
+                    </div>
+                    <div class="ft-day-item-meta">Unidade: ${escapeHtml(getFtUnitLabel(item))} • Turno: ${escapeHtml(item?.shift || 'N/I')} • Horário: ${escapeHtml(item?.ftTime || 'N/I')}</div>
+                    <div class="ft-day-item-meta">Motivo: ${escapeHtml(reason)}</div>
+                </div>
+            `;
+        }).join('')
+        : '<p class="empty-state">Sem FT neste dia.</p>';
+    return `
+        <div class="ft-day-header">
+            <div>
+                <strong>${escapeHtml(weekday)} • ${escapeHtml(formatFtDate(key))}</strong>
+                <div class="ft-day-header-sub">Visão completa das coberturas de FT do dia selecionado.</div>
+            </div>
+            <span class="ft-month-ft ${summary.badgeClass}">${escapeHtml(summary.badge)}</span>
+        </div>
+        <div class="ft-day-list">${listHtml}</div>
+    `;
+}
+
+function buildLancPlanDetailsTroca(dayKey, dayItems = []) {
+    const key = normalizeFtDateKey(dayKey) || getTodayKey();
+    const weekday = getWeekdayLongPtByDate(key);
+    const summary = getLancPlanDaySummary('troca', dayItems);
+    const sorted = dayItems.slice().sort((a, b) => {
+        const ta = Date.parse(a?.createdAt || a?.requestedAt || '');
+        const tb = Date.parse(b?.createdAt || b?.requestedAt || '');
+        return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+    });
+    const listHtml = sorted.length
+        ? sorted.map(item => {
+            const req1 = item?.requesterName || (item?.requesterRe ? `RE ${item.requesterRe}` : 'N/I');
+            const req2 = item?.counterpartName || (item?.counterpartRe ? `RE ${item.counterpartRe}` : 'N/I');
+            const errors = (item?.errors || []).join(' • ');
+            return `
+                <div class="ft-day-item">
+                    <div class="ft-day-item-top">
+                        <span class="diaria-status status-${item?.status || 'pending'}">${escapeHtml(getFtStatusLabel(item))}</span>
+                        <strong>${escapeHtml(item?.unit || 'Unidade não informada')} • REF ${escapeHtml(item?.ref || 'N/I')}</strong>
+                    </div>
+                    <div class="ft-day-item-meta">Solicitante 1: ${escapeHtml(req1)} (${escapeHtml(item?.requesterRe || 'N/I')})</div>
+                    <div class="ft-day-item-meta">Solicitante 2: ${escapeHtml(req2)} (${escapeHtml(item?.counterpartRe || 'N/I')})</div>
+                    ${errors ? `<div class="ft-day-item-meta">Erros: ${escapeHtml(errors)}</div>` : ''}
+                </div>
+            `;
+        }).join('')
+        : '<p class="empty-state">Sem trocas neste dia.</p>';
+    return `
+        <div class="ft-day-header">
+            <div>
+                <strong>${escapeHtml(weekday)} • ${escapeHtml(formatFtDate(key))}</strong>
+                <div class="ft-day-header-sub">Visão completa das trocas registradas no dia selecionado.</div>
+            </div>
+            <span class="ft-month-ft ${summary.badgeClass}">${escapeHtml(summary.badge)}</span>
+        </div>
+        <div class="ft-day-list">${listHtml}</div>
+    `;
+}
+
+function setLancPlanRange(range = 'week') {
+    const state = ensureLancPlanState(getLancPlanModeKey());
+    state.range = range === 'month' ? 'month' : 'week';
+    if (currentLancamentosTab === 'planejamento') {
+        renderLancamentosPlanejamento();
+    }
+}
+
+function shiftLancPlanWindow(direction = 1) {
+    const state = ensureLancPlanState(getLancPlanModeKey());
+    const dir = Number(direction) < 0 ? -1 : 1;
+    if (state.range === 'month') {
+        const anchor = normalizeFtDateKey(state.anchor) || getTodayKey();
+        const date = new Date(`${anchor}T00:00:00`);
+        if (Number.isNaN(date.getTime())) return;
+        date.setDate(1);
+        date.setMonth(date.getMonth() + dir);
+        state.anchor = toDateInputValue(date);
+    } else {
+        state.anchor = getDateKeyWithOffset(state.anchor, dir * 7);
+    }
+    if (currentLancamentosTab === 'planejamento') {
+        renderLancamentosPlanejamento();
+    }
+}
+
+function jumpLancPlanToday() {
+    const state = ensureLancPlanState(getLancPlanModeKey());
+    const today = getTodayKey();
+    state.anchor = today;
+    state.selected = today;
+    if (currentLancamentosTab === 'planejamento') {
+        renderLancamentosPlanejamento();
+    }
+}
+
+function selectLancPlanDay(dayKey = '') {
+    const state = ensureLancPlanState(getLancPlanModeKey());
+    const key = normalizeFtDateKey(dayKey);
+    if (!key) return;
+    state.selected = key;
+    if (currentLancamentosTab === 'planejamento') {
+        renderLancamentosPlanejamento();
+    }
+}
+
+function renderLancamentosPlanejamento() {
+    const panel = document.getElementById('lancamentos-panel-planejamento');
+    if (!panel) return;
+    const modeKey = getLancPlanModeKey();
+    const isFtMode = modeKey === 'ft';
+    const state = ensureLancPlanState(modeKey);
+    const range = getLancPlanRangeDays(state);
+    const actualDays = range.days.filter(day => !day.placeholder);
+    const validSelected = actualDays.some(day => day.key === state.selected);
+    if (!validSelected) {
+        state.selected = actualDays[0]?.key || getTodayKey();
+    }
+
+    const { items, map } = buildLancPlanIndexByDay(modeKey);
+    const pendingCount = items.filter(item => item?.status === 'pending').length;
+    const launchedCount = items.filter(item => item?.status === 'launched').length;
+    const daysWithData = actualDays.filter(day => (map[day.key] || []).length > 0).length;
+    const emptyDays = actualDays.length - daysWithData;
+    const errorCount = isFtMode ? 0 : items.filter(item => (item?.errors || []).length > 0).length;
+    const selectedItems = map[state.selected] || [];
+
+    const cellsHtml = range.days.map(day => {
+        if (day.placeholder) {
+            return `<div class="lanc-plan-day placeholder" aria-hidden="true"></div>`;
+        }
+        const dayItems = map[day.key] || [];
+        const summary = getLancPlanDaySummary(modeKey, dayItems);
+        const dayNumber = new Date(`${day.key}T00:00:00`).getDate();
+        const isToday = day.key === getTodayKey();
+        const isActive = day.key === state.selected;
+        const title = `${formatFtDate(day.key)} • ${summary.meta}`;
+        return `
+            <button type="button" class="ft-month-day lanc-plan-day ${summary.tone} ${isToday ? 'today' : ''} ${isActive ? 'active' : ''}" title="${escapeHtml(title)}" onclick="selectLancPlanDay('${day.key}')">
+                <span class="ft-month-weekday">${escapeHtml(getWeekdayShortPtByDate(day.key))}</span>
+                <span class="ft-month-date">${String(dayNumber).padStart(2, '0')}</span>
+                <span class="ft-month-ft ${summary.badgeClass}">${escapeHtml(summary.badge)}</span>
+                <span class="lanc-plan-meta">${escapeHtml(summary.meta)}</span>
+            </button>
+        `;
+    }).join('');
+
+    const detailsHtml = isFtMode
+        ? buildLancPlanDetailsFt(state.selected, selectedItems)
+        : buildLancPlanDetailsTroca(state.selected, selectedItems);
+
+    panel.innerHTML = `
+        <div class="lanc-plan-shell">
+            <div class="lanc-plan-toolbar">
+                <div>
+                    <div class="dashboard-title">${isFtMode ? 'PLANEJAMENTO FT' : 'PLANEJAMENTO TROCA'}</div>
+                    <h4>${isFtMode ? 'Cobertura semanal/mensal de FT' : 'Planejamento semanal/mensal de trocas'}</h4>
+                </div>
+                <div class="lanc-plan-controls">
+                    <div class="lanc-plan-nav">
+                        <button class="btn btn-secondary btn-small" onclick="shiftLancPlanWindow(-1)">Anterior</button>
+                        <button class="btn btn-secondary btn-small" onclick="jumpLancPlanToday()">Hoje</button>
+                        <button class="btn btn-secondary btn-small" onclick="shiftLancPlanWindow(1)">Próximo</button>
+                    </div>
+                    <button class="filter-chip ${state.range === 'week' ? 'active' : ''}" onclick="setLancPlanRange('week')">Semanal</button>
+                    <button class="filter-chip ${state.range === 'month' ? 'active' : ''}" onclick="setLancPlanRange('month')">Mensal</button>
+                </div>
+            </div>
+            <div class="lancamentos-kpi">
+                <div class="kpi-card"><div class="kpi-label">${isFtMode ? 'FT no período' : 'Trocas no período'}</div><div class="kpi-value">${items.length}</div><div class="kpi-sub">${range.label}</div></div>
+                <div class="kpi-card"><div class="kpi-label">Dias com registros</div><div class="kpi-value">${daysWithData}</div><div class="kpi-sub">Total de ${actualDays.length} dias</div></div>
+                <div class="kpi-card"><div class="kpi-label">Pendentes</div><div class="kpi-value">${pendingCount}</div><div class="kpi-sub">Aguardando tratamento</div></div>
+                <div class="kpi-card"><div class="kpi-label">Lançadas</div><div class="kpi-value">${launchedCount}</div><div class="kpi-sub">Status lançado</div></div>
+                <div class="kpi-card"><div class="kpi-label">${isFtMode ? 'Dias sem FT' : 'Dias sem troca'}</div><div class="kpi-value">${emptyDays}</div><div class="kpi-sub">Atenção para planejamento</div></div>
+                ${isFtMode ? '' : `<div class="kpi-card"><div class="kpi-label">Com erro</div><div class="kpi-value">${errorCount}</div><div class="kpi-sub">Somente trocas lançadas</div></div>`}
+            </div>
+            <div class="ft-month-toolbar">
+                <div class="ft-month-title">${escapeHtml(range.label)}</div>
+                <div class="ft-month-subtitle">${isFtMode ? 'Clique no dia para ver quem está cobrindo quem.' : 'Clique no dia para ver solicitantes e status.'}</div>
+            </div>
+            <div class="lanc-plan-grid ${range.range}">${cellsHtml}</div>
+            <div class="lanc-plan-legend">
+                <span class="lanc-plan-pill tone-normal">Normal</span>
+                <span class="lanc-plan-pill tone-warning">Atenção</span>
+                <span class="lanc-plan-pill tone-critical">Crítico</span>
+            </div>
+            <div class="ft-month-day-details">${detailsHtml}</div>
+        </div>
+    `;
+}
+
 function renderLancamentos() {
     ftLaunches = normalizeFtLaunchEntries(ftLaunches);
     const panelDiaria = document.getElementById('lancamentos-panel-diaria');
     const panelTroca = document.getElementById('lancamentos-panel-troca');
     const panelDashboard = document.getElementById('lancamentos-panel-dashboard');
     const panelHistorico = document.getElementById('lancamentos-panel-historico');
+    const panelPlanejamento = document.getElementById('lancamentos-panel-planejamento');
     const panelNovo = document.getElementById('lancamentos-panel-novo');
-    if (!panelDiaria || !panelTroca || !panelDashboard || !panelHistorico || !panelNovo) return;
+    if (!panelDiaria || !panelTroca || !panelDashboard || !panelHistorico || !panelPlanejamento || !panelNovo) return;
 
     const isFtMode = currentLancamentosMode !== 'troca';
     if (currentLancamentosTab === 'novo') {
@@ -11811,6 +13733,7 @@ function renderLancamentos() {
         btn.classList.toggle('active', mode === (isFtMode ? 'ft' : 'troca'));
     });
     document.getElementById('lancamentos-tabs-ft')?.classList.toggle('hidden', !isFtMode);
+    document.getElementById('lancamentos-tabs-troca')?.classList.toggle('hidden', isFtMode);
     document.getElementById('lancamentos-actions-ft')?.classList.toggle('hidden', !isFtMode);
     document.getElementById('lancamentos-actions-troca')?.classList.toggle('hidden', isFtMode);
 
@@ -11818,6 +13741,7 @@ function renderLancamentos() {
     panelTroca.classList.add('hidden');
     panelDashboard.classList.add('hidden');
     panelHistorico.classList.add('hidden');
+    panelPlanejamento.classList.add('hidden');
     panelNovo.classList.add('hidden');
 
     updateLancamentosHeader();
@@ -11825,7 +13749,20 @@ function renderLancamentos() {
     renderLancamentosFilters();
     maybeShowMonthlyGidReminder();
 
-    if (!isFtMode) {
+    if (!isFtMode && currentLancamentosTab === 'diaria') {
+        panelTroca.classList.remove('hidden');
+        renderLancamentosTroca();
+    } else if (!isFtMode && currentLancamentosTab === 'dashboard') {
+        panelDashboard.classList.remove('hidden');
+        renderLancamentosTrocaDashboard();
+    } else if (!isFtMode && currentLancamentosTab === 'historico') {
+        panelHistorico.classList.remove('hidden');
+        renderLancamentosTrocaHistorico();
+    } else if (!isFtMode && currentLancamentosTab === 'planejamento') {
+        panelPlanejamento.classList.remove('hidden');
+        renderLancamentosPlanejamento();
+    } else if (!isFtMode) {
+        currentLancamentosTab = 'diaria';
         panelTroca.classList.remove('hidden');
         renderLancamentosTroca();
     } else if (currentLancamentosTab === 'diaria') {
@@ -11837,6 +13774,9 @@ function renderLancamentos() {
     } else if (currentLancamentosTab === 'historico') {
         panelHistorico.classList.remove('hidden');
         renderLancamentosHistorico();
+    } else if (currentLancamentosTab === 'planejamento') {
+        panelPlanejamento.classList.remove('hidden');
+        renderLancamentosPlanejamento();
     } else {
         currentLancamentosTab = 'diaria';
         panelDiaria.classList.remove('hidden');
@@ -12330,6 +14270,7 @@ async function syncTrocaSheetLaunches(silent = false) {
             for (let i = headerRow + 1; i < rows.length; i++) {
                 const item = mapTrocaSheetRow(rows[i], idx, src.group);
                 if (!item) continue;
+                if (!validateTrocaSheetLaunchData(item)) continue;
                 merged.push(item);
             }
         }
@@ -12338,10 +14279,8 @@ async function syncTrocaSheetLaunches(silent = false) {
         if (!silent && currentTab === 'lancamentos' && currentLancamentosMode === 'troca') {
             showToast("Planilha de Troca sincronizada.", "success");
         }
-        if (currentTab === 'lancamentos' && currentLancamentosMode === 'troca') {
-            renderLancamentosTroca();
-        } else if (currentTab === 'lancamentos' && currentLancamentosTab === 'dashboard') {
-            renderLancamentosDashboard();
+        if (currentTab === 'lancamentos') {
+            renderLancamentos();
         }
     } finally {
         trocaSheetSyncInProgress = false;
@@ -12379,6 +14318,7 @@ async function syncFtSheetLaunches(silent = false) {
             for (let i = 1; i < rows.length; i++) {
                 const item = mapFtSheetRow(rows[i], idx, collabMap, src.group);
                 if (!item) continue;
+                if (!validateFtSheetLaunchData(item)) continue;
                 if (ftRemovedIds.has(item.id)) continue;
                 const existing = byId[item.id];
                 if (!existing) {
@@ -12442,7 +14382,9 @@ async function syncFtFormResponses(silent = false) {
                 const id = rows[i][idx];
                 if (id) ids.add(String(id).trim());
             }
-        } catch {}
+        } catch (err) {
+            AppErrorHandler.capture(err, { scope: 'ft-form-responses-sync', source: src?.group || src?.url || '' }, { silent: true });
+        }
     }
     if (!ids.size) {
         if (!silent) showToast("Nenhuma confirmação encontrada.", "info");
@@ -12468,17 +14410,17 @@ async function syncFtFormResponses(silent = false) {
 
 function startFtAutoSync() {
     if (ftSyncTimer) return;
-    ftSyncTimer = setInterval(() => {
+    ftSyncTimer = AppTimerManager.setInterval(APP_TIMERS.ftSync, () => {
         syncFtSheetLaunches(true);
         syncTrocaSheetLaunches(true);
     }, 60000);
     if (!ftAutoSyncBound) {
-        document.addEventListener('visibilitychange', () => {
+        AppEventManager.on(document, 'visibilitychange', () => {
             if (document.visibilityState === 'visible') {
                 syncFtSheetLaunches(true);
                 syncTrocaSheetLaunches(true);
             }
-        });
+        }, false, { scope: 'ft-sync', key: 'ft-sync-visibility' });
         ftAutoSyncBound = true;
     }
     syncFtSheetLaunches(true);
@@ -12702,12 +14644,7 @@ function renderLancamentosDiaria() {
                     <h4>${todayLabel}</h4>
                     <p>Execução FT baseada somente na planilha atual, com fila crítica e visão de próximos dias.</p>
                 </div>
-                <div class="lanc-diaria-actions menu-actions-row">
-                    <button class="btn btn-secondary btn-small" onclick="syncLancamentosSheets()">Sincronizar agora</button>
-                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('dashboard')">Indicadores FT</button>
-                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosTab('historico')">Histórico FT</button>
-                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosMode('troca')">Troca de folga</button>
-                </div>
+                <div class="lanc-diaria-note">Ações rápidas ficam no topo: Sincronizar planilhas, Diária FT, Indicadores FT e Histórico FT.</div>
             </div>
             <div class="lanc-diaria-kpi">
                 <div class="kpi-card"><div class="kpi-label">FT hoje</div><div class="kpi-value">${ftToday.length}</div><div class="kpi-sub">Operação do dia</div></div>
@@ -12790,10 +14727,7 @@ function renderLancamentosTroca() {
                     <h4>Controle operacional</h4>
                     <p>Painel dedicado de trocas com foco em lançadas e validação de erros.</p>
                 </div>
-                <div class="lanc-diaria-actions menu-actions-row">
-                    <button class="btn btn-secondary btn-small" onclick="syncTrocaSheetLaunches(false)">Sincronizar trocas</button>
-                    <button class="btn btn-secondary btn-small" onclick="switchLancamentosMode('ft')">Voltar para FT</button>
-                </div>
+                <div class="lanc-diaria-note">Ações rápidas ficam no topo: Sincronizar trocas, Diária Troca, Indicadores Troca e Histórico Troca.</div>
             </div>
             <div class="lanc-diaria-kpi">
                 <div class="kpi-card"><div class="kpi-label">Trocas hoje</div><div class="kpi-value">${todayItems.length}</div><div class="kpi-sub">Data de troca no dia</div></div>
@@ -12807,6 +14741,268 @@ function renderLancamentosTroca() {
             </div>
         </div>
     `;
+}
+
+function buildTrocaTopRows(items, valueGetter, limit = 8) {
+    const map = {};
+    (items || []).forEach(item => {
+        const key = String(valueGetter(item) || '').trim() || 'N/I';
+        map[key] = (map[key] || 0) + 1;
+    });
+    return Object.entries(map)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, limit)
+        .map(([label, value]) => ({ label, value }));
+}
+
+function buildTrocaHistorySearchText(item) {
+    return normalizeText([
+        item?.ref,
+        item?.unit,
+        item?.requesterName,
+        item?.requesterRe,
+        item?.counterpartName,
+        item?.counterpartRe,
+        item?.status,
+        item?.statusRaw,
+        item?.requestDate,
+        item?.swapDate,
+        item?.paymentDate,
+        (item?.errors || []).join(' ')
+    ].filter(Boolean).join(' '));
+}
+
+function applyTrocaHistoryFilters(list = trocaLaunches) {
+    let items = (list || []).slice();
+    if (trocaHistoryFilter.status && trocaHistoryFilter.status !== 'all') {
+        items = items.filter(item => (item?.status || '') === trocaHistoryFilter.status);
+    }
+    const unitFilter = normalizeText(trocaHistoryFilter.unit || '');
+    if (unitFilter) {
+        items = items.filter(item => normalizeText(item?.unit || '') === unitFilter);
+    }
+    const term = normalizeText(trocaHistoryFilter.search || '');
+    if (term) {
+        items = items.filter(item => buildTrocaHistorySearchText(item).includes(term));
+    }
+    return items;
+}
+
+function sortTrocaHistoryItems(items = []) {
+    const key = trocaHistoryFilter.sort || 'date_desc';
+    const getDateValue = (item) => {
+        const primary = getTrocaPrimaryDate(item);
+        if (primary) {
+            const ts = Date.parse(`${primary}T00:00:00`);
+            if (Number.isFinite(ts)) return ts;
+        }
+        const created = Date.parse(item?.createdAt || item?.requestedAt || '');
+        return Number.isFinite(created) ? created : 0;
+    };
+    const getCreatedValue = (item) => {
+        const created = Date.parse(item?.createdAt || item?.requestedAt || '');
+        return Number.isFinite(created) ? created : 0;
+    };
+    return items.slice().sort((a, b) => {
+        if (key === 'date_asc') return getDateValue(a) - getDateValue(b);
+        if (key === 'created_desc') return getCreatedValue(b) - getCreatedValue(a);
+        if (key === 'created_asc') return getCreatedValue(a) - getCreatedValue(b);
+        if (key === 'status') return String(a?.status || '').localeCompare(String(b?.status || ''));
+        if (key === 'unit') return String(a?.unit || '').localeCompare(String(b?.unit || ''), 'pt-BR');
+        return getDateValue(b) - getDateValue(a);
+    });
+}
+
+function renderLancamentosTrocaDashboard() {
+    const panel = document.getElementById('lancamentos-panel-dashboard');
+    if (!panel) return;
+    const items = trocaLaunches.slice();
+    const stats = buildTrocaDashboardStats(items);
+    const topUnits = buildTrocaTopRows(items, item => item?.unit || 'N/I', 8);
+    const topRequester = buildTrocaTopRows(items, item => item?.requesterName || item?.requesterRe || 'N/I', 8);
+    const byWeekday = buildTrocaTopRows(items, item => {
+        const key = getTrocaPrimaryDate(item);
+        return key ? getFtWeekdayLabel(key) || 'N/I' : 'N/I';
+    }, 7);
+    const recentErrors = (items || [])
+        .filter(item => (item?.errors || []).length > 0)
+        .slice()
+        .sort((a, b) => {
+            const tb = Date.parse(b?.createdAt || b?.requestedAt || '');
+            const ta = Date.parse(a?.createdAt || a?.requestedAt || '');
+            return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+        })
+        .slice(0, 10)
+        .map(item => ({
+            label: `${item?.unit || 'N/I'} • REF ${item?.ref || 'N/I'}`,
+            value: (item?.errors || []).join(' • ')
+        }));
+    panel.innerHTML = `
+        <div class="lancamentos-dashboard-toolbar">
+            <div class="dashboard-title">Indicadores de Troca</div>
+            <div class="menu-actions-row lancamentos-toolbar-actions">
+                <button class="btn btn-ghost btn-small" onclick="exportTrocaDashboardXlsx()">Exportar indicadores</button>
+                <button class="btn btn-ghost btn-small" onclick="exportTrocaDashboardCsv()">CSV base</button>
+                <button class="btn btn-ghost btn-small" onclick="exportTrocaDashboardPdf()">PDF resumo</button>
+            </div>
+        </div>
+        <div class="lancamentos-kpi">
+            <div class="kpi-card"><div class="kpi-label">Total</div><div class="kpi-value">${stats.total}</div><div class="kpi-sub">Trocas sincronizadas</div></div>
+            <div class="kpi-card"><div class="kpi-label">Lançadas</div><div class="kpi-value">${stats.launched}</div><div class="kpi-sub">Status lançado</div></div>
+            <div class="kpi-card"><div class="kpi-label">Com erro</div><div class="kpi-value">${stats.errors}</div><div class="kpi-sub">Somente lançadas</div></div>
+            <div class="kpi-card"><div class="kpi-label">Taxa de erro</div><div class="kpi-value">${stats.errorRate}%</div><div class="kpi-sub">Erros ÷ lançadas</div></div>
+        </div>
+        <div class="lancamentos-report-grid">
+            <div class="report-card">
+                <div class="report-title">Por Unidade</div>
+                <div class="report-list">${buildReportRows(topUnits)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Por Solicitante</div>
+                <div class="report-list">${buildReportRows(topRequester)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Por Dia da Semana</div>
+                <div class="report-list">${buildReportRows(byWeekday)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Tipos de Erro</div>
+                <div class="report-list">${buildReportRows(stats.topErrors)}</div>
+            </div>
+            <div class="report-card">
+                <div class="report-title">Erros Recentes</div>
+                <div class="report-list">${buildRecentRows(recentErrors, 'Sem erros recentes.')}</div>
+            </div>
+        </div>
+    `;
+}
+
+function renderLancamentosTrocaHistorico() {
+    const panel = document.getElementById('lancamentos-panel-historico');
+    if (!panel) return;
+    const base = trocaLaunches.slice();
+    if (!base.length) {
+        panel.innerHTML = `<p class="empty-state">Nenhuma troca registrada.</p>`;
+        return;
+    }
+    const filtered = applyTrocaHistoryFilters(base);
+    const sorted = sortTrocaHistoryItems(filtered);
+    const total = filtered.length;
+    const pending = filtered.filter(i => i.status === 'pending').length;
+    const submitted = filtered.filter(i => i.status === 'submitted').length;
+    const launched = filtered.filter(i => i.status === 'launched').length;
+    const withError = filtered.filter(i => (i.errors || []).length > 0).length;
+    const units = Array.from(new Set(base.map(i => i?.unit).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    const cards = sorted.length
+        ? sorted.slice(0, 120).map(item => {
+            const dateKey = getTrocaPrimaryDate(item);
+            const dateLabel = dateKey ? formatFtDate(dateKey) : 'N/I';
+            const createdLabel = item.createdAt ? formatFtDateTime(item.createdAt) : (item.requestedAt ? formatFtDateTime(item.requestedAt) : 'N/I');
+            const errors = item.errors || [];
+            return `
+                <div class="lancamento-card ${errors.length ? 'is-pending' : ''}">
+                    <div class="lancamento-main">
+                        <div class="lancamento-meta">
+                            <span class="lancamento-date"><strong>Data troca</strong> ${dateLabel}</span>
+                            <span class="lancamento-status status-${item.status}">${getFtStatusLabel(item)}</span>
+                            <span class="lancamento-source source-sheet">Planilha Troca</span>
+                        </div>
+                        <div class="lancamento-title">${item.unit || 'Unidade não informada'}</div>
+                        <div class="lancamento-summary">
+                            <span><strong>REF:</strong> ${item.ref || 'N/I'}</span>
+                            <span><strong>Solicitante 1:</strong> ${item.requesterName || 'N/I'} (${item.requesterRe || 'N/I'})</span>
+                            <span><strong>Solicitante 2:</strong> ${item.counterpartName || 'N/I'} (${item.counterpartRe || 'N/I'})</span>
+                            <span><strong>Registro:</strong> ${createdLabel}</span>
+                        </div>
+                        ${errors.length ? `<div class="troca-errors"><strong>Erros:</strong> ${errors.join(' • ')}</div>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : '<p class="empty-state">Nenhuma troca para os filtros selecionados.</p>';
+
+    panel.innerHTML = `
+        <div class="lancamentos-summary-line">Resultados: <strong>${total}</strong> registros</div>
+        <div class="lancamentos-cards">
+            <div class="lanc-card"><div class="label">Total</div><div class="value">${total}</div></div>
+            <div class="lanc-card"><div class="label">Pendentes</div><div class="value">${pending}</div></div>
+            <div class="lanc-card"><div class="label">Confirmadas</div><div class="value">${submitted}</div></div>
+            <div class="lanc-card"><div class="label">Lançadas</div><div class="value">${launched}</div></div>
+            <div class="lanc-card"><div class="label">Com erro</div><div class="value">${withError}</div></div>
+        </div>
+        <div class="lancamentos-history-tools">
+            <div class="form-group">
+                <label>Buscar</label>
+                <input type="text" id="troca-history-search" placeholder="REF, unidade, solicitante...">
+            </div>
+            <div class="form-group">
+                <label>Unidade</label>
+                <select id="troca-history-unit">
+                    <option value="">Todas</option>
+                    ${units.map(u => `<option value="${u}">${u}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Status</label>
+                <select id="troca-history-status">
+                    <option value="all">Todos</option>
+                    <option value="pending">Pendentes</option>
+                    <option value="submitted">Confirmadas</option>
+                    <option value="launched">Lançadas</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Ordenar por</label>
+                <select id="troca-history-sort">
+                    <option value="date_desc">Data da troca (recente)</option>
+                    <option value="date_asc">Data da troca (antiga)</option>
+                    <option value="created_desc">Data de criação (recente)</option>
+                    <option value="created_asc">Data de criação (antiga)</option>
+                    <option value="status">Status</option>
+                    <option value="unit">Unidade</option>
+                </select>
+            </div>
+        </div>
+        <div class="lancamentos-history-actions">
+            <button class="btn btn-secondary btn-small" onclick="exportTrocaHistorico()">Exportar histórico</button>
+            <button class="btn btn-secondary btn-small" onclick="exportTrocaHistoricoCsv()">CSV filtrado</button>
+            <button class="btn btn-secondary btn-small" onclick="exportTrocaHistoricoPdf()">PDF resumo</button>
+        </div>
+        ${cards}
+    `;
+
+    const searchInput = document.getElementById('troca-history-search');
+    if (searchInput) {
+        searchInput.value = trocaHistoryFilter.search || '';
+        searchInput.addEventListener('input', (e) => {
+            trocaHistoryFilter.search = e.target.value || '';
+            renderLancamentosTrocaHistorico();
+        });
+    }
+    const unitSelect = document.getElementById('troca-history-unit');
+    if (unitSelect) {
+        unitSelect.value = trocaHistoryFilter.unit || '';
+        unitSelect.addEventListener('change', (e) => {
+            trocaHistoryFilter.unit = e.target.value || '';
+            renderLancamentosTrocaHistorico();
+        });
+    }
+    const statusSelect = document.getElementById('troca-history-status');
+    if (statusSelect) {
+        statusSelect.value = trocaHistoryFilter.status || 'all';
+        statusSelect.addEventListener('change', (e) => {
+            trocaHistoryFilter.status = e.target.value || 'all';
+            renderLancamentosTrocaHistorico();
+        });
+    }
+    const sortSelect = document.getElementById('troca-history-sort');
+    if (sortSelect) {
+        sortSelect.value = trocaHistoryFilter.sort || 'date_desc';
+        sortSelect.addEventListener('change', (e) => {
+            trocaHistoryFilter.sort = e.target.value || 'date_desc';
+            renderLancamentosTrocaHistorico();
+        });
+    }
 }
 
 function renderLancamentosDashboard() {
@@ -12846,7 +15042,11 @@ function renderLancamentosDashboard() {
     panel.innerHTML = `
         <div class="lancamentos-dashboard-toolbar">
             <div class="dashboard-title">Visão executiva</div>
-            <button class="btn btn-ghost btn-small" onclick="exportFtDashboard()">Exportar dashboard</button>
+            <div class="menu-actions-row lancamentos-toolbar-actions">
+                <button class="btn btn-ghost btn-small" onclick="exportFtDashboard()">Exportar dashboard</button>
+                <button class="btn btn-ghost btn-small" onclick="exportFtDashboardCsv()">CSV base</button>
+                <button class="btn btn-ghost btn-small" onclick="exportFtDashboardPdf()">PDF resumo</button>
+            </div>
         </div>
         ${gidReminderHtml}
         <div class="lancamentos-kpi">
@@ -13028,6 +15228,461 @@ function exportFtHistorico() {
     showToast("Histórico de FT exportado.", "success");
 }
 
+function buildExportDateTag() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function downloadBlobFile(blob, filename) {
+    const link = document.createElement('a');
+    const href = URL.createObjectURL(blob);
+    link.href = href;
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(href), 2000);
+}
+
+function buildCsvFromRows(rows, columns = []) {
+    if (!Array.isArray(rows) || !rows.length) return '';
+    const resolvedColumns = columns.length ? columns : Object.keys(rows[0]);
+    const escapeCell = (value) => {
+        const text = String(value ?? '');
+        if (/[";\n\r,]/.test(text)) {
+            return `"${text.replace(/"/g, '""')}"`;
+        }
+        return text;
+    };
+    const lines = [];
+    lines.push(resolvedColumns.map(escapeCell).join(';'));
+    rows.forEach((row) => {
+        lines.push(resolvedColumns.map(col => escapeCell(row[col])).join(';'));
+    });
+    return `\uFEFF${lines.join('\n')}`;
+}
+
+function exportRowsAsCsv(rows, filename, emptyMessage = "Sem dados para exportar.") {
+    if (!Array.isArray(rows) || !rows.length) {
+        showToast(emptyMessage, "info");
+        return false;
+    }
+    const csv = buildCsvFromRows(rows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    downloadBlobFile(blob, filename);
+    return true;
+}
+
+function createPdfContext(title, subtitleLines = []) {
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+        showToast("Biblioteca de PDF não carregada.", "error");
+        return null;
+    }
+    const doc = new window.jspdf.jsPDF();
+    const margin = 14;
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const maxWidth = doc.internal.pageSize.getWidth() - (margin * 2);
+    let y = margin;
+
+    const ensureSpace = (lineCount = 1) => {
+        if (y + (lineCount * 5) > pageHeight - margin) {
+            doc.addPage();
+            y = margin;
+        }
+    };
+
+    const addWrapped = (text, size = 10, weight = 'normal') => {
+        const value = String(text ?? '').trim();
+        if (!value) return;
+        doc.setFont('helvetica', weight);
+        doc.setFontSize(size);
+        const lines = doc.splitTextToSize(value, maxWidth);
+        lines.forEach((line) => {
+            ensureSpace(1);
+            doc.text(line, margin, y);
+            y += 5;
+        });
+    };
+
+    addWrapped(title, 14, 'bold');
+    subtitleLines.forEach(line => addWrapped(line, 10, 'normal'));
+    y += 2;
+
+    return {
+        doc,
+        heading(label) {
+            y += 1;
+            addWrapped(label, 11, 'bold');
+        },
+        line(text) {
+            addWrapped(text, 10, 'normal');
+        },
+        bullet(text) {
+            addWrapped(`- ${text}`, 10, 'normal');
+        },
+        spacer(size = 2) {
+            y += size;
+            ensureSpace(1);
+        }
+    };
+}
+
+function getFtCoveringText(item) {
+    if (!item) return '';
+    if (item.coveringOther) {
+        return item.coveringRe ? `${item.coveringOther} (RE ${item.coveringRe})` : item.coveringOther;
+    }
+    if (item.coveringName) {
+        return `${item.coveringName} (${item.coveringRe || 'N/I'})`;
+    }
+    if (item.coveringRe) return `RE ${item.coveringRe}`;
+    return '';
+}
+
+function buildFtDashboardBaseRows(items = []) {
+    return (items || []).map(i => ({
+        "Status": getFtStatusLabel(i),
+        "Data FT": i.date ? formatFtDate(i.date) : '',
+        "Solicitada em": i.requestedAt ? formatFtDateTime(i.requestedAt) : '',
+        "Colaborador": i.collabName || '',
+        "RE": i.collabRe || '',
+        "Unidade": getFtUnitLabel(i),
+        "Turno": i.shift || '',
+        "Horário": i.ftTime || '',
+        "Motivo": getFtReasonLabel(i.reason, i.reasonOther) || i.reasonRaw || '',
+        "Detalhe": i.reasonDetail || '',
+        "Cobrindo": getFtCoveringText(i),
+        "Origem": "Planilha FT",
+        "Grupo": i.group || i.sourceGroup || ''
+    }));
+}
+
+function buildFtHistoricoRows(items = []) {
+    return (items || []).map(i => ({
+        "Status": getFtStatusLabel(i),
+        "Data FT": i.date ? formatFtDate(i.date) : '',
+        "Solicitada em": i.requestedAt ? formatFtDateTime(i.requestedAt) : '',
+        "Criada em": i.createdAt ? formatFtDateTime(i.createdAt) : '',
+        "Colaborador": i.collabName || '',
+        "RE": i.collabRe || '',
+        "Unidade": getFtUnitLabel(i),
+        "Turno": i.shift || '',
+        "Horário": i.ftTime || '',
+        "Motivo": getFtReasonLabel(i.reason, i.reasonOther) || i.reasonRaw || '',
+        "Detalhe": i.reasonDetail || '',
+        "Cobrindo": getFtCoveringText(i),
+        "Observações": i.notes || '',
+        "Origem": getFtSourceInfo(i).label,
+        "Grupo": i.group || i.sourceGroup || '',
+        "Status planilha": i.sheetStatusRaw || '',
+        "Responsável": i.createdBy || ''
+    }));
+}
+
+function buildTrocaRows(items = []) {
+    return (items || []).map(item => {
+        const dateKey = getTrocaPrimaryDate(item);
+        return {
+            "Status": getFtStatusLabel(item),
+            "Status bruto": item.statusRaw || '',
+            "REF": item.ref || '',
+            "Unidade": item.unit || '',
+            "Solicitante 1": item.requesterName || '',
+            "RE solicitante 1": item.requesterRe || '',
+            "Solicitante 2": item.counterpartName || '',
+            "RE solicitante 2": item.counterpartRe || '',
+            "Data principal": dateKey ? formatFtDate(dateKey) : '',
+            "Data solicitação": item.requestDate ? formatFtDate(item.requestDate) : (item.requestDateRaw || ''),
+            "Data troca": item.swapDate ? formatFtDate(item.swapDate) : (item.swapDateRaw || ''),
+            "Data pagamento": item.paymentDate ? formatFtDate(item.paymentDate) : (item.paymentDateRaw || ''),
+            "Registro": item.createdAt ? formatFtDateTime(item.createdAt) : (item.requestedAt ? formatFtDateTime(item.requestedAt) : ''),
+            "Erros": (item.errors || []).join(' | '),
+            "Origem": "Planilha Troca",
+            "Grupo": item.sourceGroup || ''
+        };
+    });
+}
+
+function buildTrocaDashboardContext(items = trocaLaunches.slice()) {
+    const stats = buildTrocaDashboardStats(items);
+    const topUnits = buildTrocaTopRows(items, item => item?.unit || 'N/I', 8);
+    const topRequester = buildTrocaTopRows(items, item => item?.requesterName || item?.requesterRe || 'N/I', 8);
+    const byWeekday = buildTrocaTopRows(items, item => {
+        const key = getTrocaPrimaryDate(item);
+        return key ? getFtWeekdayLabel(key) || 'N/I' : 'N/I';
+    }, 7);
+    const recentErrors = (items || [])
+        .filter(item => (item?.errors || []).length > 0)
+        .slice()
+        .sort((a, b) => {
+            const tb = Date.parse(b?.createdAt || b?.requestedAt || '');
+            const ta = Date.parse(a?.createdAt || a?.requestedAt || '');
+            return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+        })
+        .slice(0, 10)
+        .map(item => ({
+            label: `${item?.unit || 'N/I'} • REF ${item?.ref || 'N/I'}`,
+            value: (item?.errors || []).join(' • ')
+        }));
+    return { stats, topUnits, topRequester, byWeekday, recentErrors };
+}
+
+function exportFtDashboardCsv() {
+    const items = applyFtFilters(ftLaunches);
+    const rows = buildFtDashboardBaseRows(items);
+    const tag = buildExportDateTag();
+    const ok = exportRowsAsCsv(rows, `ft_dashboard_base_${tag}.csv`, "Nenhum dado de FT para exportar.");
+    if (ok) showToast("CSV de FT exportado.", "success");
+}
+
+function exportFtDashboardPdf() {
+    const items = applyFtFilters(ftLaunches);
+    if (!items.length) {
+        showToast("Nenhum dado de FT para exportar.", "info");
+        return;
+    }
+    const stats = buildFtDashboardStats(items);
+    const ctx = createPdfContext("FT - Resumo Executivo", [
+        `Gerado em: ${new Date().toLocaleString()}`,
+        `Registros filtrados: ${items.length}`
+    ]);
+    if (!ctx) return;
+
+    ctx.heading("Indicadores");
+    ctx.bullet(`Pendentes: ${stats.pending}`);
+    ctx.bullet(`Confirmadas: ${stats.submitted}`);
+    ctx.bullet(`Lançadas: ${stats.launched}`);
+    ctx.bullet(`Taxa de lançamento: ${stats.launchRate}%`);
+    ctx.bullet(`Média por dia: ${stats.avgPerDay ? stats.avgPerDay.toFixed(1) : '0.0'}`);
+
+    ctx.heading("Top Unidades");
+    if (stats.topUnits.length) {
+        stats.topUnits.slice(0, 10).forEach(row => ctx.bullet(`${row.label}: ${row.value}`));
+    } else {
+        ctx.line("Sem dados.");
+    }
+
+    ctx.heading("Top Colaboradores");
+    if (stats.topPeople.length) {
+        stats.topPeople.slice(0, 10).forEach(row => ctx.bullet(`${row.label}: ${row.value}`));
+    } else {
+        ctx.line("Sem dados.");
+    }
+
+    ctx.heading("Filtros Ativos");
+    ctx.bullet(`Período FT: ${ftFilter.from ? formatFtDate(ftFilter.from) : 'início livre'} até ${ftFilter.to ? formatFtDate(ftFilter.to) : 'fim livre'}`);
+    ctx.bullet(`Status: ${ftFilter.status === 'all' ? 'Todos' : ftFilter.status}`);
+
+    const tag = buildExportDateTag();
+    ctx.doc.save(`ft_dashboard_${tag}.pdf`);
+    showToast("PDF de FT exportado.", "success");
+}
+
+function exportFtHistoricoCsv() {
+    const items = sortFtHistoryItems(applyFtHistoryFilters(ftLaunches));
+    const rows = buildFtHistoricoRows(items);
+    const tag = buildExportDateTag();
+    const ok = exportRowsAsCsv(rows, `ft_historico_${tag}.csv`, "Nenhum lançamento de FT para exportar.");
+    if (ok) showToast("CSV do histórico FT exportado.", "success");
+}
+
+function exportFtHistoricoPdf() {
+    const items = sortFtHistoryItems(applyFtHistoryFilters(ftLaunches));
+    if (!items.length) {
+        showToast("Nenhum lançamento de FT para exportar.", "info");
+        return;
+    }
+    const ctx = createPdfContext("FT - Histórico Filtrado", [
+        `Gerado em: ${new Date().toLocaleString()}`,
+        `Registros: ${items.length}`
+    ]);
+    if (!ctx) return;
+
+    const pending = items.filter(i => i.status === 'pending').length;
+    const submitted = items.filter(i => i.status === 'submitted').length;
+    const launched = items.filter(i => i.status === 'launched').length;
+
+    ctx.heading("Resumo");
+    ctx.bullet(`Pendentes: ${pending}`);
+    ctx.bullet(`Confirmadas: ${submitted}`);
+    ctx.bullet(`Lançadas: ${launched}`);
+
+    ctx.heading("Filtros");
+    ctx.bullet(`Busca: ${ftHistoryFilter.search || 'vazia'}`);
+    ctx.bullet(`Unidade: ${ftHistoryFilter.unit || 'todas'}`);
+    ctx.bullet(`Colaborador: ${ftHistoryFilter.collab || 'todos'}`);
+    ctx.bullet(`Ordenação: ${ftHistoryFilter.sort || 'date_desc'}`);
+    ctx.bullet(`Agrupamento por dia: ${ftHistoryFilter.grouped ? 'ativo' : 'inativo'}`);
+
+    ctx.heading("Registros (até 30)");
+    items.slice(0, 30).forEach(item => {
+        const date = item.date ? formatFtDate(item.date) : 'Sem data';
+        ctx.bullet(`${date} • ${getFtStatusLabel(item)} • ${getFtCollabLabel(item)} • ${getFtUnitLabel(item)}`);
+    });
+
+    const tag = buildExportDateTag();
+    ctx.doc.save(`ft_historico_${tag}.pdf`);
+    showToast("PDF do histórico FT exportado.", "success");
+}
+
+function exportTrocaDashboardXlsx() {
+    const items = trocaLaunches.slice();
+    if (!items.length) {
+        showToast("Nenhuma troca para exportar.", "info");
+        return;
+    }
+    const context = buildTrocaDashboardContext(items);
+    const toRows = (list) => (list || []).map(i => ({ "Item": i.label, "Quantidade": i.value }));
+    const resumo = [
+        { "Indicador": "Total", "Valor": context.stats.total },
+        { "Indicador": "Lançadas", "Valor": context.stats.launched },
+        { "Indicador": "Com erro", "Valor": context.stats.errors },
+        { "Indicador": "Taxa de erro (%)", "Valor": context.stats.errorRate }
+    ];
+    const filtros = [
+        { "Filtro": "Base", "Valor": "Trocas sincronizadas (todas)" },
+        { "Filtro": "Status no histórico", "Valor": trocaHistoryFilter.status || 'all' },
+        { "Filtro": "Busca no histórico", "Valor": trocaHistoryFilter.search || '' }
+    ];
+    const recentErrorRows = context.recentErrors.map(i => ({ "Item": i.label, "Detalhe": i.value }));
+    const baseRows = buildTrocaRows(items);
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumo), "Resumo");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(context.topUnits)), "Por Unidade");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(context.topRequester)), "Por Solicitante");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(context.byWeekday)), "Por Dia Semana");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(toRows(context.stats.topErrors)), "Tipos Erro");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(recentErrorRows), "Erros Recentes");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filtros), "Filtros");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(baseRows), "Base Troca");
+
+    const tag = buildExportDateTag();
+    XLSX.writeFile(wb, `troca_dashboard_${tag}.xlsx`);
+    showToast("Indicadores de troca exportados.", "success");
+}
+
+function exportTrocaDashboardCsv() {
+    const rows = buildTrocaRows(trocaLaunches.slice());
+    const tag = buildExportDateTag();
+    const ok = exportRowsAsCsv(rows, `troca_dashboard_base_${tag}.csv`, "Nenhuma troca para exportar.");
+    if (ok) showToast("CSV de troca exportado.", "success");
+}
+
+function exportTrocaDashboardPdf() {
+    const items = trocaLaunches.slice();
+    if (!items.length) {
+        showToast("Nenhuma troca para exportar.", "info");
+        return;
+    }
+    const context = buildTrocaDashboardContext(items);
+    const ctx = createPdfContext("Troca de Folga - Resumo Executivo", [
+        `Gerado em: ${new Date().toLocaleString()}`,
+        `Trocas sincronizadas: ${items.length}`
+    ]);
+    if (!ctx) return;
+
+    ctx.heading("Indicadores");
+    ctx.bullet(`Total: ${context.stats.total}`);
+    ctx.bullet(`Lançadas: ${context.stats.launched}`);
+    ctx.bullet(`Com erro: ${context.stats.errors}`);
+    ctx.bullet(`Taxa de erro: ${context.stats.errorRate}%`);
+
+    ctx.heading("Top Unidades");
+    if (context.topUnits.length) {
+        context.topUnits.slice(0, 10).forEach(row => ctx.bullet(`${row.label}: ${row.value}`));
+    } else {
+        ctx.line("Sem dados.");
+    }
+
+    ctx.heading("Tipos de Erro");
+    if (context.stats.topErrors.length) {
+        context.stats.topErrors.slice(0, 10).forEach(row => ctx.bullet(`${row.label}: ${row.value}`));
+    } else {
+        ctx.line("Sem erros lançados.");
+    }
+
+    ctx.heading("Erros Recentes");
+    if (context.recentErrors.length) {
+        context.recentErrors.slice(0, 10).forEach(row => ctx.bullet(`${row.label} • ${row.value}`));
+    } else {
+        ctx.line("Sem erros recentes.");
+    }
+
+    const tag = buildExportDateTag();
+    ctx.doc.save(`troca_dashboard_${tag}.pdf`);
+    showToast("PDF de troca exportado.", "success");
+}
+
+function exportTrocaHistorico() {
+    const items = sortTrocaHistoryItems(applyTrocaHistoryFilters(trocaLaunches));
+    if (!items.length) {
+        showToast("Nenhuma troca para exportar.", "info");
+        return;
+    }
+    const rows = buildTrocaRows(items);
+    const filtros = [
+        { "Filtro": "Busca", "Valor": trocaHistoryFilter.search || '' },
+        { "Filtro": "Unidade", "Valor": trocaHistoryFilter.unit || 'Todas' },
+        { "Filtro": "Status", "Valor": trocaHistoryFilter.status || 'all' },
+        { "Filtro": "Ordenação", "Valor": trocaHistoryFilter.sort || 'date_desc' }
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filtros), "Filtros");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Historico Troca");
+    const tag = buildExportDateTag();
+    XLSX.writeFile(wb, `troca_historico_${tag}.xlsx`);
+    showToast("Histórico de troca exportado.", "success");
+}
+
+function exportTrocaHistoricoCsv() {
+    const items = sortTrocaHistoryItems(applyTrocaHistoryFilters(trocaLaunches));
+    const rows = buildTrocaRows(items);
+    const tag = buildExportDateTag();
+    const ok = exportRowsAsCsv(rows, `troca_historico_${tag}.csv`, "Nenhuma troca para exportar.");
+    if (ok) showToast("CSV do histórico de troca exportado.", "success");
+}
+
+function exportTrocaHistoricoPdf() {
+    const items = sortTrocaHistoryItems(applyTrocaHistoryFilters(trocaLaunches));
+    if (!items.length) {
+        showToast("Nenhuma troca para exportar.", "info");
+        return;
+    }
+    const pending = items.filter(i => i.status === 'pending').length;
+    const submitted = items.filter(i => i.status === 'submitted').length;
+    const launched = items.filter(i => i.status === 'launched').length;
+    const withError = items.filter(i => (i.errors || []).length > 0).length;
+    const ctx = createPdfContext("Troca de Folga - Histórico Filtrado", [
+        `Gerado em: ${new Date().toLocaleString()}`,
+        `Registros: ${items.length}`
+    ]);
+    if (!ctx) return;
+
+    ctx.heading("Resumo");
+    ctx.bullet(`Pendentes: ${pending}`);
+    ctx.bullet(`Confirmadas: ${submitted}`);
+    ctx.bullet(`Lançadas: ${launched}`);
+    ctx.bullet(`Com erro: ${withError}`);
+
+    ctx.heading("Filtros");
+    ctx.bullet(`Busca: ${trocaHistoryFilter.search || 'vazia'}`);
+    ctx.bullet(`Unidade: ${trocaHistoryFilter.unit || 'todas'}`);
+    ctx.bullet(`Status: ${trocaHistoryFilter.status || 'all'}`);
+    ctx.bullet(`Ordenação: ${trocaHistoryFilter.sort || 'date_desc'}`);
+
+    ctx.heading("Registros (até 30)");
+    items.slice(0, 30).forEach(item => {
+        const dateKey = getTrocaPrimaryDate(item);
+        const date = dateKey ? formatFtDate(dateKey) : 'Sem data';
+        const unit = item.unit || 'N/I';
+        const ref = item.ref || 'N/I';
+        ctx.bullet(`${date} • ${getFtStatusLabel(item)} • ${unit} • REF ${ref}`);
+    });
+
+    const tag = buildExportDateTag();
+    ctx.doc.save(`troca_historico_${tag}.pdf`);
+    showToast("PDF do histórico de troca exportado.", "success");
+}
+
 function renderLancamentosHistorico() {
     const panel = document.getElementById('lancamentos-panel-historico');
     if (!panel) return;
@@ -13201,6 +15856,8 @@ function renderLancamentosHistorico() {
         <div class="lancamentos-history-actions">
             <button class="filter-chip ${ftHistoryFilter.grouped ? 'active' : ''}" onclick="toggleFtHistoryGrouped()">Agrupar por dia</button>
             <button class="btn btn-secondary btn-small" onclick="exportFtHistorico()">Exportar histórico</button>
+            <button class="btn btn-secondary btn-small" onclick="exportFtHistoricoCsv()">CSV filtrado</button>
+            <button class="btn btn-secondary btn-small" onclick="exportFtHistoricoPdf()">PDF resumo</button>
         </div>
         ${historyBody}
     `;
@@ -15089,7 +17746,9 @@ function validateSheetRows(source, rows, csvText = '') {
             return finalizeValidatorResult(messages, [], []);
         }
         const dataRows = rows.slice(1);
-        const items = dataRows.map(row => mapFtSheetRow(row, idx, {}, source.group || '')).filter(Boolean);
+        const items = dataRows
+            .map(row => mapFtSheetRow(row, idx, {}, source.group || ''))
+            .filter(item => validateFtSheetLaunchData(item));
         messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
         messages.push({ type: 'info', text: `Registros válidos: ${items.length}` });
         if (!items.length) messages.push({ type: 'warn', text: 'Nenhum registro válido identificado.' });
@@ -15122,7 +17781,9 @@ function validateSheetRows(source, rows, csvText = '') {
             return finalizeValidatorResult(messages, [], []);
         }
         const dataRows = rows.slice(headerRow + 1);
-        const items = dataRows.map(row => mapTrocaSheetRow(row, idx, source.group || '')).filter(Boolean);
+        const items = dataRows
+            .map(row => mapTrocaSheetRow(row, idx, source.group || ''))
+            .filter(item => validateTrocaSheetLaunchData(item));
         const launchedItems = items.filter(i => i.status === 'launched');
         const erroredLaunched = launchedItems.filter(i => (i.errors || []).length > 0);
         messages.push({ type: 'info', text: `Linhas analisadas: ${dataRows.length}` });
@@ -15231,7 +17892,7 @@ function validateSheetRows(source, rows, csvText = '') {
     }
 
     if (source.type === 'reciclagem') {
-        const entries = parseReciclagemCsv(csvText, source.sheetKey || '');
+        const entries = parseReciclagemCsv(csvText, source.sheetKey || '').filter(validateReciclagemEntry);
         messages.push({ type: 'info', text: `Registros detectados: ${entries.length}` });
         if (!entries.length) {
             messages.push({ type: 'error', text: 'Nenhum registro válido identificado na planilha.' });
@@ -15259,4 +17920,60 @@ function toSourceViewUrl(url) {
         return url.replace('output=csv', 'pubhtml');
     }
     return url;
+}
+
+const AppFeatureRegistry = Object.freeze({
+    gateway: Object.freeze({
+        loadGroup,
+        resetToGateway,
+        openSupervisaoPage,
+        openGerenciaPage
+    }),
+    search: Object.freeze({
+        realizarBusca,
+        runStandardSearch,
+        handleSearchTokenSuggest,
+        applySearchToken
+    }),
+    units: Object.freeze({
+        renderizarUnidades,
+        navigateToUnit,
+        openAddressModalForUnit,
+        openAddressModalForCollaborator
+    }),
+    avisos: Object.freeze({
+        renderAvisos,
+        createAviso,
+        createReminder,
+        checkReminderAlerts
+    }),
+    reciclagem: Object.freeze({
+        loadReciclagemData,
+        renderReciclagem,
+        exportReciclagemReport
+    }),
+    lancamentos: Object.freeze({
+        renderLancamentos,
+        syncFtSheetLaunches,
+        syncTrocaSheetLaunches,
+        syncFtFormResponses
+    }),
+    config: Object.freeze({
+        switchConfigTab,
+        renderConfigSummary,
+        renderSheetValidatorOptions,
+        validateSelectedSheet
+    }),
+    infra: Object.freeze({
+        AppBootstrapper,
+        AppStateManager,
+        AppCacheManager,
+        AppEventManager,
+        AppTimerManager,
+        AppErrorHandler,
+        AppLogger
+    })
+});
+if (typeof window !== 'undefined') {
+    window.AppFeatures = AppFeatureRegistry;
 }
