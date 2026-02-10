@@ -6,13 +6,14 @@
     <meta name="theme-color" content="#002D72">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <title>Gerenciamento de Efetivos v3.9.1 - Grupo Dunamis</title>
+    <title>Gerenciamento de Efetivos v3.9.3 - Grupo Dunamis</title>
     <link rel="icon" href="images/logo-dunamis-servicos.png">
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="stylesheet" href="main.css">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 </head>
 <body>
+    <a href="#content-area" class="skip-link">Pular para o conteúdo principal</a>
 
     <!-- HEADER -->
     <header>
@@ -24,7 +25,7 @@
                     <path d="M9 21V14h6v7"></path>
                 </svg>
             </button>
-            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.9.1</span></h1>
+            <h1 id="app-title">Gerenciamento de Efetivos <span class="app-version">v3.9.3</span></h1>
             <button id="avisos-bell" class="avisos-bell hidden" onclick="toggleAvisosMini()" title="Avisos">
                 <span class="bell-icon" aria-hidden="true">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -37,8 +38,33 @@
             <span id="shadow-indicator" class="shadow-indicator hidden">Shadow offline</span>
             <span id="auth-indicator" class="auth-indicator hidden"></span>
             <button class="compact-toggle" onclick="toggleCompactMode()" title="Modo compacto" aria-label="Modo compacto">Compacto</button>
+            <button id="utility-menu-btn" class="home-btn" onclick="toggleUtilityDrawer()" title="Menu rápido" aria-label="Menu rápido" aria-expanded="false">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                    <line x1="4" y1="7" x2="20" y2="7"></line>
+                    <line x1="4" y1="12" x2="20" y2="12"></line>
+                    <line x1="4" y1="17" x2="20" y2="17"></line>
+                </svg>
+            </button>
         </div>
     </header>
+
+    <aside id="utility-drawer" class="utility-drawer hidden" aria-hidden="true">
+        <div class="utility-drawer-backdrop" onclick="closeUtilityDrawer()"></div>
+        <div class="utility-drawer-panel" role="dialog" aria-modal="true" aria-label="Menu rápido">
+            <div class="utility-drawer-header">
+                <strong>Menu Rápido</strong>
+                <button class="close-modal" onclick="closeUtilityDrawer()" aria-label="Fechar menu">×</button>
+            </div>
+            <div class="utility-drawer-actions">
+                <button class="btn btn-secondary btn-small" onclick="closeUtilityDrawer(); printCurrentView()">Imprimir visão atual</button>
+                <button class="btn btn-secondary btn-small" onclick="openHelpModal()">Ajuda rápida</button>
+                <button class="btn btn-secondary btn-small" onclick="openPromptsModal()">Prompts</button>
+                <button class="btn btn-secondary btn-small" onclick="openGuideModal()">Guia completo</button>
+                <button class="btn btn-secondary btn-small" onclick="closeUtilityDrawer(); toggleCompactMode()">Modo compacto</button>
+                <button class="btn btn-secondary btn-small" onclick="closeUtilityDrawer(); scrollToTop()">Voltar ao topo</button>
+            </div>
+        </div>
+    </aside>
 
     <!-- GATEWAY (Seleção de Grupo) -->
     <section id="gateway">
@@ -46,7 +72,7 @@
     </section>
 
     <!-- APLICAÇÃO PRINCIPAL -->
-    <main id="app-container">
+    <main id="app-container" role="main">
         <div id="content-area">
             <!-- Dashboard (Abas) será injetado aqui -->
         </div>

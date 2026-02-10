@@ -48,6 +48,7 @@ let allCollaboratorsCache = { items: null, updatedAt: 0 };
 const RECICLAGEM_CACHE_TTL_MS = 30 * 60 * 1000;
 let exportUnitTarget = null;
 let ftLaunches = [];
+let ftAuditTrail = [];
 let ftRemovedIds = new Set();
 let trocaLaunches = [];
 let currentLancamentosMode = 'ft'; // ft | troca
@@ -102,12 +103,19 @@ let gerenciaDataCache = [];
 let gerenciaFilter = { group: 'all', from: '', to: '' };
 let commandPaletteState = { open: false, activeIndex: 0, filtered: [] };
 const SEARCH_DEBOUNCE_MS = 350;
+const FT_AUDIT_MAX_ITEMS = 1200;
 let searchInputComposing = false;
 let searchInputDebounceId = null;
+let searchAdvancedOpen = false;
+let searchRecentTerms = [];
+let collaboratorFavorites = new Set();
 let uiTooltipInitialized = false;
 let activeTooltipEl = null;
 let activeTooltipTarget = null;
 let appLifecycleBound = false;
+let utilityDrawerOpen = false;
+let modalA11yBound = false;
+let globalShortcutsBound = false;
 const APP_TIMERS = Object.freeze({
     shadowSync: 'shadow-sync',
     shadowAutoPull: 'shadow-auto-pull',
@@ -370,6 +378,7 @@ function registerAppStateBindings() {
     bind('shadowStatus', () => shadowStatus, (v) => { shadowStatus = v && typeof v === 'object' ? v : shadowStatus; });
     bind('avisos', () => avisos, (v) => { avisos = Array.isArray(v) ? v : []; }, Array.isArray);
     bind('ftLaunches', () => ftLaunches, (v) => { ftLaunches = Array.isArray(v) ? v : []; }, Array.isArray);
+    bind('ftAuditTrail', () => ftAuditTrail, (v) => { ftAuditTrail = Array.isArray(v) ? v : []; }, Array.isArray);
     bind('trocaLaunches', () => trocaLaunches, (v) => { trocaLaunches = Array.isArray(v) ? v : []; }, Array.isArray);
     bind('searchFilterStatus', () => searchFilterStatus, (v) => { searchFilterStatus = String(v || 'all'); });
     bind('searchHideAbsence', () => searchHideAbsence, (v) => { searchHideAbsence = !!v; });
@@ -544,6 +553,11 @@ function bindAppLifecycle() {
 
 function scheduleSearchExecution() {
     AppTimerManager.clear(APP_TIMERS.searchDebounce);
+    const inputValue = document.getElementById('search-input')?.value || '';
+    const hasSearchIntent = !!String(inputValue).trim() || searchFilterStatus !== 'all' || hasDateRangeFilter(searchDateFilter);
+    if (hasSearchIntent && !isSubstituteSearchEnabled()) {
+        renderSearchLoadingSkeleton();
+    }
     searchInputDebounceId = AppTimerManager.setTimeout(APP_TIMERS.searchDebounce, () => {
         searchInputDebounceId = null;
         if (searchInputComposing) return;
@@ -829,6 +843,7 @@ function getGroupOptionsHtml() {
 function updateBreadcrumb() {
     const groupEl = document.getElementById('breadcrumb-group');
     const tabEl = document.getElementById('breadcrumb-tab');
+    const contextEl = document.getElementById('breadcrumb-context');
     const updatedEl = document.getElementById('breadcrumb-updated');
     const groupPillEl = document.getElementById('breadcrumb-group-pill');
     if (!groupEl || !tabEl) return;
@@ -850,8 +865,12 @@ function updateBreadcrumb() {
     };
     const groupLabel = groupLabelMap[currentGroup] || (currentGroup ? currentGroup.toUpperCase() : 'Grupo');
     const tabLabel = tabLabelMap[currentTab] || 'Seção';
-    groupEl.textContent = groupLabel;
+    groupEl.textContent = `Gateway › ${groupLabel}`;
     tabEl.textContent = tabLabel;
+    if (contextEl) {
+        const contextLabel = currentContext?.unit ? `Unidade: ${currentContext.unit}` : (currentContext?.re ? `RE ${currentContext.re}` : 'Visão geral');
+        contextEl.textContent = contextLabel;
+    }
     if (groupPillEl) groupPillEl.textContent = `Grupo: ${groupLabel}`;
     if (updatedEl) {
         updatedEl.textContent = lastUpdatedAt
@@ -860,9 +879,289 @@ function updateBreadcrumb() {
     }
 }
 
+function saveSearchRecentTerms() {
+    try {
+        localStorage.setItem('searchRecentTerms', JSON.stringify(searchRecentTerms.slice(0, 10)));
+    } catch {}
+}
+
+function pushSearchRecentTerm(value) {
+    const term = String(value || '').trim();
+    if (!term || term.length < 2) return;
+    searchRecentTerms = [term].concat(searchRecentTerms.filter(t => t.toLowerCase() !== term.toLowerCase())).slice(0, 10);
+    saveSearchRecentTerms();
+}
+
+function saveCollaboratorFavorites() {
+    try {
+        localStorage.setItem('collabFavorites', JSON.stringify(Array.from(collaboratorFavorites)));
+    } catch {}
+}
+
+function isCollaboratorFavorite(re) {
+    const key = normalizeFtRe(re);
+    if (!key) return false;
+    return collaboratorFavorites.has(key);
+}
+
+function toggleCollaboratorFavorite(re) {
+    const key = normalizeFtRe(re);
+    if (!key) return;
+    if (collaboratorFavorites.has(key)) collaboratorFavorites.delete(key);
+    else collaboratorFavorites.add(key);
+    saveCollaboratorFavorites();
+    const term = document.getElementById('search-input')?.value || '';
+    runStandardSearch(term, document.getElementById('search-results'), searchFilterStatus || 'all', !!searchHideAbsence);
+}
+
+function clearSearchInput() {
+    const input = document.getElementById('search-input');
+    if (!input) return;
+    input.value = '';
+    renderSearchRecentPanel('');
+    realizarBusca();
+    input.focus();
+}
+
+function getRelativeTimeLabel(dateValue) {
+    if (!(dateValue instanceof Date) || Number.isNaN(dateValue.getTime())) return 'sem atualização';
+    const diffMs = Date.now() - dateValue.getTime();
+    const diffMin = Math.max(0, Math.floor(diffMs / 60000));
+    if (diffMin < 1) return 'agora';
+    if (diffMin < 60) return `há ${diffMin} min`;
+    const diffHour = Math.floor(diffMin / 60);
+    if (diffHour < 24) return `há ${diffHour}h`;
+    const diffDay = Math.floor(diffHour / 24);
+    return `há ${diffDay}d`;
+}
+
+function updateSearchSummary(total = 0) {
+    const box = document.getElementById('search-summary');
+    if (!box) return;
+    if (!Number.isFinite(total) || total < 0) total = 0;
+    const updated = getRelativeTimeLabel(lastUpdatedAt);
+    box.innerHTML = `
+        <span><strong>${total}</strong> resultado(s) encontrado(s)</span>
+        <span class="search-summary-meta">Atualizado ${updated}</span>
+    `;
+    box.classList.toggle('hidden', false);
+}
+
+function renderSearchLoadingSkeleton() {
+    const container = document.getElementById('search-results');
+    if (!container) return;
+    container.innerHTML = `
+        <div class="search-skeleton-grid" aria-hidden="true">
+            <div class="skeleton-card">
+                <div class="skeleton-line w-40"></div>
+                <div class="skeleton-line w-90"></div>
+                <div class="skeleton-line w-70"></div>
+            </div>
+            <div class="skeleton-card">
+                <div class="skeleton-line w-60"></div>
+                <div class="skeleton-line w-90"></div>
+                <div class="skeleton-line w-70"></div>
+            </div>
+            <div class="skeleton-card">
+                <div class="skeleton-line w-40"></div>
+                <div class="skeleton-line w-90"></div>
+                <div class="skeleton-line w-70"></div>
+            </div>
+        </div>
+    `;
+}
+
+function applyRequiredFieldHints() {
+    const requiredIds = [
+        'aviso-assignee-select',
+        'aviso-message',
+        'reminder-assignee-select',
+        'reminder-message',
+        'ft-unit-target',
+        'ft-date',
+        'ft-shift',
+        'ft-reason'
+    ];
+    requiredIds.forEach(id => {
+        const input = document.getElementById(id);
+        if (!(input instanceof HTMLElement)) return;
+        if ('required' in input) input.required = true;
+        const group = input.closest('.form-group');
+        const label = group?.querySelector('label');
+        if (!label) return;
+        if (label.querySelector('.required-mark')) return;
+        const mark = document.createElement('span');
+        mark.className = 'required-mark';
+        mark.textContent = '*';
+        label.appendChild(mark);
+    });
+}
+
+function renderSearchRecentPanel(term = '') {
+    const panel = document.getElementById('search-recent');
+    const list = document.getElementById('search-recent-list');
+    if (!panel || !list) return;
+    const normalized = String(term || '').trim().toLowerCase();
+    const items = searchRecentTerms.filter(t => !normalized || t.toLowerCase().includes(normalized)).slice(0, 8);
+    if (!items.length) {
+        panel.classList.add('hidden');
+        return;
+    }
+    list.innerHTML = items.map(t => `<button type="button" class="search-recent-item" onclick="applyRecentSearch(${JSON.stringify(t).replace(/"/g, '&quot;')})">${escapeHtml(t)}</button>`).join('');
+    panel.classList.remove('hidden');
+}
+
+function applyRecentSearch(term) {
+    const input = document.getElementById('search-input');
+    if (!input) return;
+    input.value = String(term || '');
+    document.getElementById('search-recent')?.classList.add('hidden');
+    flushSearchExecution();
+}
+
+function getFavoriteCollaboratorsByTerm(term = '') {
+    const upper = String(term || '').trim().toUpperCase();
+    const favorites = (currentData || [])
+        .filter(item => item && isCollaboratorFavorite(item.re))
+        .filter(item => {
+            if (!upper) return true;
+            return (item.nome && item.nome.includes(upper))
+                || (item.re && item.re.includes(upper))
+                || (item.posto && item.posto.includes(upper));
+        })
+        .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR'));
+    return favorites;
+}
+
+function renderSearchFavoritesPanel(term = '') {
+    const panel = document.getElementById('search-favorites');
+    const list = document.getElementById('search-favorites-list');
+    if (!panel || !list) return;
+    const favorites = getFavoriteCollaboratorsByTerm(term).slice(0, 8);
+    if (!favorites.length) {
+        panel.classList.add('hidden');
+        return;
+    }
+    list.innerHTML = favorites.map(item => `
+        <div class="search-favorite-item">
+            <span>${escapeHtml(item.nome || 'N/I')} (${escapeHtml(item.re || 'N/I')})</span>
+            <button type="button" class="btn-mini btn-secondary" onclick="focusFavoriteCollaborator('${escapeHtml(item.re || '')}')">Abrir</button>
+        </div>
+    `).join('');
+    panel.classList.remove('hidden');
+}
+
+function focusFavoriteCollaborator(re) {
+    const input = document.getElementById('search-input');
+    if (!input) return;
+    const item = (currentData || []).find(c => matchesRe(c?.re, re));
+    if (!item) return;
+    input.value = item.re || item.nome || '';
+    flushSearchExecution();
+}
+
+function toggleSearchAdvanced() {
+    searchAdvancedOpen = !searchAdvancedOpen;
+    const panel = document.getElementById('search-advanced-panel');
+    const toggle = document.getElementById('search-advanced-toggle');
+    if (panel) panel.classList.toggle('hidden', !searchAdvancedOpen);
+    if (toggle) {
+        toggle.textContent = searchAdvancedOpen ? 'Ocultar filtros avançados' : 'Mostrar filtros avançados';
+        toggle.setAttribute('aria-expanded', searchAdvancedOpen ? 'true' : 'false');
+    }
+}
+
+function applySearchDatePreset(preset) {
+    const today = getTodayKey();
+    if (preset === 'today') {
+        setSearchDateFilter(today, today);
+        return;
+    }
+    if (preset === 'week') {
+        setSearchDateFilter(getDateKeyWithOffset(today, -6), today);
+        return;
+    }
+    if (preset === 'month') {
+        const start = getMonthRangeByDateKey(today).start;
+        setSearchDateFilter(start, today);
+        return;
+    }
+    clearSearchDateFilter();
+}
+
+function syncUtilityDrawer() {
+    const drawer = document.getElementById('utility-drawer');
+    const menuBtn = document.getElementById('utility-menu-btn');
+    if (!drawer) return;
+    drawer.classList.toggle('hidden', !utilityDrawerOpen);
+    drawer.setAttribute('aria-hidden', utilityDrawerOpen ? 'false' : 'true');
+    document.body.classList.toggle('utility-open', utilityDrawerOpen);
+    if (menuBtn) menuBtn.setAttribute('aria-expanded', utilityDrawerOpen ? 'true' : 'false');
+}
+
+function openUtilityDrawer() {
+    utilityDrawerOpen = true;
+    syncUtilityDrawer();
+}
+
+function closeUtilityDrawer() {
+    utilityDrawerOpen = false;
+    syncUtilityDrawer();
+}
+
+function toggleUtilityDrawer() {
+    utilityDrawerOpen = !utilityDrawerOpen;
+    syncUtilityDrawer();
+}
+
+function closeTopVisibleModal() {
+    const opened = Array.from(document.querySelectorAll('.modal')).filter(m => !m.classList.contains('hidden'));
+    if (!opened.length) return false;
+    const top = opened[opened.length - 1];
+    top.classList.add('hidden');
+    return true;
+}
+
+function syncModalOpenState() {
+    const hasOpen = !!document.querySelector('.modal:not(.hidden)');
+    document.body.classList.toggle('modal-open', hasOpen);
+}
+
+function bindModalA11y() {
+    if (modalA11yBound) return;
+    modalA11yBound = true;
+    const observer = new MutationObserver((mutations) => {
+        if (!mutations.some(m => m.target instanceof HTMLElement && m.target.classList.contains('modal'))) return;
+        syncModalOpenState();
+    });
+    observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
+    AppEventManager.on(document, 'click', (ev) => {
+        const target = ev.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.classList.contains('modal')) {
+            target.classList.add('hidden');
+            syncModalOpenState();
+        }
+    }, false, { scope: 'modals', key: 'modal-backdrop-close' });
+    AppEventManager.on(document, 'keydown', (ev) => {
+        if (ev.key !== 'Escape') return;
+        if (commandPaletteState.open) return;
+        if (closeTopVisibleModal()) {
+            ev.preventDefault();
+            syncModalOpenState();
+            return;
+        }
+        if (utilityDrawerOpen) {
+            ev.preventDefault();
+            closeUtilityDrawer();
+        }
+    }, false, { scope: 'modals', key: 'modal-escape-close' });
+    syncModalOpenState();
+}
+
 function computeSearchFilterCounts(term = '') {
     const termUpper = String(term || '').toUpperCase().trim();
-    const base = (currentData || []).filter(item => {
+    let base = (currentData || []).filter(item => {
         if (!item) return false;
         if (hiddenUnits.has(item.posto)) return false;
         if (termUpper) {
@@ -874,7 +1173,10 @@ function computeSearchFilterCounts(term = '') {
         if (searchHideAbsence && item.rotulo) return false;
         return true;
     });
-    const counts = { all: base.length, plantao: 0, folga: 0, ft: 0, afastado: 0, noAbsence: 0 };
+    if (hasDateRangeFilter(searchDateFilter)) {
+        base = base.filter(item => matchesFtDateFilterForCollaborator(item.re, searchDateFilter));
+    }
+    const counts = { all: base.length, plantao: 0, folga: 0, ft: 0, afastado: 0, favorites: 0, noAbsence: 0 };
     base.forEach(item => {
         const statusInfo = getStatusInfoForFilter(item);
         const text = String(statusInfo?.text || '');
@@ -883,6 +1185,7 @@ function computeSearchFilterCounts(term = '') {
         if (!isPlantao) counts.folga += 1;
         if (text.includes('FT')) counts.ft += 1;
         if (item.rotulo) counts.afastado += 1;
+        if (isCollaboratorFavorite(item.re)) counts.favorites += 1;
         if (!item.rotulo) counts.noAbsence += 1;
     });
     return counts;
@@ -939,12 +1242,13 @@ function toggleSearchHideAbsence() {
 }
 
 function setSearchDateFilter(from, to) {
-    searchDateFilter.from = '';
-    searchDateFilter.to = '';
+    const normalized = normalizeDateRange(from, to);
+    searchDateFilter.from = normalized.from;
+    searchDateFilter.to = normalized.to;
     const fromInput = document.getElementById('search-date-from');
     const toInput = document.getElementById('search-date-to');
-    if (fromInput && fromInput.value !== '') fromInput.value = '';
-    if (toInput && toInput.value !== '') toInput.value = '';
+    if (fromInput && fromInput.value !== searchDateFilter.from) fromInput.value = searchDateFilter.from;
+    if (toInput && toInput.value !== searchDateFilter.to) toInput.value = searchDateFilter.to;
     updateSearchFilterUI();
     realizarBusca();
 }
@@ -1232,6 +1536,21 @@ function loadLocalState() {
             if (!Number.isNaN(parsed)) escalaInvertidaAutoMonth = parsed;
         }
     } catch {}
+    try {
+        const recent = localStorage.getItem('searchRecentTerms');
+        searchRecentTerms = recent ? JSON.parse(recent) || [] : [];
+        if (!Array.isArray(searchRecentTerms)) searchRecentTerms = [];
+        searchRecentTerms = searchRecentTerms.map(v => String(v || '').trim()).filter(Boolean).slice(0, 10);
+    } catch {
+        searchRecentTerms = [];
+    }
+    try {
+        const favorites = localStorage.getItem('collabFavorites');
+        const list = favorites ? JSON.parse(favorites) || [] : [];
+        collaboratorFavorites = new Set(Array.isArray(list) ? list.map(v => normalizeFtRe(v)).filter(Boolean) : []);
+    } catch {
+        collaboratorFavorites = new Set();
+    }
 }
 
 function loadAvisos() {
@@ -1284,6 +1603,76 @@ function buildFtDedupKey(item) {
     return ['ft', item?.createdAt || '', item?.collabName || '', item?.unitTarget || ''].join('|');
 }
 
+function buildFtStatusConflictKey(item) {
+    const fallbackId = String(item?.id || '').trim();
+    const normalizedDate = normalizeFtDateKey(item?.date) || '';
+    const collabKey = normalizeFtRe(item?.collabRe) || normalizeText(item?.collabName || '');
+    const unitKey = normalizeUnitKey(item?.unitTarget || item?.unitCurrent || '');
+    const shiftKey = String(item?.shift || '').trim().toUpperCase();
+    const core = [normalizedDate, collabKey, unitKey, shiftKey]
+        .filter(Boolean)
+        .join('|');
+    if (core) return core;
+    if (fallbackId) return `id:${fallbackId}`;
+    return ['ft-status', item?.createdAt || '', item?.collabName || '', item?.unitTarget || ''].join('|');
+}
+
+function buildFtStatusConflictVariant(item) {
+    const parts = getFtStatusConflictParts(item);
+    return [parts.timeKey || '-', parts.coveringKey || '-', parts.reasonKey || '-'].join('|');
+}
+
+function getFtStatusConflictParts(item) {
+    return {
+        timeKey: String(item?.ftTime || '').trim().toUpperCase(),
+        coveringKey: normalizeFtRe(item?.coveringRe)
+            || normalizeText(item?.coveringOther || item?.coveringName || ''),
+        reasonKey: normalizeText(item?.reasonRaw || item?.reasonOther || item?.reason || '')
+    };
+}
+
+function isFtPendingShadowOfProgress(pendingItem, progressedItem) {
+    const pending = getFtStatusConflictParts(pendingItem);
+    const progressed = getFtStatusConflictParts(progressedItem);
+    const sameTime = !pending.timeKey || pending.timeKey === progressed.timeKey;
+    const sameCovering = !pending.coveringKey || pending.coveringKey === progressed.coveringKey;
+    const sameReason = !pending.reasonKey || pending.reasonKey === progressed.reasonKey;
+    return sameTime && sameCovering && sameReason;
+}
+
+function reconcileFtStatusConflicts(items = []) {
+    const byKey = new Map();
+    (items || []).forEach(item => {
+        if (!item) return;
+        const key = buildFtStatusConflictKey(item);
+        if (!byKey.has(key)) byKey.set(key, []);
+        byKey.get(key).push(item);
+    });
+    const merged = [];
+    byKey.forEach(group => {
+        const progressed = group.filter(item => item?.status === 'submitted' || item?.status === 'launched');
+        if (!progressed.length) {
+            merged.push(...group);
+            return;
+        }
+        // Regra de integridade: para a mesma FT operacional, status avançado elimina pendente.
+        const byVariant = new Map();
+        progressed.forEach(item => {
+            const variant = buildFtStatusConflictVariant(item);
+            const existing = byVariant.get(variant);
+            byVariant.set(variant, pickPreferredFtItem(existing, item));
+        });
+        const preferredProgressed = Array.from(byVariant.values());
+        merged.push(...preferredProgressed);
+        const pendingOnly = group.filter(item => item?.status === 'pending');
+        pendingOnly.forEach(pendingItem => {
+            const hasEquivalentProgress = preferredProgressed.some(progressItem => isFtPendingShadowOfProgress(pendingItem, progressItem));
+            if (!hasEquivalentProgress) merged.push(pendingItem);
+        });
+    });
+    return merged;
+}
+
 function pickPreferredFtItem(existing, incoming) {
     if (!existing) return incoming;
     const existingStatus = getFtStatusRank(existing?.status);
@@ -1312,7 +1701,9 @@ function dedupeFtLaunches(list = []) {
         const existing = byKey.get(key);
         byKey.set(key, pickPreferredFtItem(existing, item));
     });
-    return Array.from(byKey.values())
+    const strictList = Array.from(byKey.values());
+    const reconciled = reconcileFtStatusConflicts(strictList);
+    return reconciled
         .sort((a, b) => getFtItemUpdatedTime(b) - getFtItemUpdatedTime(a));
 }
 
@@ -1333,6 +1724,208 @@ function normalizeFtLaunchEntries(list = []) {
     return dedupeFtLaunches(normalized);
 }
 
+function runFtIntegrityCheck(context = 'runtime') {
+    const items = Array.isArray(ftLaunches) ? ftLaunches : [];
+    if (!items.length) return { ok: true, duplicates: 0, statusConflicts: 0 };
+
+    const dedupSeen = new Set();
+    let duplicates = 0;
+    items.forEach(item => {
+        const key = buildFtDedupKey(item);
+        if (dedupSeen.has(key)) duplicates += 1;
+        else dedupSeen.add(key);
+    });
+
+    const byStatusKey = new Map();
+    items.forEach(item => {
+        const key = buildFtStatusConflictKey(item);
+        if (!byStatusKey.has(key)) byStatusKey.set(key, []);
+        byStatusKey.get(key).push(item);
+    });
+
+    let statusConflicts = 0;
+    byStatusKey.forEach(group => {
+        const progressed = group.filter(item => item?.status === 'submitted' || item?.status === 'launched');
+        if (!progressed.length) return;
+        const pendingOnly = group.filter(item => item?.status === 'pending');
+        pendingOnly.forEach(pendingItem => {
+            const shadowed = progressed.some(progressItem => isFtPendingShadowOfProgress(pendingItem, progressItem));
+            if (shadowed) statusConflicts += 1;
+        });
+    });
+
+    const ok = duplicates === 0 && statusConflicts === 0;
+    if (!ok) {
+        AppLogger.warn('FT integrity check detected inconsistencies', { context, duplicates, statusConflicts, total: items.length });
+    } else {
+        AppLogger.debug('FT integrity check OK', { context, total: items.length });
+    }
+    return { ok, duplicates, statusConflicts };
+}
+
+function buildFtAuditEntryKey(entry) {
+    const id = String(entry?.id || '').trim();
+    if (id) return `id:${id}`;
+    const snapshot = entry?.item || {};
+    const ftId = String(snapshot?.ftId || '').trim();
+    const ts = String(entry?.ts || '').trim();
+    const event = String(entry?.event || '').trim();
+    const nextStatus = String(entry?.nextStatus || '').trim();
+    const origin = String(entry?.origin || '').trim();
+    const actor = String(entry?.actor || '').trim();
+    return [ftId, ts, event, nextStatus, origin, actor].join('|');
+}
+
+function buildFtAuditItemSnapshot(item) {
+    if (!item || typeof item !== 'object') return null;
+    const date = normalizeFtDateKey(item.date) || String(item.date || '').trim();
+    return {
+        ftId: String(item.id || item.ftId || '').trim(),
+        date: date || '',
+        collabRe: String(item.collabRe || '').trim(),
+        collabName: String(item.collabName || '').trim(),
+        unit: String(item.unitTarget || item.unitCurrent || item.unit || '').trim(),
+        status: normalizeFtStatus(item.status || 'pending'),
+        source: String(item.source || '').trim(),
+        sourceGroup: String(item.sourceGroup || item.group || '').trim(),
+        shift: String(item.shift || '').trim(),
+        ftTime: String(item.ftTime || '').trim()
+    };
+}
+
+function normalizeFtAuditTrail(list = []) {
+    const byKey = new Map();
+    (list || []).forEach(raw => {
+        if (!raw || typeof raw !== 'object') return;
+        const rawTs = String(raw.ts || raw.timestamp || '').trim();
+        const parsedTs = Date.parse(rawTs);
+        const ts = Number.isFinite(parsedTs) ? new Date(parsedTs).toISOString() : new Date().toISOString();
+        const event = String(raw.event || 'status_change').trim() || 'status_change';
+        const origin = String(raw.origin || 'system').trim() || 'system';
+        const actor = String(raw.actor || '').trim();
+        const prevStatus = raw.prevStatus ? normalizeFtStatus(raw.prevStatus) : '';
+        const nextStatus = raw.nextStatus ? normalizeFtStatus(raw.nextStatus) : '';
+        const note = String(raw.note || '').trim();
+        const item = buildFtAuditItemSnapshot(raw.item || raw.itemSnapshot || null);
+        const entry = {
+            id: String(raw.id || '').trim(),
+            ts,
+            event,
+            origin,
+            actor,
+            prevStatus,
+            nextStatus,
+            note,
+            item
+        };
+        const key = buildFtAuditEntryKey(entry);
+        const existing = byKey.get(key);
+        if (!existing || Date.parse(entry.ts) > Date.parse(existing.ts)) {
+            byKey.set(key, entry);
+        }
+    });
+    return Array.from(byKey.values())
+        .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+        .slice(0, FT_AUDIT_MAX_ITEMS);
+}
+
+function loadFtAuditTrail() {
+    try {
+        const stored = localStorage.getItem('ftAuditTrail');
+        const parsed = stored ? JSON.parse(stored) || [] : [];
+        ftAuditTrail = normalizeFtAuditTrail(parsed);
+    } catch {
+        ftAuditTrail = [];
+    }
+}
+
+function saveFtAuditTrail(silent = false) {
+    ftAuditTrail = normalizeFtAuditTrail(ftAuditTrail);
+    localStorage.setItem('ftAuditTrail', JSON.stringify(ftAuditTrail));
+    scheduleShadowSync('ft-audit', { silent, notify: !silent });
+}
+
+function resolveFtAuditActor(meta = {}) {
+    const explicit = String(meta.actor || '').trim();
+    if (explicit) return explicit;
+    if (SiteAuth?.logged && SiteAuth?.user) return SiteAuth.user;
+    const origin = String(meta.origin || '').trim();
+    if (origin === 'sheet_sync') return 'Planilha FT';
+    if (origin === 'form_response_sync') return 'Respostas FT';
+    return 'Sistema';
+}
+
+function getFtAuditOriginLabel(origin = '') {
+    const key = String(origin || '').trim().toLowerCase();
+    if (key === 'manual_nexti') return 'Lançamento manual';
+    if (key === 'sheet_sync') return 'Sync planilha';
+    if (key === 'form_response_sync') return 'Sync respostas';
+    if (key === 'manual_delete') return 'Remoção manual';
+    if (key === 'manual_restore') return 'Restauração manual';
+    return 'Sistema';
+}
+
+function getFtStatusAuditLabel(status = '') {
+    const key = normalizeFtStatus(status || '');
+    if (key === 'launched') return 'Lançada';
+    if (key === 'submitted') return 'Confirmada';
+    return 'Pendente';
+}
+
+function getFtAuditEventLabel(event = '') {
+    const key = String(event || '').trim().toLowerCase();
+    if (key === 'status_change') return 'Mudança de status';
+    if (key === 'created') return 'Criação';
+    if (key === 'removed') return 'Remoção';
+    if (key === 'restored') return 'Restauração';
+    return 'Evento';
+}
+
+function logFtAudit(eventType, item, meta = {}) {
+    const event = String(eventType || 'status_change').trim() || 'status_change';
+    const snapshot = buildFtAuditItemSnapshot(meta.itemOverride || item || null);
+    const entry = {
+        id: `ft-audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        ts: new Date().toISOString(),
+        event,
+        origin: String(meta.origin || 'system').trim() || 'system',
+        actor: resolveFtAuditActor(meta),
+        prevStatus: meta.prevStatus ? normalizeFtStatus(meta.prevStatus) : '',
+        nextStatus: meta.nextStatus ? normalizeFtStatus(meta.nextStatus) : '',
+        note: String(meta.note || '').trim(),
+        item: snapshot
+    };
+    if (meta.sourceGroup && entry.item) {
+        entry.item.sourceGroup = String(meta.sourceGroup || '').trim();
+    }
+    ftAuditTrail.unshift(entry);
+    if (ftAuditTrail.length > FT_AUDIT_MAX_ITEMS) {
+        ftAuditTrail = ftAuditTrail.slice(0, FT_AUDIT_MAX_ITEMS);
+    }
+    saveFtAuditTrail(true);
+    return entry;
+}
+
+function getLatestFtAuditEntry(ftId = '') {
+    const target = String(ftId || '').trim();
+    if (!target) return null;
+    return (ftAuditTrail || []).find(entry => String(entry?.item?.ftId || '').trim() === target) || null;
+}
+
+function formatFtAuditEntrySummary(entry) {
+    if (!entry) return '';
+    const when = entry.ts ? formatFtDateTime(entry.ts) : '';
+    const origin = getFtAuditOriginLabel(entry.origin);
+    const event = getFtAuditEventLabel(entry.event);
+    const actor = String(entry.actor || '').trim() || 'Sistema';
+    const prev = entry.prevStatus ? getFtStatusAuditLabel(entry.prevStatus) : '';
+    const next = entry.nextStatus ? getFtStatusAuditLabel(entry.nextStatus) : '';
+    const statusText = prev && next ? `${prev} -> ${next}` : (next || prev);
+    const statusChunk = statusText ? ` (${statusText})` : '';
+    const note = entry.note ? ` • ${entry.note}` : '';
+    return [when, origin, `${event}${statusChunk}`, actor].filter(Boolean).join(' • ') + note;
+}
+
 function loadFtLaunches() {
     try {
         const stored = localStorage.getItem('ftLaunches');
@@ -1344,10 +1937,12 @@ function loadFtLaunches() {
     if (ftRemovedIds.size) {
         ftLaunches = ftLaunches.filter(item => !ftRemovedIds.has(item.id));
     }
+    runFtIntegrityCheck('load-ft-launches');
 }
 
 function saveFtLaunches(silent = false) {
     ftLaunches = normalizeFtLaunchEntries(ftLaunches);
+    runFtIntegrityCheck('save-ft-launches');
     localStorage.setItem('ftLaunches', JSON.stringify(ftLaunches));
     scheduleShadowSync('ft', { silent, notify: !silent });
     updateLancamentosUI();
@@ -1406,9 +2001,11 @@ function clearLocalState() {
     collaboratorEdits = {};
     unitMetadata = {};
     changeHistory = [];
+    ftAuditTrail = [];
     localStorage.removeItem('collaboratorEdits');
     localStorage.removeItem('unitMetadata');
     localStorage.removeItem('changeHistory');
+    localStorage.removeItem('ftAuditTrail');
 }
 
 function shadowEnabled() {
@@ -1463,6 +2060,7 @@ function buildShadowState() {
         localCollaborators: getLocalCollaborators(),
         avisos,
         ftLaunches,
+        ftAuditTrail,
         ftRemovedIds: Array.from(ftRemovedIds),
         ftReasons,
         adminUsers: SiteAuth.admins,
@@ -1540,6 +2138,9 @@ function applyShadowState(state) {
     if (shouldSaveEscala) saveEscalaInvertida(true);
     if (Array.isArray(state.avisos)) {
         mergeAvisosFromShadow(state.avisos);
+    }
+    if (Array.isArray(state.ftAuditTrail)) {
+        mergeFtAuditTrailFromShadow(state.ftAuditTrail);
     }
     if (Array.isArray(state.ftLaunches)) {
         mergeFtLaunchesFromShadow(state.ftLaunches);
@@ -1703,6 +2304,7 @@ function buildSafetySnapshotState() {
         changeHistory: changeHistory || [],
         avisos: avisos || [],
         ftLaunches: ftLaunches || [],
+        ftAuditTrail: ftAuditTrail || [],
         trocaLaunches: trocaLaunches || [],
         currentData: currentData || []
     };
@@ -2235,7 +2837,7 @@ const SUPERVISAO_DEFAULT_MENU = {
 const gateway = document.getElementById('gateway');
 const appContainer = document.getElementById('app-container');
 const appTitle = document.getElementById('app-title');
-const APP_VERSION = 'v3.9.1';
+const APP_VERSION = 'v3.9.3';
 const contentArea = document.getElementById('content-area');
 const AppBootstrapper = {
     booted: false,
@@ -2279,6 +2881,7 @@ const AppBootstrapper = {
             hydrateManagedCachesFromLegacy();
             loadAvisos();
             loadFtRemovedIds();
+            loadFtAuditTrail();
             loadFtLaunches();
             refreshFtLabelsForToday();
             loadFtReasons();
@@ -2315,6 +2918,8 @@ const AppBootstrapper = {
             renderGateway();
             document.getElementById('context-help-panel')?.remove();
             ensureCommandPalette();
+            bindModalA11y();
+            bindGlobalShortcuts();
             initSmartTooltips();
             registerPwaSupport();
             maybeShowMonthlyGidReminder();
@@ -2511,6 +3116,43 @@ function ensureCommandPalette() {
     }, false, { scope: 'command-palette', key: 'command-palette-shortcut' });
 }
 
+function isTypingTarget(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = String(target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+    return target.isContentEditable === true;
+}
+
+function bindGlobalShortcuts() {
+    if (globalShortcutsBound) return;
+    globalShortcutsBound = true;
+    AppEventManager.on(document, 'keydown', (ev) => {
+        if (commandPaletteState.open) return;
+        const typing = isTypingTarget(ev.target);
+        const key = String(ev.key || '');
+        if (!typing && key === '?') {
+            ev.preventDefault();
+            openHelpModal();
+            return;
+        }
+        if (!typing && key === '/' && currentTab === 'busca') {
+            ev.preventDefault();
+            document.getElementById('search-input')?.focus();
+            return;
+        }
+        if (!typing && key.toLowerCase() === 'f' && currentTab === 'busca') {
+            ev.preventDefault();
+            toggleSearchAdvanced();
+            return;
+        }
+        if (!typing && key.toLowerCase() === 'p' && ev.altKey) {
+            ev.preventDefault();
+            printCurrentView();
+            return;
+        }
+    }, false, { scope: 'shortcuts', key: 'shortcuts-global' });
+}
+
 // Botão de Scroll Top
 window.onscroll = function() {
     const btn = document.getElementById("scroll-top-btn");
@@ -2526,7 +3168,7 @@ function openSupervisaoPage() {
     appContainer.style.display = 'block';
     gateway.classList.add('hidden');
     document.body.classList.remove('on-gateway');
-    document.body.classList.remove('utility-open');
+    closeUtilityDrawer();
     setAppState('currentTab', 'supervisao', { silent: true });
     contentArea.innerHTML = `
         <div class="breadcrumb-bar">
@@ -2555,7 +3197,7 @@ async function openGerenciaPage(options = {}) {
     appContainer.style.display = 'block';
     gateway.classList.add('hidden');
     document.body.classList.remove('on-gateway');
-    document.body.classList.remove('utility-open');
+    closeUtilityDrawer();
     setAppState('currentTab', 'gerencia', { silent: true });
     contentArea.innerHTML = `
         <div class="breadcrumb-bar">
@@ -3073,7 +3715,7 @@ function renderGateway() {
 function createCard(title, imgPath, key) {
     return `
         <div class="gateway-card" onclick="loadGroup('${key}')">
-            <img src="${imgPath}" alt="${title}">
+            <img src="${imgPath}" alt="${title}" loading="lazy">
             <h3>${title}</h3>
         </div>
     `;
@@ -3215,6 +3857,7 @@ async function loadGroup(groupKey) {
     // UI Feedback
     gateway.classList.add('hidden');
     document.body.classList.remove('on-gateway');
+    closeUtilityDrawer();
     appContainer.style.display = 'block';
     contentArea.innerHTML = '<div class="loading">Carregando dados do Google Sheets...</div>';
 
@@ -3337,7 +3980,7 @@ function resetToGateway() {
     appContainer.style.display = 'none';
     gateway.classList.remove('hidden');
     document.body.classList.add('on-gateway');
-    document.body.classList.remove('utility-open');
+    closeUtilityDrawer();
     setAppState('currentData', [], { silent: true });
     setAppState('currentGroup', '', { silent: true });
     hiddenUnits.clear();
@@ -3921,12 +4564,15 @@ function getAddressForCollaborator(collab) {
 // 4. Renderizar Dashboard (Sistema de Abas)
 function renderDashboard() {
     const canManageLancamentos = isAdminRole();
+    searchAdvancedOpen = false;
     contentArea.innerHTML = `
         <div class="breadcrumb-bar">
             <div class="breadcrumb-main">
                 <span id="breadcrumb-group"></span>
                 <span class="breadcrumb-sep">›</span>
                 <span id="breadcrumb-tab"></span>
+                <span class="breadcrumb-sep">›</span>
+                <span id="breadcrumb-context"></span>
             </div>
             <div class="breadcrumb-meta">
                 <span id="breadcrumb-updated" class="breadcrumb-updated"></span>
@@ -3948,18 +4594,50 @@ function renderDashboard() {
             <div class="search-container">
                 <div class="search-bar">
                     <button id="ai-search-btn" class="ai-toggle" onclick="toggleAiSearchButton()">IA: OFF</button>
-                    <input type="text" id="search-input" class="search-input" 
-                           placeholder="Digite nome, RE ou unidade..." autocomplete="off">
+                    <div class="search-input-wrap">
+                        <input type="text" id="search-input" class="search-input" 
+                               placeholder="Digite nome, RE ou unidade..." autocomplete="off">
+                        <button id="search-clear-btn" type="button" class="search-clear-btn hidden" onclick="clearSearchInput()" aria-label="Limpar busca">×</button>
+                    </div>
                     <button id="substitute-search-btn" class="ai-toggle" onclick="toggleSubstituteSearchButton()">Buscar substituto: OFF</button>
+                    <button id="search-advanced-toggle" type="button" class="btn btn-secondary btn-small" onclick="toggleSearchAdvanced()" aria-expanded="false">Mostrar filtros avançados</button>
                 </div>
                 <div id="search-suggestions" class="search-suggestions hidden"></div>
+                <div id="search-recent" class="search-recent hidden">
+                    <div class="search-recent-title">Buscas recentes</div>
+                    <div id="search-recent-list" class="search-recent-list"></div>
+                </div>
                 <div class="search-filters">
                     <button class="filter-chip active" data-filter="all" onclick="setSearchFilterStatus('all')">Todos</button>
                     <button class="filter-chip" data-filter="plantao" onclick="setSearchFilterStatus('plantao')">Plantão</button>
                     <button class="filter-chip" data-filter="folga" onclick="setSearchFilterStatus('folga')">Folga</button>
                     <button class="filter-chip" data-filter="ft" onclick="setSearchFilterStatus('ft')">FT</button>
                     <button class="filter-chip" data-filter="afastado" onclick="setSearchFilterStatus('afastado')">Afastados</button>
+                    <button class="filter-chip" data-filter="favorites" onclick="setSearchFilterStatus('favorites')">Favoritos</button>
                     <button class="filter-chip" data-hide="1" onclick="toggleSearchHideAbsence()">Sem afastamento</button>
+                </div>
+                <div id="search-advanced-panel" class="search-advanced hidden">
+                    <div class="search-date-filters">
+                        <div class="search-date-field">
+                            <label>Data FT de</label>
+                            <input type="date" id="search-date-from" value="${searchDateFilter.from || ''}">
+                        </div>
+                        <div class="search-date-field">
+                            <label>até</label>
+                            <input type="date" id="search-date-to" value="${searchDateFilter.to || ''}">
+                        </div>
+                    </div>
+                    <div class="search-advanced-actions">
+                        <button class="btn btn-secondary btn-small" onclick="applySearchDatePreset('today')">Hoje</button>
+                        <button class="btn btn-secondary btn-small" onclick="applySearchDatePreset('week')">7 dias</button>
+                        <button class="btn btn-secondary btn-small" onclick="applySearchDatePreset('month')">Mês</button>
+                        <button class="btn btn-secondary btn-small" onclick="clearSearchDateFilter()">Limpar filtros</button>
+                    </div>
+                </div>
+                <div id="search-summary" class="search-summary hidden"></div>
+                <div id="search-favorites" class="search-favorites hidden">
+                    <div class="search-favorites-title">Meus Favoritos</div>
+                    <div id="search-favorites-list" class="search-favorites-list"></div>
                 </div>
                 <div id="substitute-panel" class="substitute-panel hidden">
                     <div class="substitute-target-row">
@@ -5242,9 +5920,18 @@ function renderDashboard() {
     AppTimerManager.clear(APP_TIMERS.searchDebounce);
     searchInputDebounceId = null;
     if (searchInput) {
+        const clearBtn = document.getElementById('search-clear-btn');
+        const recentPanel = document.getElementById('search-recent');
         const onSuggest = () => handleSearchTokenSuggest();
+        const onSearchUi = () => {
+            const hasValue = !!String(searchInput.value || '').trim();
+            if (clearBtn) clearBtn.classList.toggle('hidden', !hasValue);
+            renderSearchRecentPanel(searchInput.value || '');
+            renderSearchFavoritesPanel(searchInput.value || '');
+        };
         searchInput.addEventListener('input', () => {
             onSuggest();
+            onSearchUi();
             if (searchInputComposing) return;
             scheduleSearchExecution();
         });
@@ -5254,10 +5941,12 @@ function renderDashboard() {
         searchInput.addEventListener('compositionend', () => {
             searchInputComposing = false;
             onSuggest();
+            onSearchUi();
             scheduleSearchExecution();
         });
         searchInput.addEventListener('change', () => {
             onSuggest();
+            onSearchUi();
             flushSearchExecution();
         });
         searchInput.addEventListener('click', onSuggest);
@@ -5265,6 +5954,15 @@ function renderDashboard() {
             onSuggest();
             if (ev.key === 'Enter') flushSearchExecution();
         });
+        searchInput.addEventListener('focus', () => {
+            renderSearchRecentPanel(searchInput.value || '');
+        });
+        searchInput.addEventListener('blur', () => {
+            setTimeout(() => {
+                if (recentPanel) recentPanel.classList.add('hidden');
+            }, 120);
+        });
+        onSearchUi();
     }
     const searchDateFrom = document.getElementById('search-date-from');
     const searchDateTo = document.getElementById('search-date-to');
@@ -5273,7 +5971,6 @@ function renderDashboard() {
         searchDateFrom.addEventListener('change', onSearchDateChange);
         searchDateTo.addEventListener('change', onSearchDateChange);
     }
-    searchDateFilter = { from: '', to: '' };
 
     const searchUnitInput = document.getElementById('search-unit-target');
     if (searchUnitInput) {
@@ -5331,7 +6028,9 @@ function renderDashboard() {
     }
 
     updateSearchFilterUI();
+    renderSearchFavoritesPanel('');
     searchInput.focus(); // Foco automático
+    applyRequiredFieldHints();
 
     // Renderizar lista de unidades (já deixa pronto, mas oculto)
     renderizarUnidades();
@@ -5396,6 +6095,7 @@ function renderDashboard() {
 }
 
 function switchTab(tabName) {
+    closeUtilityDrawer();
     if (tabName === 'avisos' && !SiteAuth.logged) {
         showToast("Faça login para acessar os avisos.", "error");
         return;
@@ -5541,6 +6241,7 @@ function realizarBusca() {
     const filterStatus = searchFilterStatus || 'all';
     const hideAbsence = !!searchHideAbsence;
     const resultsContainer = document.getElementById('search-results');
+    const hasDateFilter = hasDateRangeFilter(searchDateFilter);
     updateSearchFilterUI();
 
     if (isSubstituteSearchEnabled()) {
@@ -5548,7 +6249,9 @@ function realizarBusca() {
         return;
     }
     
-    if (!termo && filterStatus === 'all') {
+    if (!termo && filterStatus === 'all' && !hasDateFilter) {
+        updateSearchSummary(0);
+        renderSearchFavoritesPanel('');
         resultsContainer.innerHTML = '<p class="empty-state">Digite para buscar ou selecione um filtro...</p>';
         return;
     }
@@ -5568,6 +6271,8 @@ function realizarBusca() {
 
 function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
     const termoLimpo = termo.toUpperCase();
+    const dateRange = { ...searchDateFilter };
+    renderSearchFavoritesPanel(termoLimpo);
     
     let resultados = currentData.filter(item => {
         // Verifica se o posto está oculto
@@ -5587,6 +6292,7 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
             if (filterStatus === 'folga') return !isPlantao;
             if (filterStatus === 'ft') return statusInfo.text.includes('FT');
             if (filterStatus === 'afastado') return !!item.rotulo;
+            if (filterStatus === 'favorites') return isCollaboratorFavorite(item.re);
             return true;
         });
     }
@@ -5595,11 +6301,16 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
     if (hideAbsence) {
         resultados = resultados.filter(item => !item.rotulo);
     }
+    if (hasDateRangeFilter(dateRange)) {
+        resultados = resultados.filter(item => matchesFtDateFilterForCollaborator(item.re, dateRange));
+    }
+    updateSearchSummary(resultados.length);
 
     if (resultados.length === 0) {
         resultsContainer.innerHTML = `<p class="empty-state">Nenhum resultado encontrado.</p>`;
         return;
     }
+    pushSearchRecentTerm(termo);
 
     resultsContainer.innerHTML = resultados.map(item => {
         const statusInfo = getStatusInfo(item);
@@ -5633,6 +6344,7 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         const mapTitle = !canOpenMap
             ? 'Colaborador indisponível'
             : (hasAddress ? 'Ver endereço do colaborador' : 'Endereço não cadastrado no nexti');
+        const favoriteActive = isCollaboratorFavorite(item.re);
         
         // Tratamento de Múltiplos Rótulos
         let rotulosHtml = '';
@@ -5669,6 +6381,7 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
                         ${retornoInfo}
                     </div>
                     <div class="header-right">
+                        <button class="edit-btn-icon favorite-btn ${favoriteActive ? 'active' : ''}" onclick="toggleCollaboratorFavorite('${escapeHtml(item.re || '')}')" title="${favoriteActive ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}">${favoriteActive ? ICONS.starFilled : ICONS.star}</button>
                         <button class="edit-btn-icon performance-icon" onclick="openPerformanceModal(${reJsAttr}, ${nameJsAttr})" title="Performance do colaborador">${ICONS.performance}</button>
                         <button class="edit-btn-icon map-icon ${mapBtnClass}" onclick="openAddressModalForCollaborator(${reJsAttr}, ${nameJsAttr}, ${unitJsAttr})" title="${mapTitle}" ${canOpenMap ? '' : 'disabled'}>${ICONS.mapPin}</button>
                         <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal(${nameJsAttr}, ${phoneJsAttr})" title="${item.telefone ? 'Contato' : 'Sem telefone vinculado'}">${ICONS.whatsapp}</button>
@@ -6066,11 +6779,12 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
     if (!resultsContainer) return;
     const seq = ++substituteSearchSeq;
     const termUpper = (termo || '').trim().toUpperCase();
-    const dateRange = { from: '', to: '' };
+    const dateRange = { ...searchDateFilter };
     const target = getSubstituteTarget();
 
     if (!target) {
         if (!termUpper) {
+            updateSearchSummary(0);
             resultsContainer.innerHTML = '<p class="empty-state">Digite o nome ou RE e clique no colaborador para fixar o alvo.</p>';
             return;
         }
@@ -6081,6 +6795,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
                 (item.posto && item.posto.includes(termUpper));
         });
         if (!results.length) {
+            updateSearchSummary(0);
             resultsContainer.innerHTML = '<p class="empty-state">Nenhum colaborador encontrado para fixar o alvo.</p>';
             return;
         }
@@ -6088,10 +6803,12 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
             results = results.filter(item => matchesFtDateFilterForCollaborator(item.re, dateRange));
         }
         if (!results.length) {
+            updateSearchSummary(0);
             resultsContainer.innerHTML = '<p class="empty-state">Nenhum colaborador no intervalo de data selecionado.</p>';
             return;
         }
         results = results.slice(0, 20);
+        updateSearchSummary(results.length);
         resultsContainer.innerHTML = results.map(item => renderAiResultCard(item, item, {
             reasonOverride: 'Clique em "Fixar alvo" para iniciar a busca por substituto.',
             actionHtml: `<button class="btn btn-secondary btn-small" onclick="setSubstituteTarget('${item.re}')">Fixar alvo</button>`
@@ -6114,6 +6831,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
     }
 
     if (!list.length) {
+        updateSearchSummary(0);
         resultsContainer.innerHTML = '<p class="empty-state">Nenhum resultado com os filtros atuais.</p>';
         return;
     }
@@ -6140,6 +6858,7 @@ async function runSubstituteSearch(termo, resultsContainer, filterStatus, hideAb
 
     const coverageMap = buildSubstituteCoverageStatsMap(target);
     list = rankSubstituteCandidates(list, target, modeUsed, coverageMap);
+    updateSearchSummary(list.length);
     const metaCard = buildSubstituteMetaCard(target, modeUsed, proximityNote, list.length, filterStatus, hideAbsence, osrmNote, dateRange);
     const summaryCard = buildSubstituteSuggestionSummaryCard(target, list);
     resultsContainer.innerHTML = metaCard + summaryCard + list.map(item => {
@@ -7645,11 +8364,14 @@ function printCurrentView() {
 }
 
 function openHelpModal() {
+    closeUtilityDrawer();
     document.getElementById('help-modal')?.classList.remove('hidden');
+    syncModalOpenState();
 }
 
 function closeHelpModal() {
     document.getElementById('help-modal')?.classList.add('hidden');
+    syncModalOpenState();
 }
 
 function setAddressModalModeUi(mode) {
@@ -7727,6 +8449,7 @@ function openAddressModalForCollaborator(collabRe = '', collabName = '', unitNam
 
 function closeAddressModal() {
     document.getElementById('address-modal')?.classList.add('hidden');
+    syncModalOpenState();
 }
 
 function openFtWeekPreviewModal(collabRe = '', collabName = '') {
@@ -7765,6 +8488,7 @@ function openFtWeekPreviewModal(collabRe = '', collabName = '') {
 function closeFtWeekPreviewModal() {
     document.getElementById('ft-week-preview-modal')?.classList.add('hidden');
     ftPreviewModalState = { mode: 'collab', re: '', name: '', unit: '', groupKey: '', monthKey: '', selectedDate: '' };
+    syncModalOpenState();
 }
 
 function getPerformanceRelationLabelForRe(item, re) {
@@ -7990,6 +8714,7 @@ function openPerformanceModal(collabRe = '', collabName = '') {
         if (title) title.textContent = 'Performance do colaborador';
         body.innerHTML = '<p class="empty-state">RE não informado para abrir a performance.</p>';
         modal.classList.remove('hidden');
+        syncModalOpenState();
         return;
     }
     const snapshot = buildCollaboratorPerformanceSnapshot(re, name);
@@ -7997,11 +8722,13 @@ function openPerformanceModal(collabRe = '', collabName = '') {
     if (title) title.textContent = `Performance • ${snapshot.name} (RE ${snapshot.re})`;
     body.innerHTML = buildCollaboratorPerformanceModalHtml(snapshot);
     modal.classList.remove('hidden');
+    syncModalOpenState();
 }
 
 function closePerformanceModal() {
     document.getElementById('performance-modal')?.classList.add('hidden');
     performanceModalState = { re: '', name: '' };
+    syncModalOpenState();
 }
 
 function openFtMonthDayDetails(dayKey = '') {
@@ -8228,6 +8955,7 @@ async function openSubstituteRouteModal(candidateRe, targetRe, modeUsed) {
 
 function closeRouteModal() {
     document.getElementById('route-modal')?.classList.add('hidden');
+    syncModalOpenState();
 }
 
 function openRouteInMaps() {
@@ -8271,16 +8999,33 @@ async function renderRouteMap(origin, dest, labels = {}, seq = 0) {
     let durationMin = null;
     if (route?.geometry?.coordinates?.length) {
         const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-        routeMapLayer = L.polyline(latlngs, { color: '#0b4fb3', weight: 4 }).addTo(routeMapInstance);
+        routeMapLayer = L.polyline(latlngs, {
+            color: '#0b4fb3',
+            weight: 5,
+            opacity: 0.9,
+            lineCap: 'round',
+            lineJoin: 'round'
+        }).addTo(routeMapInstance);
         distanceKm = route.distanceKm;
         durationMin = route.durationMin;
     } else {
-        routeMapLayer = L.polyline([[origin.lat, origin.lon], [dest.lat, dest.lon]], { color: '#94a3b8', weight: 3, dashArray: '6,6' }).addTo(routeMapInstance);
+        routeMapLayer = L.polyline(
+            [[origin.lat, origin.lon], [dest.lat, dest.lon]],
+            { color: '#94a3b8', weight: 3, opacity: 0.85, dashArray: '6,6' }
+        ).addTo(routeMapInstance);
         distanceKm = calcDistanceKm(origin, dest);
     }
 
-    const originMarker = L.marker([origin.lat, origin.lon]).addTo(routeMapInstance).bindPopup(labels.originLabel || 'Origem');
-    const destMarker = L.marker([dest.lat, dest.lon]).addTo(routeMapInstance).bindPopup(labels.destLabel || 'Destino');
+    const originLabel = labels.originLabel || 'Origem';
+    const destLabel = labels.destLabel || 'Destino';
+    const originMarker = L.marker([origin.lat, origin.lon])
+        .addTo(routeMapInstance)
+        .bindPopup(originLabel)
+        .bindTooltip(originLabel, { direction: 'top', offset: [0, -10] });
+    const destMarker = L.marker([dest.lat, dest.lon])
+        .addTo(routeMapInstance)
+        .bindPopup(destLabel)
+        .bindTooltip(destLabel, { direction: 'top', offset: [0, -10] });
     routeMapMarkers.push(originMarker, destMarker);
 
     if (routeMapLayer) {
@@ -8302,19 +9047,25 @@ function openAddressPortal(query = '') {
 }
 
 function openGuideModal() {
+    closeUtilityDrawer();
     document.getElementById('guide-modal')?.classList.remove('hidden');
+    syncModalOpenState();
 }
 
 function closeGuideModal() {
     document.getElementById('guide-modal')?.classList.add('hidden');
+    syncModalOpenState();
 }
 
 function openPromptsModal() {
+    closeUtilityDrawer();
     document.getElementById('prompts-modal')?.classList.remove('hidden');
+    syncModalOpenState();
 }
 
 function closePromptsModal() {
     document.getElementById('prompts-modal')?.classList.add('hidden');
+    syncModalOpenState();
 }
 
 function renderPromptTemplates() {
@@ -9536,6 +10287,8 @@ function applyAiFilters(list, filterStatus, hideAbsence) {
         filtered = filtered.filter(d => getStatusInfoForFilter(d).text.includes('FT'));
     } else if (filterStatus === 'afastado') {
         filtered = filtered.filter(d => !!d.rotulo);
+    } else if (filterStatus === 'favorites') {
+        filtered = filtered.filter(d => isCollaboratorFavorite(d.re));
     }
     if (hideAbsence) {
         filtered = filtered.filter(d => !d.rotulo);
@@ -10587,7 +11340,7 @@ function scrollToTop() {
 }
 
 function toggleUtilityButtons() {
-    document.body.classList.toggle('utility-open');
+    toggleUtilityDrawer();
 }
 
 
@@ -10596,26 +11349,83 @@ function toggleUtilityButtons() {
 // ==========================================================================
 
 function showToast(message, type = 'info') {
+    if (type && typeof type === 'object') {
+        return showToast(message, type.type || 'info', type);
+    }
+    const options = arguments.length > 2 && arguments[2] && typeof arguments[2] === 'object'
+        ? arguments[2]
+        : {};
     const container = document.getElementById('toast-container');
     if (!container) return;
     container.setAttribute('aria-live', 'polite');
     container.setAttribute('aria-atomic', 'true');
+    const normalizedType = ({ warn: 'warning', warning: 'warning', loading: 'loading' }[type] || type || 'info');
+    const toastId = String(options.id || '').trim();
+    if (toastId) {
+        const existing = container.querySelector(`.toast[data-toast-id="${toastId}"]`);
+        if (existing) existing.remove();
+    }
     const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
+    toast.className = `toast ${normalizedType}`;
+    if (toastId) toast.dataset.toastId = toastId;
+    toast.setAttribute('role', 'alert');
+
+    const iconMap = {
+        success: '✓',
+        error: '✕',
+        warning: '⚠',
+        loading: '↻',
+        info: 'i'
+    };
     const icon = document.createElement('span');
     icon.className = 'toast-icon';
-    icon.textContent = type === 'success' ? 'OK' : (type === 'error' ? '!' : 'i');
+    icon.textContent = iconMap[normalizedType] || 'i';
+    const body = document.createElement('div');
+    body.className = 'toast-body';
     const text = document.createElement('span');
     text.textContent = String(message || '');
-    toast.append(icon, text);
+    body.appendChild(text);
+
+    if (options.actionLabel && typeof options.onAction === 'function') {
+        const actions = document.createElement('div');
+        actions.className = 'toast-actions';
+        const actionBtn = document.createElement('button');
+        actionBtn.type = 'button';
+        actionBtn.className = 'btn-mini btn-secondary';
+        actionBtn.textContent = String(options.actionLabel || 'Desfazer');
+        actionBtn.addEventListener('click', () => {
+            try { options.onAction(); } catch {}
+            toast.remove();
+        });
+        actions.appendChild(actionBtn);
+        body.appendChild(actions);
+    }
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'btn-mini btn-secondary';
+    closeBtn.textContent = 'Fechar';
+    closeBtn.addEventListener('click', () => toast.remove());
+    toast.append(icon, body, closeBtn);
     
     container.appendChild(toast);
 
-    // Remove após 3 segundos
-    setTimeout(() => {
-        toast.style.animation = 'fadeOut 0.3s ease forwards';
-        setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    const autoClose = options.autoClose !== false && normalizedType !== 'loading';
+    const timeoutMs = Number.isFinite(options.duration) ? Math.max(1200, options.duration) : 4000;
+    if (autoClose) {
+        setTimeout(() => {
+            toast.style.animation = 'fadeOut 0.3s ease forwards';
+            setTimeout(() => toast.remove(), 300);
+        }, timeoutMs);
+    }
+    return toastId || null;
+}
+
+function hideToastById(id) {
+    const key = String(id || '').trim();
+    if (!key) return;
+    const toast = document.querySelector(`.toast[data-toast-id="${key}"]`);
+    if (toast) toast.remove();
 }
 
 function exportarDadosExcel() {
@@ -12570,6 +13380,12 @@ function mergeFtLaunchesFromShadow(remoteLaunches) {
     saveFtLaunches(true);
 }
 
+function mergeFtAuditTrailFromShadow(remoteTrail) {
+    const mergedInput = ([]).concat(ftAuditTrail || [], remoteTrail || []);
+    ftAuditTrail = normalizeFtAuditTrail(mergedInput);
+    saveFtAuditTrail(true);
+}
+
 function playAvisoSound(priority) {
     try {
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -14323,6 +15139,12 @@ async function syncFtSheetLaunches(silent = false) {
                 const existing = byId[item.id];
                 if (!existing) {
                     byId[item.id] = item;
+                    logFtAudit('created', item, {
+                        origin: 'sheet_sync',
+                        actor: 'Planilha FT',
+                        nextStatus: item.status,
+                        sourceGroup: src.group
+                    });
                     if (item.status === 'submitted' || item.status === 'launched') {
                         applyFtToCollaborator(item);
                     }
@@ -14334,7 +15156,12 @@ async function syncFtSheetLaunches(silent = false) {
                 const prevStatus = existing.status;
                 Object.assign(existing, item);
                 if (prevStatus !== item.status) {
-                    setFtStatus(existing, item.status);
+                    setFtStatus(existing, item.status, {
+                        origin: 'sheet_sync',
+                        actor: 'Planilha FT',
+                        sourceGroup: src.group,
+                        note: item.sheetStatusRaw ? `Status planilha: ${item.sheetStatusRaw}` : ''
+                    });
                 } else {
                     existing.updatedAt = new Date().toISOString();
                 }
@@ -14393,7 +15220,10 @@ async function syncFtFormResponses(silent = false) {
     let updated = 0;
     ftLaunches.forEach(item => {
         if (item.status === 'pending' && ids.has(item.id)) {
-            setFtStatus(item, 'submitted');
+            setFtStatus(item, 'submitted', {
+                origin: 'form_response_sync',
+                actor: 'Respostas FT'
+            });
             updated++;
         }
     });
@@ -15765,6 +16595,7 @@ function renderLancamentosHistorico() {
         const dateLabel = item.date ? formatFtDate(item.date) : 'N/I';
         const shiftLabel = item.shift || 'N/I';
         const timeLabel = item.ftTime || 'N/I';
+        const latestAudit = formatFtAuditEntrySummary(getLatestFtAuditEntry(item.id));
         return `
         <div class="lancamento-card ${isToday ? 'is-today' : ''} ${isPending ? 'is-pending' : ''}" data-ft-id="${item.id}">
             <div class="lancamento-main">
@@ -15796,6 +16627,7 @@ function renderLancamentosHistorico() {
                     ${requestedAt ? `<div><strong>Solicitada em:</strong> ${requestedAt}</div>` : ''}
                     ${createdAt ? `<div><strong>Criada em:</strong> ${createdAt}</div>` : ''}
                     ${item.sheetStatusRaw ? `<div><strong>Status planilha:</strong> ${item.sheetStatusRaw}</div>` : ''}
+                    ${latestAudit ? `<div><strong>Última trilha:</strong> ${escapeHtml(latestAudit)}</div>` : ''}
                     <div><strong>Responsável:</strong> ${item.createdBy || 'Admin'}</div>
                 </div>
             </div>
@@ -16079,12 +16911,21 @@ function removeFtFromCollaborator(item) {
     }
 }
 
-function setFtStatus(item, status) {
-    item.status = status;
+function setFtStatus(item, status, meta = {}) {
+    const prevStatus = normalizeFtStatus(item?.status || 'pending');
+    const nextStatus = normalizeFtStatus(status || 'pending');
+    item.status = nextStatus;
     item.updatedAt = new Date().toISOString();
-    if (status === 'submitted' || status === 'launched') {
+    if (prevStatus !== nextStatus) {
+        logFtAudit('status_change', item, {
+            ...meta,
+            prevStatus,
+            nextStatus
+        });
+    }
+    if (nextStatus === 'submitted' || nextStatus === 'launched') {
         applyFtToCollaborator(item);
-    } else if (status === 'pending') {
+    } else if (nextStatus === 'pending') {
         removeFtFromCollaborator(item);
     }
 }
@@ -16092,7 +16933,9 @@ function setFtStatus(item, status) {
 async function markFtLaunched(id) {
     const item = ftLaunches.find(i => i.id === id);
     if (!item || item.status !== 'submitted') return;
-    setFtStatus(item, 'launched');
+    setFtStatus(item, 'launched', {
+        origin: 'manual_nexti'
+    });
     saveFtLaunches();
     renderLancamentosHistorico();
     setTimeout(() => flashLancamentoCard(item.id), 100);
@@ -16103,6 +16946,12 @@ function deleteFtLaunch(id) {
     const item = ftLaunches.find(i => i.id === id);
     if (!item) return;
     if (!confirm('Remover lançamento de FT?')) return;
+    const removedSnapshot = { ...item };
+    logFtAudit('removed', removedSnapshot, {
+        origin: 'manual_delete',
+        prevStatus: removedSnapshot.status,
+        note: 'Lançamento removido manualmente'
+    });
     removeFtFromCollaborator(item);
     if (item.source === 'sheet') {
         ftRemovedIds.add(item.id);
@@ -16111,7 +16960,24 @@ function deleteFtLaunch(id) {
     ftLaunches = ftLaunches.filter(i => i.id !== id);
     saveFtLaunches();
     renderLancamentosHistorico();
-    showToast("Lançamento removido.", "success");
+    showToast("Lançamento removido.", "warning", {
+        actionLabel: "Desfazer",
+        onAction: () => {
+            if (removedSnapshot.source === 'sheet') {
+                ftRemovedIds.delete(removedSnapshot.id);
+                saveFtRemovedIds(true);
+            }
+            ftLaunches.unshift(removedSnapshot);
+            logFtAudit('restored', removedSnapshot, {
+                origin: 'manual_restore',
+                nextStatus: removedSnapshot.status,
+                note: 'Remoção desfeita'
+            });
+            saveFtLaunches();
+            renderLancamentosHistorico();
+            setTimeout(() => flashLancamentoCard(removedSnapshot.id), 60);
+        }
+    });
 }
 
 // ==========================================================================
