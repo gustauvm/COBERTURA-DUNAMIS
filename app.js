@@ -4706,6 +4706,23 @@ async function loadGroup(groupKey) {
 
     let allItems = await fetchSupabaseCollaborators(false);
 
+    // Auto-retry: on mobile/slow connections auth may still be settling.
+    // If we got empty results, wait briefly and try once more with force.
+    if (Array.isArray(allItems) && allItems.length === 0) {
+        await new Promise(r => setTimeout(r, 1500));
+        // Ensure auth session is ready before retrying
+        if (supabaseClient) {
+            try {
+                const { data: sess } = await supabaseClient.auth.getSession();
+                if (sess?.session && !SiteAuth.logged) {
+                    await applyAuthSession(sess.session, { silent: true });
+                }
+            } catch {}
+        }
+        allCollaboratorsCache = { items: null, updatedAt: 0 };
+        allItems = await fetchSupabaseCollaborators(true);
+    }
+
     if (!Array.isArray(allItems)) {
         contentArea.innerHTML = `
             <div class="loading-overlay">
@@ -4740,8 +4757,10 @@ async function loadGroup(groupKey) {
             <div class="loading-overlay">
                 <div class="loading-error-icon">!</div>
                 <span>Nenhum registro encontrado</span>
+                <p style="font-size:0.85rem;color:#64748b;max-width:340px;text-align:center;">Verifique sua conexão ou tente novamente. Em redes móveis, o carregamento pode ser mais lento.</p>
                 <div class="loading-actions">
                     <button class="btn" onclick="loadGroup('${groupKey || 'todos'}')">Tentar novamente</button>
+                    <button class="btn btn-secondary" onclick="logoutSite({ target: 'gateway' })">Sair e entrar novamente</button>
                     <button class="btn btn-secondary" onclick="copySupabaseDiagnostics()">Diagnóstico</button>
                 </div>
             </div>
