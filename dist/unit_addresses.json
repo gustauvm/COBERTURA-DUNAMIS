@@ -1,0 +1,851 @@
+{
+  "source": "https://gustauvm.github.io/ENDERECOS-DUNAMIS/data/units.json",
+  "entries": [
+    {
+      "nome": "ALPHAVILLE",
+      "endereco": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "ALPHAVILLE BOMBEIROS",
+      "endereco": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+      "precisao": "exata",
+      "endereco_id": "BAR_ALPHAVILLE_138",
+      "cidade": "Barueri",
+      "estado": "SP"
+    },
+    {
+      "nome": "ALPHAVILLE SEGURANÇA",
+      "endereco": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+      "precisao": "exata",
+      "endereco_id": "BAR_ALPHAVILLE_138",
+      "cidade": "Barueri",
+      "estado": "SP"
+    },
+    {
+      "nome": "ALPHAVILLE SERVIÇOS",
+      "endereco": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+      "precisao": "exata",
+      "endereco_id": "BAR_ALPHAVILLE_138",
+      "cidade": "Barueri",
+      "estado": "SP"
+    },
+    {
+      "nome": "BASE",
+      "endereco": null,
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "BASE 2",
+      "endereco": "Rua Roma, 93 – Fundação, São Caetano do Sul – SP",
+      "precisao": "exata",
+      "endereco_id": "SC_RH_ROMA_93",
+      "cidade": "São Caetano do Sul",
+      "estado": "SP"
+    },
+    {
+      "nome": "BASE MAUÁ",
+      "endereco": "Rua Ricardo Bechelli, 439 – Jardim Mauá, Mauá – SP",
+      "precisao": "exata",
+      "endereco_id": "MAUA_BRASIL",
+      "cidade": "Mauá",
+      "estado": "SP"
+    },
+    {
+      "nome": "BASE OPERACIONAL",
+      "endereco": "Rua Alegre, 277 – Fundação, São Caetano do Sul – SP",
+      "precisao": "exata",
+      "endereco_id": "SC_OP_ALEGRE_277",
+      "cidade": "São Caetano do Sul",
+      "estado": "SP"
+    },
+    {
+      "nome": "BASE TECNICA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "BATERIAS CRAL",
+      "endereco": "R CLAUDIO CESAR LOURENCO, 0229, JOSE REGINO, BAURU - SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "BIOCOR HOSPITAL",
+      "endereco": "ALTO GUANDU, 671, CS 2, Sao paulo, belo horizonte - minas gerais",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CEMED AUTONOMISTA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CEMED CATEQUESE",
+      "endereco": "R CATEQUESE, 0693, VL GUILHERMINA, SAO PAULO - SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "CEMED ITAU",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CEMED MORUMBI",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CEMED PORTUGAL",
+      "endereco": "R ALVARO DE CARVALHO, 0155, BELA VISTA, SAO PAULO - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CEMED SANTOS DUMONT",
+      "endereco": "AV SANTOS DUMONT, 1318, SANTANA, SAO PAULO - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CEMED VIVALLE ACAZ",
+      "endereco": "AV MAJOR MIGUEL NAKAMURA, 150, JD. AQUARIUS, SAO JOSE DOS CAMPOS - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CENTENARIO EMPREENDIMENTOS E PARTICAPACOES LTDA",
+      "endereco": "R QUATRO, 105, BARUERI, BARUERI - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CENTRO DO AUTISTA TEA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CLINIP CLINICA PEDIATRICA",
+      "endereco": "AV ANTONIO PIRES PIMENTEL, 349, CENTRO, BRAGANCA PAULISTA - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CLINIVAC ITAIM",
+      "endereco": "R PROFESSOR CARLOS DE CARVALHO, 0005, ITAIM BIBI, SAO PAULO - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "COLEGIO EDUARDO GOMES",
+      "endereco": null,
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA"
+      ]
+    },
+    {
+      "nome": "COND EDIFICIO SAO LUIZ BERTRAND",
+      "endereco": "R LUCIANO BRODOWSKI, 0014, VILA AMELIA, SAO PAULO - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CONDOMINIO FOLLOW",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CONDOMINIO G2 BRAS",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CONDOMINIO SAN SEBASTIAN",
+      "endereco": "R ANTONIO JACINTO, 303, VILA CAIUBA, SAO PAULO - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "CONDOMINIO TEG VILA GILHERME",
+      "endereco": null,
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "CONDOMINIO VILLAGIO FELICITA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "CSC BRIGADEIRO",
+      "endereco": "AV BRIGADEIRO LUIS ANTONIO, 1126, BELA VISTA, SAO PAULO - SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA"
+      ]
+    },
+    {
+      "nome": "DUNAMIS BASE OPERACIONAL",
+      "endereco": "Rua Alegre, 277 – Fundação, São Caetano do Sul – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "DUNAMIS BASE RH",
+      "endereco": "Rua Roma, 93 – Fundação, São Caetano do Sul – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "DUNAMIS INSS/PROCESSOS/RESCISAO INDIRETA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "EDIFICIO GARAGEM",
+      "endereco": "R ALFREDO PUJOL, 0520, SANTANA, SAO PAULO - SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSP CEMED SINO BRASILEIRO",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL ALPHA MED",
+      "endereco": "AL SAO PAULO, 138, ALPHAVILLE INDUSTRIAL, BARUERI - SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL ANALIA FRANCO",
+      "endereco": "Rua Aquiles Jorge, 1 – Vila Antonieta, São Paulo – SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL ANTONIO AFONSO",
+      "endereco": "Rua 14 de Julho, 7 – Centro, Osasco – SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL ASSUNÇÃO",
+      "endereco": "Avenida João Firmino, 250 – Assunção, São Bernardo do Campo – SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL ATIBAIA",
+      "endereco": "Rua das Figueiras, 155 – Jardim Atibaia, Atibaia – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL BARTIRA",
+      "endereco": "Rua Marcos Pinente, 808 – Vila Guaíra, Santo André – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL BRASIL MAUA",
+      "endereco": "R RICARDO BECHELLI, 439, JARDIM MAUA, MAUA - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL BRASIL MAUÁ",
+      "endereco": "Rua Ricardo Bechelli, 439 – Jardim Mauá, Mauá – SP",
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL BRASIL SANTO ANDRÉ",
+      "endereco": null,
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL DA CRIANÇA",
+      "endereco": "Rua Francisco Morato, 432 – Butantã, São Paulo – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL E MATERNIDADE BRASIL",
+      "endereco": "R ILHA BELA, 0050, CAMPOS ELISEOS, RIBEIRAO PIRES - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL E MATERNIDADE RIBEIRÃO PIRES",
+      "endereco": "R DR NICOLAU ASSEF, 0052, CENTRO ALTO, RIBEIRAO PIRES - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL E MATERNIDADE SAO CRISTOVAO",
+      "endereco": "R AMERICO BRASILIENSE, 0596, CENTRO, SAO BERNARDO DO CAMPO - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL E MATERNIDADE SÃO CRISTÓVÃO",
+      "endereco": "Rua Américo Brasiliense, 596 – Centro, São Bernardo do Campo – SP",
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL HAPVIDA BRASILIA",
+      "endereco": "SEPS 715/915, CONJUNTO E, BLOCO B, ASA SUL, BRASILIA - DF",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL HAPVIDA BRASÍLIA",
+      "endereco": "SEPS 715/915, Conjunto E, Bloco B – Asa Sul, Brasília – DF",
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL JABAQUARA",
+      "endereco": "Rua das Perobas, 344 – Jabaquara, São Paulo – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL MATER DEI",
+      "endereco": "Rua dos Tamoios, 1939 – Centro, Belo Horizonte – MG",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL MATERNIDADE STAR",
+      "endereco": "R JOAQUIM MANUEL DA ROCHA, 0028, VILA BELA, SAO PAULO - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL MOGI",
+      "endereco": "Região central – Mogi das Cruzes – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "estimada"
+    },
+    {
+      "nome": "HOSPITAL NACOES",
+      "endereco": "AV NACOES UNIDAS, 20475, JARDIM PROMISSAO, SAO PAULO - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL NAÇÕES",
+      "endereco": "Avenida Nações Unidas, 20475 – Jardim Promissão, São Paulo – SP",
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL PAMPULHA",
+      "endereco": "Rua dos Tamoios, 1939 – Centro, Belo Horizonte – MG",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "BH_MATER_DEI",
+      "cidade": "Belo Horizonte",
+      "estado": "MG"
+    },
+    {
+      "nome": "HOSPITAL PARAISO",
+      "endereco": "AV PARAISO, 0192, PARAISO, SAO PAULO - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL PARAÍSO",
+      "endereco": "Avenida Paraíso, 192 – Paraíso, São Paulo – SP",
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL PONTA GROSSA",
+      "endereco": "R SANTOS DUMONT, 0083, CENTRO, PONTA GROSSA - PR",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL SANTA CRUZ",
+      "endereco": "Avenida Batel, 1889 – Batel, Curitiba – PR",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL SANTA PAULA",
+      "endereco": "Rua Doutor Alcides Vieira Arco, 140 – Vila Nova Conceição, São Paulo – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL SANTO AMARO",
+      "endereco": "Rua Ministro Roberto Cardoso Alves, 359 – Santo Amaro, São Paulo – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL SAO CAETANO",
+      "endereco": "R NITEROI, 0000, CENTRO, SAO CAETANO DO SUL - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL SAO LUIZ MORUMBI",
+      "endereco": "R ENG OSCAR AMERICANO, 0840, JARDIM GUEDALA, SAO PAULO - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL SÃO CAETANO",
+      "endereco": "Região central – São Caetano do Sul – SP",
+      "precisao": "estimada"
+    },
+    {
+      "nome": "HOSPITAL SÃO LUIZ MORUMBI",
+      "endereco": "Rua Engenheiro Oscar Americano, 840 – Morumbi, São Paulo – SP",
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL VERA CRUZ",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "HOSPITAL VILA NOVA STAR",
+      "endereco": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL VILLA LOBOS",
+      "endereco": "Rua Jangurucu, 348 – Parque da Mooca, São Paulo – SP",
+      "grupos": [
+        "SERVIÇOS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "HOSPITAL VILLALOBOS BAURU",
+      "endereco": "R HENRIQUE SMITH BAYMA, 0015, JARDIM CONTORNO, BAURU - SP",
+      "grupos": [
+        "SERVIÇOS"
+      ]
+    },
+    {
+      "nome": "INSTITUTO PAULISTA DE ELETROENCEFALOGRAFIA",
+      "endereco": "R DOMINGOS DE MORAIS, 245, VILA MARIANA, SAO PAULO - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "J VAZ ACUMULADORES",
+      "endereco": "Avenida dos Autonomistas, 4340 – Km 18, Osasco – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata"
+    },
+    {
+      "nome": "MATRIX",
+      "endereco": "Rua dos Tamoios, 1939 – Centro, Belo Horizonte – MG",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "BH_MATER_DEI",
+      "cidade": "Belo Horizonte",
+      "estado": "MG"
+    },
+    {
+      "nome": "ONCO STAR SP ONCOLOGIA LTDA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "PARANA CLINICAS",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RB ALPHAVILLE",
+      "endereco": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+      "precisao": "exata",
+      "endereco_id": "BAR_ALPHAVILLE_138",
+      "cidade": "Barueri",
+      "estado": "SP"
+    },
+    {
+      "nome": "RB ALPHAVILLE FACITIES",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RB AVICCENA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RB CAMPINAS",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RB GUARULHOS",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RB HOSPITAL ANALIA FRANCO",
+      "endereco": "Rua Aquiles Jorge, 1 – Vila Antonieta, São Paulo – SP",
+      "precisao": "exata",
+      "endereco_id": "SP_ANALIA_FRANCO",
+      "cidade": "São Paulo",
+      "estado": "SP"
+    },
+    {
+      "nome": "RB HOSPITAL DA CRIANÇA JABAQUARA",
+      "endereco": "Rua das Perobas, 344 – Jabaquara, São Paulo – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "SP_JABAQUARA",
+      "cidade": "São Paulo",
+      "estado": "SP"
+    },
+    {
+      "nome": "RB HOSPITAL SAO CAETANO",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RB JABAQUARA",
+      "endereco": "Rua das Perobas, 344 – Jabaquara, São Paulo – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "SP_JABAQUARA",
+      "cidade": "São Paulo",
+      "estado": "SP"
+    },
+    {
+      "nome": "RB SANTA CRUZ CURITIBA",
+      "endereco": "Avenida Batel, 1889 – Batel, Curitiba – PR",
+      "precisao": "exata",
+      "endereco_id": "CURITIBA_SANTA_CRUZ",
+      "cidade": "Curitiba",
+      "estado": "PR"
+    },
+    {
+      "nome": "RB SINO BRASILEIRO ASCENSORISTA E RECEPÇÃO",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RB VILA NOVA STAR",
+      "endereco": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "SP_VILA_NOVA_STAR",
+      "cidade": "São Paulo",
+      "estado": "SP"
+    },
+    {
+      "nome": "RB VILA NOVA STAR II",
+      "endereco": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "SP_VILA_NOVA_STAR",
+      "cidade": "São Paulo",
+      "estado": "SP"
+    },
+    {
+      "nome": "RB VILLA LOBOS",
+      "endereco": "Rua Jangurucu, 348 – Parque da Mooca, São Paulo – SP",
+      "grupos": [
+        "OUTROS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "SP_VILLA_LOBOS",
+      "cidade": "São Paulo",
+      "estado": "SP"
+    },
+    {
+      "nome": "REDE D'OR FARMÁCIA ASSUNÇÃO",
+      "endereco": "Avenida João Firmino, 250 – Assunção, São Bernardo do Campo – SP",
+      "precisao": "exata",
+      "endereco_id": "SBC_ASSUNCAO",
+      "cidade": "São Bernardo do Campo",
+      "estado": "SP"
+    },
+    {
+      "nome": "REDE DOR FARMACIA",
+      "endereco": "AV JOAO FIRMINO, 250, ASSUNCAO, SAO BERNARDO DO CAMPO - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "REDE DOR SA UNIDAD ECAMPINAS",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "RESCISÃO RH",
+      "endereco": "Rua Roma, 93 – Fundação, São Caetano do Sul – SP",
+      "precisao": "exata",
+      "endereco_id": "SC_RH_ROMA_93",
+      "cidade": "São Caetano do Sul",
+      "estado": "SP"
+    },
+    {
+      "nome": "RESERVA BASE",
+      "endereco": "Rua Alegre, 277 – Fundação, São Caetano do Sul – SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "SC_OP_ALEGRE_277",
+      "cidade": "São Caetano do Sul",
+      "estado": "SP"
+    },
+    {
+      "nome": "SANTA CRUZ CURITIBA - SEGURANÇA E",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "SUL AMERICA",
+      "endereco": "AV DAS NACOES UNIDAS, 13523, VILA GERTRUDES, SAO PAULO - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "URC VIVALLE",
+      "endereco": "AV MAJOR MIGUEL NAKAMURA, 150, JD. AQUARIUS, SAO JOSE DOS CAMPOS - SP",
+      "grupos": [
+        "OUTROS"
+      ]
+    },
+    {
+      "nome": "VILA NOVA STAR II",
+      "endereco": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP",
+      "grupos": [
+        "SEGURANÇA/VIGILÂNCIA",
+        "SERVIÇOS"
+      ],
+      "precisao": "exata",
+      "endereco_id": "SP_VILA_NOVA_STAR",
+      "cidade": "São Paulo",
+      "estado": "SP"
+    },
+    {
+      "nome": "VILA YARA",
+      "endereco": null,
+      "grupos": [
+        "OUTROS"
+      ]
+    }
+  ],
+  "address_map": {
+    "ALPHAVILLE": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+    "ALPHAVILLE BOMBEIROS": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+    "ALPHAVILLE SEGURANÇA": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+    "ALPHAVILLE SERVIÇOS": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+    "BASE 2": "Rua Roma, 93 – Fundação, São Caetano do Sul – SP",
+    "BASE MAUÁ": "Rua Ricardo Bechelli, 439 – Jardim Mauá, Mauá – SP",
+    "BASE OPERACIONAL": "Rua Alegre, 277 – Fundação, São Caetano do Sul – SP",
+    "BATERIAS CRAL": "R CLAUDIO CESAR LOURENCO, 0229, JOSE REGINO, BAURU - SP",
+    "BIOCOR HOSPITAL": "ALTO GUANDU, 671, CS 2, Sao paulo, belo horizonte - minas gerais",
+    "CEMED CATEQUESE": "R CATEQUESE, 0693, VL GUILHERMINA, SAO PAULO - SP",
+    "CEMED PORTUGAL": "R ALVARO DE CARVALHO, 0155, BELA VISTA, SAO PAULO - SP",
+    "CEMED SANTOS DUMONT": "AV SANTOS DUMONT, 1318, SANTANA, SAO PAULO - SP",
+    "CEMED VIVALLE ACAZ": "AV MAJOR MIGUEL NAKAMURA, 150, JD. AQUARIUS, SAO JOSE DOS CAMPOS - SP",
+    "CENTENARIO EMPREENDIMENTOS E PARTICAPACOES LTDA": "R QUATRO, 105, BARUERI, BARUERI - SP",
+    "CLINIP CLINICA PEDIATRICA": "AV ANTONIO PIRES PIMENTEL, 349, CENTRO, BRAGANCA PAULISTA - SP",
+    "CLINIVAC ITAIM": "R PROFESSOR CARLOS DE CARVALHO, 0005, ITAIM BIBI, SAO PAULO - SP",
+    "COND EDIFICIO SAO LUIZ BERTRAND": "R LUCIANO BRODOWSKI, 0014, VILA AMELIA, SAO PAULO - SP",
+    "CONDOMINIO SAN SEBASTIAN": "R ANTONIO JACINTO, 303, VILA CAIUBA, SAO PAULO - SP",
+    "CSC BRIGADEIRO": "AV BRIGADEIRO LUIS ANTONIO, 1126, BELA VISTA, SAO PAULO - SP",
+    "DUNAMIS BASE OPERACIONAL": "Rua Alegre, 277 – Fundação, São Caetano do Sul – SP",
+    "DUNAMIS BASE RH": "Rua Roma, 93 – Fundação, São Caetano do Sul – SP",
+    "EDIFICIO GARAGEM": "R ALFREDO PUJOL, 0520, SANTANA, SAO PAULO - SP",
+    "HOSPITAL ALPHA MED": "AL SAO PAULO, 138, ALPHAVILLE INDUSTRIAL, BARUERI - SP",
+    "HOSPITAL ANALIA FRANCO": "Rua Aquiles Jorge, 1 – Vila Antonieta, São Paulo – SP",
+    "HOSPITAL ANTONIO AFONSO": "Rua 14 de Julho, 7 – Centro, Osasco – SP",
+    "HOSPITAL ASSUNÇÃO": "Avenida João Firmino, 250 – Assunção, São Bernardo do Campo – SP",
+    "HOSPITAL ATIBAIA": "Rua das Figueiras, 155 – Jardim Atibaia, Atibaia – SP",
+    "HOSPITAL BARTIRA": "Rua Marcos Pinente, 808 – Vila Guaíra, Santo André – SP",
+    "HOSPITAL BRASIL MAUA": "R RICARDO BECHELLI, 439, JARDIM MAUA, MAUA - SP",
+    "HOSPITAL BRASIL MAUÁ": "Rua Ricardo Bechelli, 439 – Jardim Mauá, Mauá – SP",
+    "HOSPITAL DA CRIANÇA": "Rua Francisco Morato, 432 – Butantã, São Paulo – SP",
+    "HOSPITAL E MATERNIDADE BRASIL": "R ILHA BELA, 0050, CAMPOS ELISEOS, RIBEIRAO PIRES - SP",
+    "HOSPITAL E MATERNIDADE RIBEIRÃO PIRES": "R DR NICOLAU ASSEF, 0052, CENTRO ALTO, RIBEIRAO PIRES - SP",
+    "HOSPITAL E MATERNIDADE SAO CRISTOVAO": "R AMERICO BRASILIENSE, 0596, CENTRO, SAO BERNARDO DO CAMPO - SP",
+    "HOSPITAL E MATERNIDADE SÃO CRISTÓVÃO": "Rua Américo Brasiliense, 596 – Centro, São Bernardo do Campo – SP",
+    "HOSPITAL HAPVIDA BRASILIA": "SEPS 715/915, CONJUNTO E, BLOCO B, ASA SUL, BRASILIA - DF",
+    "HOSPITAL HAPVIDA BRASÍLIA": "SEPS 715/915, Conjunto E, Bloco B – Asa Sul, Brasília – DF",
+    "HOSPITAL JABAQUARA": "Rua das Perobas, 344 – Jabaquara, São Paulo – SP",
+    "HOSPITAL MATER DEI": "Rua dos Tamoios, 1939 – Centro, Belo Horizonte – MG",
+    "HOSPITAL MATERNIDADE STAR": "R JOAQUIM MANUEL DA ROCHA, 0028, VILA BELA, SAO PAULO - SP",
+    "HOSPITAL MOGI": "Região central – Mogi das Cruzes – SP",
+    "HOSPITAL NACOES": "AV NACOES UNIDAS, 20475, JARDIM PROMISSAO, SAO PAULO - SP",
+    "HOSPITAL NAÇÕES": "Avenida Nações Unidas, 20475 – Jardim Promissão, São Paulo – SP",
+    "HOSPITAL PAMPULHA": "Rua dos Tamoios, 1939 – Centro, Belo Horizonte – MG",
+    "HOSPITAL PARAISO": "AV PARAISO, 0192, PARAISO, SAO PAULO - SP",
+    "HOSPITAL PARAÍSO": "Avenida Paraíso, 192 – Paraíso, São Paulo – SP",
+    "HOSPITAL PONTA GROSSA": "R SANTOS DUMONT, 0083, CENTRO, PONTA GROSSA - PR",
+    "HOSPITAL SANTA CRUZ": "Avenida Batel, 1889 – Batel, Curitiba – PR",
+    "HOSPITAL SANTA PAULA": "Rua Doutor Alcides Vieira Arco, 140 – Vila Nova Conceição, São Paulo – SP",
+    "HOSPITAL SANTO AMARO": "Rua Ministro Roberto Cardoso Alves, 359 – Santo Amaro, São Paulo – SP",
+    "HOSPITAL SAO CAETANO": "R NITEROI, 0000, CENTRO, SAO CAETANO DO SUL - SP",
+    "HOSPITAL SAO LUIZ MORUMBI": "R ENG OSCAR AMERICANO, 0840, JARDIM GUEDALA, SAO PAULO - SP",
+    "HOSPITAL SÃO CAETANO": "Região central – São Caetano do Sul – SP",
+    "HOSPITAL SÃO LUIZ MORUMBI": "Rua Engenheiro Oscar Americano, 840 – Morumbi, São Paulo – SP",
+    "HOSPITAL VILA NOVA STAR": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP",
+    "HOSPITAL VILLA LOBOS": "Rua Jangurucu, 348 – Parque da Mooca, São Paulo – SP",
+    "HOSPITAL VILLALOBOS BAURU": "R HENRIQUE SMITH BAYMA, 0015, JARDIM CONTORNO, BAURU - SP",
+    "INSTITUTO PAULISTA DE ELETROENCEFALOGRAFIA": "R DOMINGOS DE MORAIS, 245, VILA MARIANA, SAO PAULO - SP",
+    "J VAZ ACUMULADORES": "Avenida dos Autonomistas, 4340 – Km 18, Osasco – SP",
+    "MATRIX": "Rua dos Tamoios, 1939 – Centro, Belo Horizonte – MG",
+    "RB ALPHAVILLE": "Alameda São Paulo, 138 – Alphaville Industrial, Barueri – SP",
+    "RB HOSPITAL ANALIA FRANCO": "Rua Aquiles Jorge, 1 – Vila Antonieta, São Paulo – SP",
+    "RB HOSPITAL DA CRIANÇA JABAQUARA": "Rua das Perobas, 344 – Jabaquara, São Paulo – SP",
+    "RB JABAQUARA": "Rua das Perobas, 344 – Jabaquara, São Paulo – SP",
+    "RB SANTA CRUZ CURITIBA": "Avenida Batel, 1889 – Batel, Curitiba – PR",
+    "RB VILA NOVA STAR": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP",
+    "RB VILA NOVA STAR II": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP",
+    "RB VILLA LOBOS": "Rua Jangurucu, 348 – Parque da Mooca, São Paulo – SP",
+    "REDE D'OR FARMÁCIA ASSUNÇÃO": "Avenida João Firmino, 250 – Assunção, São Bernardo do Campo – SP",
+    "REDE DOR FARMACIA": "AV JOAO FIRMINO, 250, ASSUNCAO, SAO BERNARDO DO CAMPO - SP",
+    "RESCISÃO RH": "Rua Roma, 93 – Fundação, São Caetano do Sul – SP",
+    "RESERVA BASE": "Rua Alegre, 277 – Fundação, São Caetano do Sul – SP",
+    "SUL AMERICA": "AV DAS NACOES UNIDAS, 13523, VILA GERTRUDES, SAO PAULO - SP",
+    "URC VIVALLE": "AV MAJOR MIGUEL NAKAMURA, 150, JD. AQUARIUS, SAO JOSE DOS CAMPOS - SP",
+    "VILA NOVA STAR II": "Avenida José Estima Filho, 10 – Vila Nova Conceição, São Paulo – SP"
+  }
+}

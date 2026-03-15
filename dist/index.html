@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0b1220">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Dunamis Control Center</title>
+    <link rel="icon" href="images/logo-dunamis-servicos.png">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="platform.css">
+</head>
+<body>
+    <div id="platform-root"></div>
+    <div id="platform-toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+    <script src="config.js" defer></script>
+    <script src="core/logger.js" defer></script>
+    <script src="core/metrics.js" defer></script>
+    <script src="core/error-tracker.js" defer></script>
+    <script src="core/data-layer.js" defer></script>
+    <script src="core/auth-service.js" defer></script>
+    <script src="services/supabase-service.js" defer></script>
+    <script src="core/platform-rebuild.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "name": "cobertura-dunamis-v4",
+  "version": "4.0.0",
+  "private": true,
+  "description": "Gerenciamento de Efetivos - v4 modernizada",
+  "scripts": {
+    "dev": "vite",
+    "dev:static": "http-server . -p 5500 -c-1",
+    "build": "node scripts/build-modern.js",
+    "build:vite": "vite build",
+    "preview": "vite preview",
+    "check": "node --check app.js && node --check config.js && node --check sw.js",
+    "lint": "eslint app.js sw.js config.js scripts/*.js",
+    "lint:fix": "eslint app.js sw.js config.js scripts/*.js --fix",
+    "format": "prettier --write \"**/*.{js,json,css,html,md}\"",
+    "format:check": "prettier --check \"**/*.{js,json,css,html,md}\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.1",
+    "eslint": "^9.22.0",
+    "globals": "^16.0.0",
+    "http-server": "^14.1.1",
+    "prettier": "^3.5.3",
+    "vite": "^6.2.1"
+  }
+}
