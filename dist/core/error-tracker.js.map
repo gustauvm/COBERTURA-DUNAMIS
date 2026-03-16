@@ -1,7 +1,0 @@
-{
-  "version": 3,
-  "sources": ["<stdin>"],
-  "sourcesContent": ["(function (global) {\r\n    function capture(error, context) {\r\n        const err = error instanceof Error ? error : new Error(String(error || 'Unknown error'));\r\n        const data = {\r\n            message: err.message,\r\n            stack: err.stack || '',\r\n            context: context || {},\r\n            ts: new Date().toISOString()\r\n        };\r\n\r\n        if (global.DunamisLogger && typeof global.DunamisLogger.error === 'function') {\r\n            global.DunamisLogger.error('tracked-error', data);\r\n        } else {\r\n            console.error('[tracked-error]', data);\r\n        }\r\n\r\n        if (global.DunamisMetrics && typeof global.DunamisMetrics.push === 'function') {\r\n            global.DunamisMetrics.push('error', data);\r\n        }\r\n\r\n        return data;\r\n    }\r\n\r\n    global.DunamisErrorTracker = { capture };\r\n})(typeof window !== 'undefined' ? window : globalThis);\r\n"],
-  "mappings": "CAAC,SAAUA,EAAQ,CACf,SAASC,EAAQC,EAAOC,EAAS,CAC7B,MAAMC,EAAMF,aAAiB,MAAQA,EAAQ,IAAI,MAAM,OAAOA,GAAS,eAAe,CAAC,EACjFG,EAAO,CACT,QAASD,EAAI,QACb,MAAOA,EAAI,OAAS,GACpB,QAASD,GAAW,CAAC,EACrB,GAAI,IAAI,KAAK,EAAE,YAAY,CAC/B,EAEA,OAAIH,EAAO,eAAiB,OAAOA,EAAO,cAAc,OAAU,WAC9DA,EAAO,cAAc,MAAM,gBAAiBK,CAAI,EAEhD,QAAQ,MAAM,kBAAmBA,CAAI,EAGrCL,EAAO,gBAAkB,OAAOA,EAAO,eAAe,MAAS,YAC/DA,EAAO,eAAe,KAAK,QAASK,CAAI,EAGrCA,CACX,CAEAL,EAAO,oBAAsB,CAAE,QAAAC,CAAQ,CAC3C,GAAG,OAAO,OAAW,IAAc,OAAS,UAAU",
-  "names": ["global", "capture", "error", "context", "err", "data"]
-}

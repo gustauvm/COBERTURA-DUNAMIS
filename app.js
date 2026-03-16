@@ -966,6 +966,7 @@ async function initSupabaseAuth() {
         const { data } = await supabaseClient.auth.getSession();
         if (data?.session) {
             await applyAuthSession(data.session, { silent: true });
+            clearSearchStateAfterAuth();
         }
     } catch {}
     supabaseClient.auth.onAuthStateChange(async (event, session) => {
@@ -1201,6 +1202,35 @@ function clearSearchInput() {
     if (ac) ac.classList.add('hidden');
     if (cb) cb.classList.add('hidden');
     realizarBusca();
+}
+
+function clearSearchStateAfterAuth() {
+    const input = document.getElementById('search-input');
+    if (input) input.value = '';
+    const clearBtn = document.getElementById('search-clear-btn');
+    if (clearBtn) clearBtn.classList.add('hidden');
+    const ac = document.getElementById('search-autocomplete');
+    if (ac) ac.classList.add('hidden');
+    searchFilterGroup = 'all';
+    searchFilterCargo = 'all';
+    searchFilterEscala = 'all';
+    searchFilterStatus = 'all';
+    searchHideAbsence = false;
+
+    const params = new URLSearchParams(window.location.search);
+    const hadSearchParams = params.has('q') || params.has('filter') || params.has('grupo');
+    if (hadSearchParams) {
+        params.delete('q');
+        params.delete('filter');
+        params.delete('grupo');
+        if (params.get('tab') === 'busca') params.delete('tab');
+        const newUrl = params.toString() ? `${window.location.pathname}?${params.toString()}` : window.location.pathname;
+        history.replaceState(null, '', newUrl);
+    }
+
+    if (document.getElementById('search-results')) {
+        realizarBusca();
+    }
 }
 
 // --- Advanced filter setters ---
@@ -5501,11 +5531,23 @@ function renderDashboard() {
                 </div>
 
                 <div id="config-content" class="hidden">
-                        <div class="config-tabs">
-                            <button class="config-tab active" onclick="switchConfigTab('access', this)">Minha Conta</button>
-                            <button class="config-tab" onclick="switchConfigTab('team', this)">Equipe & Permissões</button>
-                            <button class="config-tab" onclick="switchConfigTab('operation', this)">Operação</button>
-                            <button class="config-tab" onclick="switchConfigTab('system', this)">Sistema</button>
+                        <div class="config-tabs" role="tablist" aria-label="Seções de configuração">
+                            <button class="config-tab active" onclick="switchConfigTab('access', this)">
+                                <span class="config-tab-index">01</span>
+                                <span class="config-tab-label">Minha Conta</span>
+                            </button>
+                            <button class="config-tab" onclick="switchConfigTab('team', this)">
+                                <span class="config-tab-index">02</span>
+                                <span class="config-tab-label">Equipe & Permissões</span>
+                            </button>
+                            <button class="config-tab" onclick="switchConfigTab('operation', this)">
+                                <span class="config-tab-index">03</span>
+                                <span class="config-tab-label">Operação</span>
+                            </button>
+                            <button class="config-tab" onclick="switchConfigTab('system', this)">
+                                <span class="config-tab-index">04</span>
+                                <span class="config-tab-label">Sistema</span>
+                            </button>
                         </div>
 
                     <!-- ═══ ABA: MINHA CONTA ═══ -->
@@ -5606,7 +5648,7 @@ function renderDashboard() {
                                         <div class="actions">
                                             <button class="btn" onclick="upsertUserProfileFromConfig()">Salvar permissões</button>
                                         </div>
-                                        <div class="hint">O usuário precisa criar conta e fazer login uma vez para aparecer na lista.</div>
+                                        <div class="hint">Se o usuário já criou conta e ainda não aparece, confirme se ele entrou neste ambiente e se o e-mail é exatamente o mesmo do cadastro.</div>
                                     </div>
                                 </div>
 
@@ -17808,6 +17850,7 @@ async function loginSite(options = {}) {
     }
 
     renderDashboard();
+    clearSearchStateAfterAuth();
     switchTab('config');
     renderAdminList();
     renderAuditList();
@@ -17841,6 +17884,7 @@ async function signupSite(options = {}) {
     }
     if (data?.session) {
         await applyAuthSession(data.session);
+        clearSearchStateAfterAuth();
     }
     showToast('Conta criada. Verifique seu e-mail para confirmar.', 'success');
 }
@@ -17984,9 +18028,20 @@ async function upsertUserProfileFromConfig() {
         return;
     }
     const profiles = await fetchProfiles(true);
-    const target = (profiles || []).find(p => String(p?.email || '').toLowerCase() === email);
+    let target = (profiles || []).find(p => String(p?.email || '').toLowerCase() === email);
     if (!target) {
-        showToast("Usuário não encontrado. Ele precisa criar conta primeiro.", "error");
+        // Fallback: busca direta por e-mail para casos de cache desatualizado.
+        const direct = await supabaseClient
+            .from(SUPABASE_TABLES.profiles)
+            .select('id, email')
+            .ilike('email', email)
+            .maybeSingle();
+        if (!direct.error && direct.data?.id) {
+            target = direct.data;
+        }
+    }
+    if (!target) {
+        showToast("Usuário não encontrado na tabela de perfis. Se ele já logou, valide o e-mail e o projeto Supabase em produção.", "error");
         return;
     }
     const { error } = await supabaseClient
