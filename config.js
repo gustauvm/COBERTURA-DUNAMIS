@@ -7,6 +7,7 @@ const CONFIG = {
     },
     auth: {
         requireLogin: true,
+        publicUrl: 'https://dunamispro.online/',
         bootstrapAdmins: ['nextibombeiros@gmail.com']
     },
     groupRules: [

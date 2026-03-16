@@ -727,6 +727,15 @@ function isBootstrapAdmin(email) {
     return !!key && list.some(e => String(e || '').trim().toLowerCase() === key);
 }
 
+function getAuthRedirectUrl() {
+    const configured = String(CONFIG?.auth?.publicUrl || '').trim();
+    if (configured) {
+        const withSlash = configured.endsWith('/') ? configured : `${configured}/`;
+        return withSlash;
+    }
+    return window.location.origin + window.location.pathname;
+}
+
 function normalizeProfileGroups(value) {
     if (Array.isArray(value)) {
         return value.map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
@@ -17876,7 +17885,11 @@ async function signupSite(options = {}) {
         return;
     }
     showToast('Criando conta...', 'loading', { id: 'auth-signup', autoClose: false });
-    const { data, error } = await supabaseClient.auth.signUp({ email, password });
+    const { data, error } = await supabaseClient.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: getAuthRedirectUrl() }
+    });
     hideToastById('auth-signup');
     if (error) {
         showToast(error.message || 'Falha ao criar conta.', 'error');
@@ -17903,7 +17916,7 @@ async function requestPasswordReset(options = {}) {
         showToast('Supabase não configurado.', 'error');
         return;
     }
-    const redirectTo = window.location.origin + window.location.pathname;
+    const redirectTo = getAuthRedirectUrl();
     const { error } = await supabaseClient.auth.resetPasswordForEmail(email, { redirectTo });
     if (error) {
         showToast(error.message || 'Falha ao enviar reset de senha.', 'error');
