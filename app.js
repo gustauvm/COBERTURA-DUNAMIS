@@ -1385,11 +1385,11 @@ function toggleInvertPanelOpen() {
     const panel = document.getElementById('invert-plantao-panel');
     if (!panel) return;
     if (!panel.classList.contains('hidden')) { panel.classList.add('hidden'); return; }
+    const isAll = !currentGroup || currentGroup === 'todos';
     const groupLabel = isAll ? null : (getGroupLabelMap()[currentGroup] || currentGroup);
     const scope = isAll
         ? 'todos os colaboradores de <strong>todos os grupos</strong>'
         : `todos os colaboradores do grupo <strong>${escapeHtml(groupLabel)}</strong>`;
-    const isAll = !currentGroup || currentGroup === 'todos';
     const groups = (CONFIG?.groupRules || []).map(r => r?.key).filter(Boolean);
     const isEffInverted = isAll
         ? groups.length > 0 && groups.every(k => isGroupInvertido(k))
