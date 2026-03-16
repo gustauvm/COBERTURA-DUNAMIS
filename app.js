@@ -44,7 +44,7 @@ let supabaseHealth = {
     lastError: ''
 };
 const SUPABASE_CONFIG = (typeof CONFIG !== 'undefined' && CONFIG?.supabase) ? CONFIG.supabase : { url: '', anonKey: '' };
-const supabaseClient = (typeof window !== 'undefined' && window.supabase && SUPABASE_CONFIG?.url && SUPABASE_CONFIG?.anonKey)
+let supabaseClient = (typeof window !== 'undefined' && window.supabase && SUPABASE_CONFIG?.url && SUPABASE_CONFIG?.anonKey)
     ? window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, { auth: { persistSession: true } })
     : null;
 const dataLayer = (typeof window !== 'undefined' && window.DunamisDataLayer) ? window.DunamisDataLayer : null;
@@ -713,6 +713,11 @@ function canViewAllGroups() {
 }
 
 function isSupabaseReady() {
+    if (!supabaseClient && typeof window !== 'undefined' && window.supabase && SUPABASE_CONFIG?.url && SUPABASE_CONFIG?.anonKey) {
+        try {
+            supabaseClient = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, { auth: { persistSession: true } });
+        } catch (e) { /* ignore */ }
+    }
     return !!supabaseClient;
 }
 

@@ -3,7 +3,7 @@ const CONFIG = {
     dataSource: 'supabase',
     supabase: {
         url: 'https://bvpcbviggbxnpqoprnxq.supabase.co',
-        anonKey: 'sb_publishable_lZUTf0HSWpQ_rQthObW0Ng_6BjZmDB_'
+        anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ2cGNidmlnZ2J4bnBxb3BybnhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0OTAzMTYsImV4cCI6MjA4OTA2NjMxNn0.ViZumUOJRgeCdpv6eVlcsSwv10WBAgp7mqZHaWEdkZs'
     },
     auth: {
         requireLogin: true,
