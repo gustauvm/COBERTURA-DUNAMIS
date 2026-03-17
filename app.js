@@ -469,6 +469,155 @@ function setAppState(key, value, options = {}) {
     return AppStateManager.set(key, value, options);
 }
 
+const APP_NAV_PARAMS = Object.freeze({
+    view: 'appView',
+    group: 'appGroup',
+    tab: 'appTab'
+});
+const APP_NAV_STORAGE_KEY = 'dunamisNavStateV1';
+const DASHBOARD_TABS = new Set(['busca', 'unidades', 'avisos', 'reciclagem', 'lancamentos', 'config', 'collab-detail']);
+let appNavBound = false;
+let appNavApplying = false;
+
+function normalizeDashboardTab(tabName) {
+    const tab = String(tabName || '').trim();
+    if (!DASHBOARD_TABS.has(tab)) return 'busca';
+    if (tab === 'avisos' && !SiteAuth.logged) return 'busca';
+    return tab;
+}
+
+function normalizeAppNavState(raw = {}) {
+    const next = raw && typeof raw === 'object' ? raw : {};
+    const viewRaw = String(next.view || next.screen || '').trim().toLowerCase();
+    const view = (viewRaw === 'supervisao' || viewRaw === 'gerencia' || viewRaw === 'dashboard') ? viewRaw : 'gateway';
+    const group = String(next.group || '').trim().toLowerCase();
+    const tab = normalizeDashboardTab(next.tab);
+    return { view, group, tab };
+}
+
+function getCurrentAppNavState() {
+    if (currentTab === 'supervisao') return { view: 'supervisao', group: '', tab: 'busca' };
+    if (currentTab === 'gerencia') return { view: 'gerencia', group: '', tab: 'busca' };
+    if (appContainer.style.display === 'none') return { view: 'gateway', group: '', tab: 'busca' };
+    return {
+        view: 'dashboard',
+        group: String(currentGroup || 'todos').toLowerCase(),
+        tab: normalizeDashboardTab(currentTab || 'busca')
+    };
+}
+
+function readAppNavFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has(APP_NAV_PARAMS.view) && !params.has(APP_NAV_PARAMS.group) && !params.has(APP_NAV_PARAMS.tab)) {
+        return null;
+    }
+    return normalizeAppNavState({
+        view: params.get(APP_NAV_PARAMS.view) || '',
+        group: params.get(APP_NAV_PARAMS.group) || '',
+        tab: params.get(APP_NAV_PARAMS.tab) || ''
+    });
+}
+
+function readAppNavFromStorage() {
+    try {
+        const raw = localStorage.getItem(APP_NAV_STORAGE_KEY);
+        if (!raw) return null;
+        return normalizeAppNavState(JSON.parse(raw));
+    } catch {
+        return null;
+    }
+}
+
+function writeAppNavToStorage(state) {
+    try {
+        localStorage.setItem(APP_NAV_STORAGE_KEY, JSON.stringify(state));
+    } catch {}
+}
+
+function writeAppNavToUrl(state, historyMode = 'replace') {
+    const params = new URLSearchParams(window.location.search);
+    params.delete(APP_NAV_PARAMS.view);
+    params.delete(APP_NAV_PARAMS.group);
+    params.delete(APP_NAV_PARAMS.tab);
+
+    if (state.view !== 'gateway') params.set(APP_NAV_PARAMS.view, state.view);
+    if (state.view === 'dashboard') {
+        if (state.group && state.group !== 'todos') params.set(APP_NAV_PARAMS.group, state.group);
+        if (state.tab && state.tab !== 'busca') params.set(APP_NAV_PARAMS.tab, state.tab);
+    }
+
+    const qs = params.toString();
+    const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+    const method = historyMode === 'push' ? 'pushState' : 'replaceState';
+    history[method]({ appNav: state }, '', newUrl);
+}
+
+function syncAppNavigation(overrides = {}, options = {}) {
+    const state = normalizeAppNavState({ ...getCurrentAppNavState(), ...overrides });
+    if (!options.skipStorage) writeAppNavToStorage(state);
+    if (!options.skipUrl) writeAppNavToUrl(state, options.history || 'replace');
+}
+
+async function applyAppNavigationState(rawState, options = {}) {
+    if (appNavApplying) return;
+    appNavApplying = true;
+    try {
+        const state = normalizeAppNavState(rawState);
+        const historyMode = options.history || 'replace';
+        if (state.view === 'gateway') {
+            resetToGateway({ skipRouteSync: true });
+            syncAppNavigation(state, { history: historyMode });
+            return;
+        }
+        if (state.view === 'supervisao') {
+            openSupervisaoPage({ skipRouteSync: true });
+            syncAppNavigation(state, { history: historyMode });
+            return;
+        }
+        if (state.view === 'gerencia') {
+            await openGerenciaPage({ skipRouteSync: true });
+            syncAppNavigation(state, { history: historyMode });
+            return;
+        }
+        const desiredGroup = state.group || currentGroup || 'todos';
+        await loadGroup(desiredGroup, {
+            restoreTab: state.tab || 'busca',
+            skipRouteSync: true,
+            history: historyMode
+        });
+        syncAppNavigation({ view: 'dashboard', group: desiredGroup, tab: state.tab || 'busca' }, { history: historyMode });
+    } finally {
+        appNavApplying = false;
+    }
+}
+
+function bindAppNavigation() {
+    if (appNavBound) return;
+    appNavBound = true;
+    window.addEventListener('popstate', () => {
+        const byUrl = readAppNavFromUrl();
+        if (byUrl) {
+            applyAppNavigationState(byUrl, { history: 'replace' });
+            return;
+        }
+        const byStorage = readAppNavFromStorage();
+        if (byStorage) {
+            applyAppNavigationState(byStorage, { history: 'replace' });
+        }
+    });
+}
+
+function restoreAppNavigationOnBoot() {
+    const fromUrl = readAppNavFromUrl();
+    const fromStorage = readAppNavFromStorage();
+    const state = fromUrl || fromStorage;
+    if (!state) {
+        syncAppNavigation({ view: 'gateway', group: '', tab: 'busca' }, { history: 'replace' });
+        return;
+    }
+    applyAppNavigationState(state, { history: 'replace' });
+}
+
 function getCachedAllCollaborators() {
     initializeCoreManagers();
     const cached = AppCacheManager.get('all-collaborators', 'items', null);
@@ -3325,6 +3474,10 @@ if (typeof window !== 'undefined') {
 // Inicialização
 document.addEventListener('DOMContentLoaded', () => {
     AppBootstrapper.boot();
+    bindAppNavigation();
+    setTimeout(() => {
+        restoreAppNavigationOnBoot();
+    }, 0);
 });
 
 function registerPwaSupport() {
@@ -3568,7 +3721,7 @@ window.onscroll = function() {
     }
 };
 
-function openSupervisaoPage() {
+function openSupervisaoPage(options = {}) {
     clearTabScopedTimers('supervisao');
     appContainer.style.display = 'block';
     gateway.classList.add('hidden');
@@ -3595,6 +3748,9 @@ function openSupervisaoPage() {
     renderSupervisaoHistory();
     updateSupervisaoEditorVisibility();
     updateSupervisaoAdminStatus();
+    if (!options.skipRouteSync) {
+        syncAppNavigation({ view: 'supervisao', group: '', tab: 'busca' }, { history: options.history || 'push' });
+    }
 }
 
 async function openGerenciaPage(options = {}) {
@@ -3621,6 +3777,9 @@ async function openGerenciaPage(options = {}) {
         </div>
     `;
     clearContextBar();
+    if (!options.skipRouteSync) {
+        syncAppNavigation({ view: 'gerencia', group: '', tab: 'busca' }, { history: options.history || 'push' });
+    }
 }
 
 function getGerenciaDataSource() {
@@ -4717,7 +4876,7 @@ function withTimeout(promise, timeoutMs, label) {
     });
 }
 
-async function loadGroup(groupKey) {
+async function loadGroup(groupKey, options = {}) {
     if (SiteAuth.logged && Array.isArray(SiteAuth.groups) && SiteAuth.groups.length && groupKey && groupKey !== 'todos') {
         if (!SiteAuth.groups.includes(groupKey) && !canViewAllGroups()) {
             showToast("Você não tem permissão para acessar este grupo.", "error");
@@ -4833,10 +4992,17 @@ async function loadGroup(groupKey) {
     });
     updateLastUpdatedDisplay();
     runDailySafetySnapshot();
+
+    const desiredTab = normalizeDashboardTab(options.restoreTab || 'busca');
+    if (desiredTab !== 'busca') {
+        switchTab(desiredTab, { history: options.history || 'replace', skipRouteSync: !!options.skipRouteSync });
+    } else if (!options.skipRouteSync) {
+        syncAppNavigation({ view: 'dashboard', group: groupKey || 'todos', tab: 'busca' }, { history: options.history || 'push' });
+    }
 }
 
 // 3. Voltar ao Gateway
-function resetToGateway() {
+function resetToGateway(options = {}) {
     clearTabScopedTimers('gateway');
     appContainer.style.display = 'none';
     gateway.classList.remove('hidden');
@@ -4848,6 +5014,9 @@ function resetToGateway() {
     minimizedUnits.clear();
     // Não limpamos unitMetadata e collaboratorEdits aqui para permitir persistência na sessão
     updateLastUpdatedDisplay();
+    if (!options.skipRouteSync) {
+        syncAppNavigation({ view: 'gateway', group: '', tab: 'busca' }, { history: options.history || 'push' });
+    }
 }
 
 async function getAllCollaborators(force = false) {
@@ -6570,7 +6739,7 @@ function renderDashboard() {
     updateAvisosUI();
 }
 
-function switchTab(tabName) {
+function switchTab(tabName, options = {}) {
     closeUtilityDrawer();
     if (tabName === 'avisos' && !SiteAuth.logged) {
         showToast("Faça login para acessar os avisos.", "error");
@@ -6623,6 +6792,10 @@ function switchTab(tabName) {
 
     clearContextBar();
     updateBreadcrumb();
+
+    if (!options.skipRouteSync) {
+        syncAppNavigation({ view: 'dashboard', group: currentGroup || 'todos', tab: tabName }, { history: options.history || 'push' });
+    }
 }
 
 function isGroupInvertido(groupKey) {
