@@ -1112,8 +1112,42 @@ async function handlePasswordRecovery() {
     showToast('Senha atualizada com sucesso.', 'success');
 }
 
+function getRecoveryHashParams() {
+    try {
+        const raw = String(window.location.hash || '').replace(/^#/, '');
+        if (!raw) return null;
+        const params = new URLSearchParams(raw);
+        const type = String(params.get('type') || '').toLowerCase();
+        const token = String(params.get('access_token') || '');
+        if (type !== 'recovery' || !token) return null;
+        return params;
+    } catch {
+        return null;
+    }
+}
+
+function clearRecoveryHashFromUrl() {
+    try {
+        if (!window.location.hash) return;
+        history.replaceState(window.history.state || null, '', window.location.pathname + window.location.search);
+    } catch {}
+}
+
 async function initSupabaseAuth() {
     if (!isSupabaseReady()) return;
+    let recoveryHandled = false;
+    const recoveryParams = getRecoveryHashParams();
+
+    const maybeRunRecovery = async (session, eventName = '') => {
+        if (recoveryHandled) return;
+        if (!recoveryParams) return;
+        if (!session?.user) return;
+        recoveryHandled = true;
+        await handlePasswordRecovery();
+        clearRecoveryHashFromUrl();
+        showToast('Senha redefinida. Faça login novamente se necessário.', 'success');
+    };
+
     // Session-only: if user didn't check "keep logged" and tab was closed, sign out
     if (localStorage.getItem('sessionOnly') === '1' && !sessionStorage.getItem('sessionActive')) {
         await supabaseClient.auth.signOut();
@@ -1125,12 +1159,15 @@ async function initSupabaseAuth() {
         if (data?.session) {
             await applyAuthSession(data.session, { silent: true });
             clearSearchStateAfterAuth();
+            await maybeRunRecovery(data.session, 'SESSION_BOOT');
         }
     } catch {}
     supabaseClient.auth.onAuthStateChange(async (event, session) => {
         try {
             if (event === 'PASSWORD_RECOVERY') {
                 await handlePasswordRecovery();
+                recoveryHandled = true;
+                clearRecoveryHashFromUrl();
                 return;
             }
             if (event === 'SIGNED_OUT' || !session) {
@@ -1139,6 +1176,7 @@ async function initSupabaseAuth() {
                 return;
             }
             await applyAuthSession(session, { event });
+            await maybeRunRecovery(session, event);
         } catch (err) {
             AppErrorHandler.capture(err, { scope: 'auth-state-change' }, { silent: true });
         }
