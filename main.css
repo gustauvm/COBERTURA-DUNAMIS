@@ -11025,6 +11025,20 @@ input::placeholder, textarea::placeholder { color: #94a3b8; }
     color: #92400e;
 }
 
+#adminAssignPanel .actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+}
+
+#adminAssignPanel .actions .btn {
+    width: 100%;
+    min-width: 0;
+    padding-left: 10px;
+    padding-right: 10px;
+    white-space: normal;
+    text-align: center;
+}
+
 /* ── ESTADOS SISTÊMICOS ── */
 .empty-state {
     display: flex;
@@ -11976,6 +11990,10 @@ html, body {
         min-width: 28px;
         height: 28px;
         font-size: 10px;
+    }
+
+    #adminAssignPanel .actions {
+        grid-template-columns: 1fr;
     }
 
     /* Reciclagem */
