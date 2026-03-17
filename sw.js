@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'dunamis-shell-v4-0-2';
+const SHELL_CACHE = 'dunamis-shell-v4-0-3';
 const SHELL_ASSETS = [
   './',
   './index.html',

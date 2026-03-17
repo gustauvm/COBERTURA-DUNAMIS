@@ -885,6 +885,27 @@ function getAuthRedirectUrl() {
     return window.location.origin + window.location.pathname;
 }
 
+function normalizeEmail(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function canonicalizeEmail(value) {
+    const email = normalizeEmail(value);
+    const at = email.indexOf('@');
+    if (at < 1) return email;
+    let local = email.slice(0, at);
+    let domain = email.slice(at + 1);
+    if (domain === 'googlemail.com') domain = 'gmail.com';
+    if (domain === 'gmail.com') {
+        local = local.split('+')[0].replace(/\./g, '');
+    }
+    return `${local}@${domain}`;
+}
+
+function isSameUserEmail(a, b) {
+    return canonicalizeEmail(a) === canonicalizeEmail(b);
+}
+
 function normalizeProfileGroups(value) {
     if (Array.isArray(value)) {
         return value.map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
@@ -940,7 +961,7 @@ async function loadOrCreateProfile(user) {
             return null;
         }
         if (data) return data;
-        const preReg = (preRegisteredEmails || []).find(p => String(p?.email || '').toLowerCase() === String(user.email || '').toLowerCase());
+        const preReg = (preRegisteredEmails || []).find(p => isSameUserEmail(p?.email || '', user.email || ''));
         const baseRole = isBootstrapAdmin(user.email) ? 'administrador' : (preReg?.role || 'visitante');
         const baseGroups = preReg?.groups || [];
         const payload = {
@@ -5844,6 +5865,7 @@ function renderDashboard() {
                                             <label>E-mail do usuário</label>
                                             <input type="email" id="cfg-user-email" placeholder="usuario@email.com">
                                         </div>
+                                        <div id="cfg-user-verify-result" class="config-note cfg-verify" style="margin-bottom:8px;">Use "Verificar usuário" para confirmar se o perfil já existe neste ambiente.</div>
                                         <div class="field-row">
                                             <label>Cargo</label>
                                             <select id="cfg-user-role">
@@ -5862,6 +5884,7 @@ function renderDashboard() {
                                             </div>
                                         </div>
                                         <div class="actions">
+                                            <button class="btn btn-secondary" onclick="verifyUserProfileFromConfig()">Verificar usuário</button>
                                             <button class="btn" onclick="upsertUserProfileFromConfig()">Salvar permissões</button>
                                         </div>
                                         <div class="hint">Se o usuário já criou conta e ainda não aparece, confirme se ele entrou neste ambiente e se o e-mail é exatamente o mesmo do cadastro.</div>
@@ -18211,7 +18234,7 @@ function fillUserPermissionForm(email) {
     const roleSelect = document.getElementById('cfg-user-role');
     if (emailInput) emailInput.value = email;
     // Find user in admins list to pre-fill role and groups
-    const user = (SiteAuth.admins || []).find(u => String(u.email || '').toLowerCase() === String(email).toLowerCase());
+    const user = (SiteAuth.admins || []).find(u => isSameUserEmail(u.email || '', email));
     if (user && roleSelect) {
         roleSelect.value = user.role || 'visitante';
     }
@@ -18222,6 +18245,11 @@ function fillUserPermissionForm(email) {
         container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
             cb.checked = userGroups.includes(cb.value);
         });
+    }
+    const resultEl = document.getElementById('cfg-user-verify-result');
+    if (resultEl) {
+        resultEl.className = 'config-note cfg-verify';
+        resultEl.textContent = 'Clique em "Verificar usuário" para confirmar o perfil antes de salvar.';
     }
     // Scroll to the assign panel
     document.getElementById('adminAssignPanel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -18244,7 +18272,7 @@ async function upsertUserProfileFromConfig() {
         showToast("Apenas administradores podem alterar permissões.", "error");
         return;
     }
-    const email = document.getElementById('cfg-user-email')?.value.trim().toLowerCase();
+    const email = normalizeEmail(document.getElementById('cfg-user-email')?.value);
     const role = document.getElementById('cfg-user-role')?.value || 'visitante';
     const groups = getCheckedGroups('cfg-user-groups-checkboxes');
     if (!email) {
@@ -18252,7 +18280,7 @@ async function upsertUserProfileFromConfig() {
         return;
     }
     const profiles = await fetchProfiles(true);
-    let target = (profiles || []).find(p => String(p?.email || '').toLowerCase() === email);
+    let target = (profiles || []).find(p => isSameUserEmail(p?.email || '', email));
     if (!target) {
         // Fallback: busca direta por e-mail para casos de cache desatualizado.
         const direct = await supabaseClient
@@ -18282,6 +18310,60 @@ async function upsertUserProfileFromConfig() {
     // Reset checkboxes
     document.getElementById('cfg-user-groups-checkboxes')?.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
     document.getElementById('cfg-user-role').value = 'visitante';
+    const resultEl = document.getElementById('cfg-user-verify-result');
+    if (resultEl) {
+        resultEl.className = 'config-note cfg-verify';
+        resultEl.textContent = 'Use "Verificar usuário" para confirmar se o próximo e-mail já existe em profiles.';
+    }
+}
+
+async function verifyUserProfileFromConfig() {
+    if (!canManageUsers()) return;
+    const resultEl = document.getElementById('cfg-user-verify-result');
+    const email = normalizeEmail(document.getElementById('cfg-user-email')?.value);
+    if (!email) {
+        if (resultEl) {
+            resultEl.className = 'config-note cfg-verify cfg-verify-warn';
+            resultEl.textContent = 'Informe um e-mail para verificar.';
+        }
+        showToast('Informe um e-mail para verificar.', 'info');
+        return;
+    }
+
+    const profiles = await fetchProfiles(true);
+    const fromList = (profiles || []).find(p => isSameUserEmail(p?.email || '', email));
+    let fromDirect = null;
+    if (!fromList) {
+        const direct = await supabaseClient
+            .from(SUPABASE_TABLES.profiles)
+            .select('id, email, role, groups, created_at, updated_at')
+            .ilike('email', email)
+            .maybeSingle();
+        if (!direct.error && direct.data?.id) fromDirect = direct.data;
+    }
+    const preReg = (preRegisteredEmails || []).find(p => isSameUserEmail(p?.email || '', email));
+    const hit = fromList || fromDirect;
+
+    if (hit) {
+        const roleLabel = ROLE_LABELS[hit.role] || hit.role || 'visitante';
+        const groupsText = Array.isArray(hit.groups) && hit.groups.length ? hit.groups.join(', ') : 'Sem grupo';
+        const msg = `Usuário encontrado em profiles (${hit.email || email}) • Cargo: ${roleLabel} • Grupos: ${groupsText}`;
+        if (resultEl) {
+            resultEl.className = 'config-note cfg-verify cfg-verify-ok';
+            resultEl.textContent = msg;
+        }
+        showToast('Usuário localizado em profiles.', 'success');
+        return;
+    }
+
+    const pendingMsg = preReg
+        ? 'Não encontrado em profiles ainda. Esse e-mail está pré-cadastrado e receberá acesso quando fizer o primeiro login neste ambiente.'
+        : 'Não encontrado em profiles. Peça para a pessoa fazer login neste ambiente e use exatamente o mesmo e-mail da conta.';
+    if (resultEl) {
+        resultEl.className = 'config-note cfg-verify cfg-verify-warn';
+        resultEl.textContent = pendingMsg;
+    }
+    showToast('Usuário ainda não apareceu em profiles.', 'warning');
 }
 
 function addAdminFromConfig() {
@@ -18309,14 +18391,14 @@ function addPreRegisteredEmail() {
     if (!canManageUsers()) return;
     const emailInput = document.getElementById('preReg-email');
     const roleSelect = document.getElementById('preReg-role');
-    const email = emailInput?.value.trim().toLowerCase();
+    const email = normalizeEmail(emailInput?.value);
     const role = roleSelect?.value || 'operacional';
     const groups = getCheckedGroups('preReg-groups-checkboxes');
     if (!email || !email.includes('@')) {
         showToast("Informe um e-mail válido.", "error");
         return;
     }
-    if (preRegisteredEmails.some(p => p.email === email)) {
+    if (preRegisteredEmails.some(p => isSameUserEmail(p.email, email))) {
         showToast("Esse e-mail já está pré-cadastrado.", "info");
         return;
     }

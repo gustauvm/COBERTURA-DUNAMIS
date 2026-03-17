@@ -10930,31 +10930,40 @@ input::placeholder, textarea::placeholder { color: #94a3b8; }
 }
 .config-card.danger-zone .card-title { color: #dc2626; }
 
-#tab-content-config .config-tabs {
+#tab-content-config #config-content {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
-    margin: 0 0 18px;
-    padding: 10px;
+    grid-template-columns: 260px minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+}
+
+#tab-content-config .config-tabs {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 12px;
     border-radius: 16px;
     background:
-        linear-gradient(120deg, rgba(2, 22, 55, 0.95), rgba(8, 47, 107, 0.92)),
-        radial-gradient(circle at 90% 20%, rgba(93, 188, 255, 0.35), transparent 45%);
-    border: 1px solid rgba(70, 145, 226, 0.36);
-    box-shadow: 0 14px 34px rgba(3, 18, 45, 0.35);
+        linear-gradient(180deg, rgba(5, 28, 64, 0.96), rgba(7, 45, 97, 0.92)),
+        radial-gradient(circle at 20% 0%, rgba(125, 211, 252, 0.26), transparent 58%);
+    border: 1px solid rgba(85, 166, 255, 0.34);
+    box-shadow: 0 16px 30px rgba(4, 20, 44, 0.32);
+    position: sticky;
+    top: 84px;
 }
 
 #tab-content-config .config-tab {
-    min-height: 62px;
+    min-height: 56px;
     border-radius: 12px;
-    border: 1px solid rgba(115, 166, 229, 0.35);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.05));
-    color: #e8f3ff;
+    border: 1px solid rgba(122, 178, 245, 0.3);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.03));
+    color: #e7f2ff;
     display: flex;
     align-items: center;
     justify-content: flex-start;
     gap: 10px;
-    padding: 10px 12px;
+    padding: 9px 10px;
     text-align: left;
     font-weight: 700;
     letter-spacing: 0.01em;
@@ -10962,21 +10971,21 @@ input::placeholder, textarea::placeholder { color: #94a3b8; }
 }
 
 #tab-content-config .config-tab:hover {
-    transform: translateY(-1px);
-    border-color: rgba(148, 201, 255, 0.7);
-    box-shadow: 0 8px 20px rgba(8, 27, 53, 0.28);
+    transform: translateX(2px);
+    border-color: rgba(159, 209, 255, 0.8);
+    box-shadow: 0 8px 18px rgba(9, 33, 66, 0.3);
 }
 
 #tab-content-config .config-tab.active {
-    background: linear-gradient(130deg, #f59e0b, #f97316);
+    background: linear-gradient(130deg, #f59e0b, #fb923c);
     color: #2d1600;
-    border-color: rgba(255, 196, 88, 0.95);
-    box-shadow: 0 10px 22px rgba(176, 86, 6, 0.32);
+    border-color: rgba(255, 200, 105, 0.96);
+    box-shadow: 0 10px 22px rgba(176, 86, 6, 0.34);
 }
 
 #tab-content-config .config-tab .config-tab-index {
-    min-width: 34px;
-    height: 34px;
+    min-width: 32px;
+    height: 32px;
     border-radius: 10px;
     display: inline-flex;
     align-items: center;
@@ -10984,17 +10993,36 @@ input::placeholder, textarea::placeholder { color: #94a3b8; }
     font-size: 11px;
     font-weight: 900;
     letter-spacing: 0.07em;
-    background: rgba(3, 20, 45, 0.34);
+    background: rgba(5, 21, 45, 0.38);
     color: #dff0ff;
 }
 
 #tab-content-config .config-tab.active .config-tab-index {
-    background: rgba(255, 244, 217, 0.78);
+    background: rgba(255, 244, 217, 0.86);
     color: #8b3b00;
 }
 
-#tab-content-config .config-tab .config-tab-label {
-    line-height: 1.2;
+#tab-content-config .config-tab .config-tab-label { line-height: 1.2; }
+#tab-content-config .config-pane { margin: 0; }
+
+.cfg-verify {
+    border: 1px dashed rgba(59, 130, 246, 0.35);
+    background: rgba(239, 246, 255, 0.88);
+    color: #0f366f;
+}
+
+.cfg-verify.cfg-verify-ok {
+    border-style: solid;
+    border-color: rgba(22, 163, 74, 0.45);
+    background: rgba(220, 252, 231, 0.92);
+    color: #166534;
+}
+
+.cfg-verify.cfg-verify-warn {
+    border-style: solid;
+    border-color: rgba(217, 119, 6, 0.45);
+    background: rgba(254, 243, 199, 0.95);
+    color: #92400e;
 }
 
 /* ── ESTADOS SISTÊMICOS ── */
@@ -11922,6 +11950,9 @@ html, body {
     }
 
     /* Config tabs */
+    #tab-content-config #config-content {
+        display: block;
+    }
     #tab-content-config .config-tabs {
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
@@ -11930,6 +11961,8 @@ html, body {
         gap: 4px;
         display: flex;
         padding: 8px;
+        margin-bottom: 10px;
+        position: static;
     }
     #tab-content-config .config-tabs::-webkit-scrollbar { display: none; }
     #tab-content-config .config-tab {
