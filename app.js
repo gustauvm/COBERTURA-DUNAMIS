@@ -936,6 +936,11 @@ function resetAuthState() {
 function updateAuthUiState() {
     const loginGate = document.getElementById('config-login');
     const content = document.getElementById('config-content');
+    if (isPublicAccessMode()) {
+        loginGate?.remove();
+        content?.classList.remove('hidden');
+        return;
+    }
     if (!loginGate || !content) return;
     if (SiteAuth.logged) {
         loginGate.classList.add('hidden');
@@ -946,11 +951,15 @@ function updateAuthUiState() {
     }
 }
 
+function isPublicAccessMode() {
+    return CONFIG?.auth?.requireLogin === false;
+}
+
 function enablePublicAccessMode() {
-    // Public mode: no login required, grant full access and keep realtime enabled.
+    // Modo público: acesso direto, sem exibir estado de autenticação.
     SiteAuth.logged = true;
     SiteAuth.mode = 'edit';
-    SiteAuth.user = 'Acesso Público';
+    SiteAuth.user = 'Sistema';
     SiteAuth.re = null;
     SiteAuth.role = 'administrador';
     SiteAuth.email = null;
@@ -1183,7 +1192,7 @@ async function initSupabaseAuth() {
         recoveryHandled = true;
         await handlePasswordRecovery();
         clearRecoveryHashFromUrl();
-        showToast('Senha redefinida. Faça login novamente se necessário.', 'success');
+        showToast('Senha redefinida.', 'success');
     };
 
     // Session-only: if user didn't check "keep logged" and tab was closed, sign out
@@ -4121,8 +4130,8 @@ function updateSupervisaoAdminStatus() {
     }
     const roleLabel = ROLE_LABELS[SiteAuth.role] || 'Usuário';
     const modeLabel = SiteAuth.mode === 'edit' ? 'EDIÇÃO' : 'VISUALIZAÇÃO';
-    userEl.textContent = SiteAuth.user || 'Admin';
-    roleEl.textContent = roleLabel.toUpperCase();
+    userEl.textContent = isPublicAccessMode() ? 'Base liberada' : (SiteAuth.user || 'Admin');
+    roleEl.textContent = isPublicAccessMode() ? 'TOTAL' : roleLabel.toUpperCase();
     modeEl.textContent = modeLabel;
     modeEl.className = `status-badge-menu ${SiteAuth.mode === 'edit' ? 'edit' : 'view'}`;
 }
@@ -4131,6 +4140,7 @@ function getSupervisaoAdminHtml() {
     const logged = SiteAuth.logged;
     const isAdmin = isAdminRole();
     const canEdit = canEditSupervisao();
+    const publicMode = isPublicAccessMode();
     return `
         <details class="supervisao-admin-panel">
             <summary>Menu de edição</summary>
@@ -4157,15 +4167,15 @@ function getSupervisaoAdminHtml() {
                     </div>
                 ` : `
                     <div class="supervisao-admin-status">
-                        <div><span>Usuário</span><strong id="supervisao-admin-user">—</strong></div>
-                        <div><span>Perfil</span><strong id="supervisao-admin-role">—</strong></div>
+                        <div><span>Base</span><strong id="supervisao-admin-user">—</strong></div>
+                        <div><span>Permissão</span><strong id="supervisao-admin-role">—</strong></div>
                         <div><span>Modo</span><strong id="supervisao-admin-mode" class="status-badge-menu view">VISUALIZAÇÃO</strong></div>
                     </div>
                     <div class="supervisao-admin-actions">
                         <button class="btn btn-secondary btn-small" onclick="toggleEditModeFromSupervisao()">Alternar modo</button>
-                        <button class="btn btn-secondary btn-small" onclick="logoutSite({ target: 'supervisao' })">Sair</button>
+                        ${publicMode ? '' : `<button class="btn btn-secondary btn-small" onclick="logoutSite({ target: 'supervisao' })">Sair</button>`}
                     </div>
-                    ${!canEdit ? `<div class="hint">Para editar, esteja logado como admin e ative o modo edição.</div>` : ''}
+                    ${!canEdit ? `<div class="hint">Para editar, ative o modo edição.</div>` : ''}
                     ${logged && !isAdmin ? `<div class="hint">Seu perfil não permite editar o menu de Supervisão.</div>` : ''}
                 `}
 
@@ -4375,7 +4385,7 @@ function renderGateway() {
         <div class="gateway-links">
             <button class="btn" onclick="openDunamisProjects()">Clique aqui para conferir os outros sites Dunamis IA</button>
         </div>
-        ${SiteAuth.logged ? `<div class="gateway-logout"><button class="btn btn-secondary btn-small" onclick="logoutSite({ target: 'gateway' })">Sair da conta (${escapeHtml(SiteAuth.email || '')})</button></div>` : ''}
+        ${CONFIG?.auth?.requireLogin && SiteAuth.logged ? `<div class="gateway-logout"><button class="btn btn-secondary btn-small" onclick="logoutSite({ target: 'gateway' })">Encerrar sessão (${escapeHtml(SiteAuth.email || '')})</button></div>` : ''}
     `;
 }
 
@@ -4408,7 +4418,7 @@ function showLoginScreen() {
                             <button class="btn btn-secondary btn-small" onclick="signupSite()">Criar conta</button>
                             <button class="btn btn-secondary btn-small" onclick="requestPasswordReset()">Esqueci senha</button>
                         </div>
-                        <div class="hint">Faça login para liberar o acesso às unidades.</div>
+                        <div class="hint">Informe suas credenciais para liberar o acesso às unidades.</div>
                     </div>
                 </div>
             </div>
@@ -4721,7 +4731,7 @@ function getSupabaseDiagnosticsText() {
         `Sucesso: ${supabaseHealth.lastSuccessAt || '-'}`,
         `Registros: ${supabaseHealth.lastCount || 0}`,
         `Erro: ${supabaseHealth.lastError || '-'}`,
-        `Auth: ${SiteAuth.logged ? `logado (${SiteAuth.email || 'sem-email'})` : 'deslogado'}`
+        `Acesso: ${SiteAuth.logged ? `ativo (${SiteAuth.email || 'sem-email'})` : 'inativo'}`
     ].join('\n');
 }
 
@@ -5015,7 +5025,7 @@ async function loadGroup(groupKey, options = {}) {
                 <span>Falha ao carregar dados</span>
                 <div class="loading-actions">
                     <button class="btn" onclick="loadGroup('${groupKey || 'todos'}')">Tentar novamente</button>
-                    <button class="btn btn-secondary" onclick="logoutSite({ target: 'gateway' })">Sair</button>
+                    ${CONFIG?.auth?.requireLogin ? `<button class="btn btn-secondary" onclick="logoutSite({ target: 'gateway' })">Sair</button>` : ''}
                     <button class="btn btn-secondary" onclick="copySupabaseDiagnostics()">Diagnóstico</button>
                 </div>
             </div>
@@ -5024,13 +5034,13 @@ async function loadGroup(groupKey, options = {}) {
         return;
     }
 
-    if (!SiteAuth.logged && Array.isArray(allItems) && allItems.length === 0) {
+    if (CONFIG?.auth?.requireLogin && !SiteAuth.logged && Array.isArray(allItems) && allItems.length === 0) {
         contentArea.innerHTML = `
             <div class="loading-overlay">
                 <div class="loading-error-icon">!</div>
-                <span>Faça login para carregar os dados</span>
+                <span>Acesso necessário para carregar os dados</span>
                 <div class="loading-actions">
-                    <button class="btn btn-secondary" onclick="logoutSite({ target: 'gateway' })">Voltar ao login</button>
+                    <button class="btn btn-secondary" onclick="logoutSite({ target: 'gateway' })">Voltar</button>
                 </div>
             </div>
         `;
@@ -5045,7 +5055,7 @@ async function loadGroup(groupKey, options = {}) {
                 <p style="font-size:0.85rem;color:#64748b;max-width:340px;text-align:center;">Verifique sua conexão ou tente novamente. Em redes móveis, o carregamento pode ser mais lento.</p>
                 <div class="loading-actions">
                     <button class="btn" onclick="loadGroup('${groupKey || 'todos'}')">Tentar novamente</button>
-                    <button class="btn btn-secondary" onclick="logoutSite({ target: 'gateway' })">Sair e entrar novamente</button>
+                    ${CONFIG?.auth?.requireLogin ? `<button class="btn btn-secondary" onclick="logoutSite({ target: 'gateway' })">Reiniciar acesso</button>` : ''}
                     <button class="btn btn-secondary" onclick="copySupabaseDiagnostics()">Diagnóstico</button>
                 </div>
             </div>
@@ -5794,7 +5804,7 @@ function renderDashboard() {
                         <div class="config-tabs" role="tablist" aria-label="Seções de configuração">
                             <button class="config-tab active" onclick="switchConfigTab('access', this)">
                                 <span class="config-tab-index">01</span>
-                                <span class="config-tab-label">Minha Conta</span>
+                                <span class="config-tab-label">Sistema</span>
                             </button>
                             <button class="config-tab" onclick="switchConfigTab('team', this)">
                                 <span class="config-tab-index">02</span>
@@ -5813,22 +5823,22 @@ function renderDashboard() {
                     <!-- ═══ ABA: MINHA CONTA ═══ -->
                     <div id="config-pane-access" class="config-pane">
                         <div class="config-section">
-                            <div class="config-section-title">Sessão ativa</div>
+                            <div class="config-section-title">Acesso ao sistema</div>
                             <div class="config-grid">
                                 <div class="config-card">
                                     <div class="config-card-header">
-                                        <div class="card-title">Seu perfil</div>
+                                        <div class="card-title">Status</div>
                                     </div>
                                     <div class="config-card-body">
                                         <div id="statusSection">
                                             <div class="status-block">
-                                                <div class="status-row"><span>Usuário</span><span id="userRe"></span></div>
+                                                <div class="status-row"><span>Base</span><span id="userRe"></span></div>
                                                 <div class="status-row"><span>Modo</span><span id="siteMode"></span></div>
-                                                <div class="status-row"><span>Cargo</span><span id="userRoleLabel"></span></div>
+                                                <div class="status-row"><span>Permissão</span><span id="userRoleLabel"></span></div>
                                             </div>
                                             <div class="actions" style="margin-top:12px;">
                                                 <button class="btn" onclick="toggleEditMode()">Alternar Modo Edição</button>
-                                                <button class="btn btn-secondary" onclick="logoutSite()">Sair</button>
+                                                ${CONFIG?.auth?.requireLogin ? `<button class="btn btn-secondary" onclick="logoutSite()">Sair</button>` : ''}
                                             </div>
                                         </div>
                                     </div>
@@ -5836,7 +5846,7 @@ function renderDashboard() {
 
                                 <div class="config-card">
                                     <div class="config-card-header">
-                                        <div class="card-title">Seu cargo e permissões</div>
+                                        <div class="card-title">Permissões do sistema</div>
                                     </div>
                                     <div class="config-card-body">
                                         <div id="myRoleDescription" class="config-note"></div>
@@ -6616,7 +6626,7 @@ function renderDashboard() {
         </div>
     `;
 
-    if (SiteAuth.logged) {
+    if (isPublicAccessMode() || SiteAuth.logged) {
         document.getElementById('config-login')?.classList.add('hidden');
         document.getElementById('config-content')?.classList.remove('hidden');
     } else {
@@ -6826,7 +6836,7 @@ function renderDashboard() {
 function switchTab(tabName, options = {}) {
     closeUtilityDrawer();
     if (tabName === 'avisos' && !SiteAuth.logged) {
-        showToast("Faça login para acessar os avisos.", "error");
+        showToast("Avisos indisponíveis no momento.", "error");
         return;
     }
     clearTabScopedTimers(tabName);
@@ -13708,7 +13718,7 @@ function restoreSupervisaoHistory(index) {
 
 function openAvisosTab() {
     if (!SiteAuth.logged) {
-        showToast("Faça login para acessar os avisos.", "error");
+        showToast("Avisos indisponíveis no momento.", "error");
         return;
     }
     if (!appContainer || appContainer.style.display === 'none') return;
@@ -13898,7 +13908,7 @@ function renderAvisos() {
     const summary = document.getElementById('avisos-assignee-summary');
     if (!list) return;
     if (!SiteAuth.logged) {
-        list.innerHTML = `<p class="empty-state">Faça login para ver os avisos.</p>`;
+        list.innerHTML = `<p class="empty-state">Avisos indisponíveis no momento.</p>`;
         if (summary) summary.textContent = '';
         return;
     }
@@ -13998,7 +14008,7 @@ function closeAvisoForm() {
 
 function openLembreteForm() {
     if (!SiteAuth.logged) {
-        showToast("Faça login para criar lembretes.", "error");
+        showToast("Lembretes indisponíveis no momento.", "error");
         return;
     }
     const form = document.getElementById('lembrete-form');
@@ -14194,7 +14204,7 @@ function syncLembreteUnitWithCollab() {
 
 function createAviso() {
     if (!(SiteAuth.logged)) {
-        showToast("Faça login para criar avisos.", "error");
+        showToast("Criação de avisos indisponível no momento.", "error");
         return;
     }
     if (!isAdminRole()) {
@@ -14265,7 +14275,7 @@ function createAviso() {
 
 function createReminder() {
     if (!(SiteAuth.logged)) {
-        showToast("Faça login para criar lembretes.", "error");
+        showToast("Lembretes indisponíveis no momento.", "error");
         return;
     }
     const assigneeReRaw = document.getElementById('reminder-assignee-select')?.value || '';
@@ -14400,7 +14410,7 @@ function renderAvisosMini() {
     const list = document.getElementById('avisos-mini-list');
     if (!list) return;
     if (!SiteAuth.logged) {
-        list.innerHTML = `<div class="avisos-mini-empty">Faça login para ver avisos.</div>`;
+        list.innerHTML = `<div class="avisos-mini-empty">Avisos indisponíveis no momento.</div>`;
         return;
     }
     const groupKey = currentGroup || 'todos';
@@ -18082,7 +18092,7 @@ async function loginSite(options = {}) {
     }
     const keepCheckEl = document.getElementById('keepLoggedCheck');
     const keepLogged = keepCheckEl ? keepCheckEl.checked : true;
-    showToast('Entrando...', 'loading', { id: 'auth-login', autoClose: false });
+    showToast('Validando acesso...', 'loading', { id: 'auth-login', autoClose: false });
     const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
     hideToastById('auth-login');
     if (error || !data?.session) {
@@ -18105,13 +18115,13 @@ async function loginSite(options = {}) {
         renderSupervisaoHistory();
         updateSupervisaoEditorVisibility();
         updateSupervisaoAdminStatus();
-        showToast("Login efetuado com sucesso.", "success");
+        showToast("Acesso validado com sucesso.", "success");
         return;
     }
     if (target === 'gateway') {
         renderGateway();
         updateMenuStatus();
-        showToast("Login efetuado com sucesso.", "success");
+        showToast("Acesso validado com sucesso.", "success");
         return;
     }
 
@@ -18120,7 +18130,7 @@ async function loginSite(options = {}) {
     switchTab('config');
     renderAdminList();
     renderAuditList();
-    showToast("Login efetuado com sucesso.", "success");
+    showToast("Acesso validado com sucesso.", "success");
 }
 
 async function signupSite(options = {}) {
@@ -18524,6 +18534,7 @@ function updateMenuStatus() {
     const authIndicatorEl = document.getElementById('auth-indicator');
     const quickLogoutBtn = document.getElementById('quick-logout-btn');
     const supabaseMode = CONFIG?.dataSource === 'supabase';
+    const publicMode = isPublicAccessMode();
     const quickActionsNote = document.getElementById('quick-actions-note');
 
     document.querySelectorAll('[data-hide-when-supabase="1"]').forEach(el => {
@@ -18537,7 +18548,9 @@ function updateMenuStatus() {
     }
     
     if (userReEl) {
-        userReEl.innerHTML = SiteAuth.logged
+        userReEl.innerHTML = publicMode
+            ? `<span style="color:#28a745">●</span> Liberada`
+            : SiteAuth.logged
             ? `<span style="color:#28a745">●</span> ${SiteAuth.user || SiteAuth.email || 'Usuário'}`
             : `<span style="color:#666">●</span> Desconectado`;
     }
@@ -18545,7 +18558,9 @@ function updateMenuStatus() {
     const userRoleLabelEl = document.getElementById('userRoleLabel');
     if (userRoleLabelEl) {
         const roleLabel = ROLE_LABELS[SiteAuth.role] || 'Operacional';
-        userRoleLabelEl.innerHTML = SiteAuth.logged
+        userRoleLabelEl.innerHTML = publicMode
+            ? `<span class="status-badge-menu edit">TOTAL</span>`
+            : SiteAuth.logged
             ? `<span class="status-badge-menu view">${roleLabel}</span>`
             : `<span style="color:#666">—</span>`;
     }
@@ -18553,7 +18568,9 @@ function updateMenuStatus() {
     if (siteModeEl) {
         const roleLabel = ROLE_LABELS[SiteAuth.role] || 'Usuário';
         const modeLabel = SiteAuth.mode === 'edit' ? 'EDIÇÃO' : 'VISUALIZAÇÃO';
-        siteModeEl.innerHTML = `<span class="status-badge-menu ${SiteAuth.mode === 'edit' ? 'edit' : 'view'}">${roleLabel.toUpperCase()} • ${modeLabel}</span>`;
+        siteModeEl.innerHTML = publicMode
+            ? `<span class="status-badge-menu edit">EDIÇÃO LIBERADA</span>`
+            : `<span class="status-badge-menu ${SiteAuth.mode === 'edit' ? 'edit' : 'view'}">${roleLabel.toUpperCase()} • ${modeLabel}</span>`;
     }
     
     if (sourceStatusEl) {
@@ -18565,10 +18582,14 @@ function updateMenuStatus() {
     }
 
     if (authIndicatorEl) {
-        if (SiteAuth.logged) {
+        if (publicMode) {
+            authIndicatorEl.classList.add('hidden');
+            authIndicatorEl.textContent = '';
+            authIndicatorEl.removeAttribute('title');
+        } else if (SiteAuth.logged) {
             const roleLabel = ROLE_LABELS[SiteAuth.role] || 'Usuário';
-            authIndicatorEl.innerHTML = `<span class="dot"></span> Logado${SiteAuth.user ? `: ${SiteAuth.user}` : ''}`;
-            authIndicatorEl.title = `Logado como ${SiteAuth.user || 'Usuario'} (${roleLabel})`;
+            authIndicatorEl.innerHTML = `<span class="dot"></span> Conectado${SiteAuth.user ? `: ${SiteAuth.user}` : ''}`;
+            authIndicatorEl.title = `Conectado como ${SiteAuth.user || 'Usuario'} (${roleLabel})`;
             authIndicatorEl.classList.remove('hidden');
         } else {
             authIndicatorEl.classList.add('hidden');
@@ -18578,7 +18599,13 @@ function updateMenuStatus() {
     }
 
     if (quickLogoutBtn) {
-        quickLogoutBtn.classList.toggle('hidden', !SiteAuth.logged);
+        quickLogoutBtn.classList.toggle('hidden', publicMode || !SiteAuth.logged);
+    }
+
+    if (publicMode) {
+        document.querySelectorAll('.gateway-logout, [onclick^="logoutSite"]').forEach(el => {
+            el.classList.add('hidden');
+        });
     }
 
     renderEscalaInvertidaUI();
@@ -18729,8 +18756,20 @@ const ROLE_PERM_DESCRIPTIONS = {
 function renderMyRoleDescription() {
     const el = document.getElementById('myRoleDescription');
     if (!el) return;
+    if (isPublicAccessMode()) {
+        el.innerHTML = `
+            <div class="role-detail-card">
+                <div class="role-detail-header">
+                    <span class="role-badge role-administrador">Acesso liberado</span>
+                    <span class="role-groups-text">Todos os grupos</span>
+                </div>
+                <p class="role-summary">Consulta e edição estão disponíveis diretamente, sem etapa de autenticação.</p>
+            </div>
+        `;
+        return;
+    }
     if (!SiteAuth.logged) {
-        el.innerHTML = '<span style="color:#666">Faça login para ver suas permissões.</span>';
+        el.innerHTML = '<span style="color:#666">Permissões indisponíveis no momento.</span>';
         return;
     }
     const role = SiteAuth.role || 'operacional';
