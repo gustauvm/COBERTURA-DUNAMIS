@@ -9,6 +9,7 @@
     "build": "node scripts/build-modern.js",
     "build:vite": "vite build",
     "preview": "vite preview",
+    "sync:sheet": "node scripts/sync-xlsx-to-supabase.js",
     "check": "node --check app.js && node --check config.js && node --check sw.js",
     "lint": "eslint app.js sw.js config.js scripts/*.js",
     "lint:fix": "eslint app.js sw.js config.js scripts/*.js --fix",
@@ -21,6 +22,8 @@
     "globals": "^16.0.0",
     "http-server": "^14.1.1",
     "prettier": "^3.5.3",
-    "vite": "^6.2.1"
+    "supabase": "^2.92.1",
+    "vite": "^6.2.1",
+    "xlsx": "^0.18.5"
   }
 }
