@@ -946,6 +946,23 @@ function updateAuthUiState() {
     }
 }
 
+function enablePublicAccessMode() {
+    // Public mode: no login required, grant full access and keep realtime enabled.
+    SiteAuth.logged = true;
+    SiteAuth.mode = 'edit';
+    SiteAuth.user = 'Acesso Público';
+    SiteAuth.re = null;
+    SiteAuth.role = 'administrador';
+    SiteAuth.email = null;
+    SiteAuth.id = 'public';
+    SiteAuth.groups = (CONFIG?.groupRules || []).map(g => g.key);
+    SiteAuth.profile = null;
+    document.body.classList.add('mode-edit');
+    updateAuthUiState();
+    updateMenuStatus();
+    _setupRealtimeSubscriptions();
+}
+
 async function loadOrCreateProfile(user) {
     if (!isSupabaseReady() || !user?.id) return null;
     try {
@@ -3510,7 +3527,13 @@ const AppBootstrapper = {
             loadCollaboratorAddressDb();
         });
 
-        this._runStep('auth', () => initSupabaseAuth());
+        this._runStep('auth', () => {
+            if (CONFIG?.auth?.requireLogin) {
+                initSupabaseAuth();
+                return;
+            }
+            enablePublicAccessMode();
+        });
 
         this._runStep('ui', () => {
             document.body.classList.add('on-gateway');
