@@ -128,6 +128,19 @@ let searchSelectAll = false;
 let searchFilterGroup = 'all';
 let searchFilterCargo = 'all';
 let searchFilterEscala = 'all';
+let quickBetaState = {
+    query: '',
+    status: 'all',
+    group: 'all',
+    posto: 'all',
+    cargo: 'all',
+    escala: 'all',
+    turno: 'all',
+    turma: 'all',
+    selectedKey: ''
+};
+let quickBetaRowsCache = [];
+let quickBetaUnitIndex = new Map();
 let searchRenderedCount = 0;
 let searchTotalFiltered = 0;
 let searchFilteredCache = [];
@@ -475,14 +488,19 @@ const APP_NAV_PARAMS = Object.freeze({
     tab: 'appTab'
 });
 const APP_NAV_STORAGE_KEY = 'dunamisNavStateV1';
-const DASHBOARD_TABS = new Set(['busca', 'unidades', 'avisos', 'reciclagem', 'lancamentos', 'config', 'collab-detail']);
+const DASHBOARD_TABS = new Set(['busca', 'busca-beta', 'unidades', 'avisos', 'reciclagem', 'lancamentos', 'config', 'collab-detail']);
+const DISABLED_DASHBOARD_TABS = new Set(['avisos', 'reciclagem', 'lancamentos']);
 let appNavBound = false;
 let appNavApplying = false;
+
+function isDashboardFeatureEnabled(featureName) {
+    return !DISABLED_DASHBOARD_TABS.has(String(featureName || '').trim());
+}
 
 function normalizeDashboardTab(tabName) {
     const tab = String(tabName || '').trim();
     if (!DASHBOARD_TABS.has(tab)) return 'busca';
-    if (tab === 'avisos' && !SiteAuth.logged) return 'busca';
+    if (!isDashboardFeatureEnabled(tab)) return 'busca';
     return tab;
 }
 
@@ -1256,6 +1274,14 @@ const CONTEXT_HELP_CONTENT = {
             'Botão de mapa vermelho indica endereço não cadastrado.'
         ]
     },
+    'busca-beta': {
+        title: 'Busca Rápida Beta',
+        lines: [
+            'Consulta profissional read-only com vínculo entre colaboradores e unidades.',
+            'Plantão e folga seguem somente a coluna TURMA da planilha.',
+            'Abra o painel lateral para ver todos os dados disponíveis.'
+        ]
+    },
     unidades: {
         title: 'Unidades',
         lines: [
@@ -1376,6 +1402,7 @@ function updateBreadcrumb() {
     const groupLabelMap = getGroupLabelMap();
     const tabLabelMap = {
         busca: 'Busca Rápida',
+        'busca-beta': 'Busca Rápida Beta',
         unidades: 'Unidades',
         gerencia: 'Gerência',
         supervisao: 'Supervisão',
@@ -1654,44 +1681,6 @@ function toggleSearchAdvanced() {
     if (panel) panel.classList.toggle('hidden', !searchAdvancedOpen);
 }
 
-function toggleInvertPanelOpen() {
-    const panel = document.getElementById('invert-plantao-panel');
-    if (!panel) return;
-    if (!panel.classList.contains('hidden')) { panel.classList.add('hidden'); return; }
-    const isAll = !currentGroup || currentGroup === 'todos';
-    const groupLabel = isAll ? null : (getGroupLabelMap()[currentGroup] || currentGroup);
-    const scope = isAll
-        ? 'todos os colaboradores de <strong>todos os grupos</strong>'
-        : `todos os colaboradores do grupo <strong>${escapeHtml(groupLabel)}</strong>`;
-    const groups = (CONFIG?.groupRules || []).map(r => r?.key).filter(Boolean);
-    const isEffInverted = isAll
-        ? groups.length > 0 && groups.every(k => isGroupInvertido(k))
-        : isGroupInvertido(currentGroup);
-    const effect = isEffInverted
-        ? 'PLANTÃO voltará a aparecer como <strong>PLANTÃO</strong> e FOLGA como <strong>FOLGA</strong>.'
-        : 'PLANTÃO passará a aparecer como <strong>FOLGA</strong> e FOLGA como <strong>PLANTÃO</strong>.';
-    panel.innerHTML = `
-        <div class="bip-panel-inner">
-            <span class="bip-panel-icon">⇄</span>
-            <span class="bip-text">Afeta ${scope}. ${effect}</span>
-            <div class="bip-panel-actions">
-                <button class="btn btn-danger" onclick="confirmInvertPlantao()">Confirmar</button>
-                <button class="btn btn-secondary" onclick="document.getElementById('invert-plantao-panel').classList.add('hidden')">Cancelar</button>
-            </div>
-        </div>
-    `;
-    panel.classList.remove('hidden');
-}
-
-function confirmInvertPlantao() {
-    toggleEscalaInvertida(currentGroup);
-    const panel = document.getElementById('invert-plantao-panel');
-    if (panel) panel.classList.add('hidden');
-    if (currentTab === 'collab-detail' && detailPageState?.item) {
-        renderCollabDetailPage(findCollaboratorById(detailPageState.item.id ?? detailPageState.item.re));
-    }
-}
-
 function applySearchDatePreset(preset) {
     const today = getTodayKey();
     if (preset === 'today') {
@@ -1804,8 +1793,9 @@ function computeSearchFilterCounts(term = '') {
         const statusInfo = getStatusInfoForFilter(item);
         const text = String(statusInfo?.text || '');
         const isPlantao = text.includes('PLANTÃO') || text.includes('FT');
+        const isFolga = text === 'FOLGA';
         if (isPlantao) counts.plantao += 1;
-        if (!isPlantao) counts.folga += 1;
+        if (isFolga) counts.folga += 1;
         if (text.includes('FT')) counts.ft += 1;
         if (item.rotulo) counts.afastado += 1;
         if (isCollaboratorFavorite(item.re)) counts.favorites += 1;
@@ -2016,6 +2006,7 @@ function loadLocalState() {
 }
 
 function loadAvisos() {
+    if (!isDashboardFeatureEnabled('avisos')) return;
     try {
         const stored = localStorage.getItem('avisos');
         avisos = stored ? JSON.parse(stored) || [] : [];
@@ -2038,6 +2029,7 @@ function loadAvisos() {
 }
 
 function saveAvisos(silent = false) {
+    if (!isDashboardFeatureEnabled('avisos')) return;
     localStorage.setItem('avisos', JSON.stringify(avisos));
     localStorage.setItem('avisosSeen', JSON.stringify(Array.from(avisosSeenIds)));
     scheduleLocalSync('avisos', { silent, notify: !silent });
@@ -2441,6 +2433,7 @@ function saveFtLaunches(silent = false) {
 }
 
 function loadFtReasons() {
+    if (!isDashboardFeatureEnabled('lancamentos')) return;
     try {
         const stored = localStorage.getItem('ftReasons');
         ftReasons = stored ? JSON.parse(stored) || [] : [];
@@ -2453,6 +2446,7 @@ function loadFtReasons() {
 }
 
 function saveFtReasons(silent = false) {
+    if (!isDashboardFeatureEnabled('lancamentos')) return;
     localStorage.setItem('ftReasons', JSON.stringify(ftReasons));
     scheduleLocalSync('ft-reasons', { silent, notify: !silent });
 }
@@ -2762,6 +2756,8 @@ async function _loadAppSetting(key) {
 
 async function _loadAllAppSettings() {
     if (!supabaseClient || !SiteAuth.logged) return;
+    const lancamentosEnabled = isDashboardFeatureEnabled('lancamentos');
+    const reciclagemEnabled = isDashboardFeatureEnabled('reciclagem');
     try {
         const { data, error } = await supabaseClient
             .from(SUPABASE_TABLES.app_settings)
@@ -2772,7 +2768,7 @@ async function _loadAllAppSettings() {
             try {
                 switch (row.key) {
                     case 'ftReasons':
-                        if (Array.isArray(row.value) && row.value.length) {
+                        if (lancamentosEnabled && Array.isArray(row.value) && row.value.length) {
                             ftReasons = row.value;
                             localStorage.setItem('ftReasons', JSON.stringify(ftReasons));
                         }
@@ -2797,16 +2793,24 @@ async function _loadAllAppSettings() {
                         }
                         break;
                     case 'reciclagemTemplates':
-                        localStorage.setItem('reciclagemTemplates', JSON.stringify(row.value || []));
+                        if (reciclagemEnabled) {
+                            localStorage.setItem('reciclagemTemplates', JSON.stringify(row.value || []));
+                        }
                         break;
                     case 'reciclagemOverrides':
-                        localStorage.setItem('reciclagemOverrides', JSON.stringify(row.value || {}));
+                        if (reciclagemEnabled) {
+                            localStorage.setItem('reciclagemOverrides', JSON.stringify(row.value || {}));
+                        }
                         break;
                     case 'reciclagemHistory':
-                        localStorage.setItem('reciclagemHistory', JSON.stringify(row.value || []));
+                        if (reciclagemEnabled) {
+                            localStorage.setItem('reciclagemHistory', JSON.stringify(row.value || []));
+                        }
                         break;
                     case 'reciclagemNotes':
-                        localStorage.setItem('reciclagemNotes', JSON.stringify(row.value || {}));
+                        if (reciclagemEnabled) {
+                            localStorage.setItem('reciclagemNotes', JSON.stringify(row.value || {}));
+                        }
                         break;
                     case 'supervisaoMenu':
                         localStorage.setItem('supervisaoMenu', JSON.stringify(row.value || []));
@@ -2913,6 +2917,7 @@ async function loadFtLaunchesFromSupabase() {
 }
 
 async function loadAvisosFromSupabase() {
+    if (!isDashboardFeatureEnabled('avisos')) return false;
     if (!supabaseClient) return false;
     try {
         const PAGE_SIZE = 1000;
@@ -2988,32 +2993,39 @@ function _setupRealtimeSubscriptions() {
     if (!supabaseClient) return;
     _cleanupRealtimeSubscriptions();
     try {
-        _realtimeChannel = supabaseClient
+        let channel = supabaseClient
             .channel('dunamis-realtime')
             .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLES.colaboradores }, () => {
                 invalidateCollaboratorsCache();
                 fetchSupabaseCollaborators(true).then(data => {
-                    if (data && data.length) {
+                    if (Array.isArray(data)) {
                         currentData = data;
                         realizarBusca();
+                        if (currentTab === 'busca-beta') renderQuickBetaSearch();
                         renderizarUnidades();
                     }
                 });
             })
             .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLES.unidades }, () => {
                 supaUnitsCache = { items: null, updatedAt: 0 };
-                fetchSupabaseUnits(true).then(() => renderizarUnidades());
+                fetchSupabaseUnits(true).then(() => {
+                    renderizarUnidades();
+                    if (currentTab === 'busca-beta') renderQuickBetaSearch();
+                });
             })
             .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLES.ft_launches }, () => {
                 loadFtLaunchesFromSupabase().then(loaded => {
                     if (loaded) updateLancamentosUI();
                 });
-            })
-            .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLES.avisos }, () => {
+            });
+        if (isDashboardFeatureEnabled('avisos')) {
+            channel = channel.on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLES.avisos }, () => {
                 loadAvisosFromSupabase().then(loaded => {
                     if (loaded) updateAvisosUI();
                 });
-            })
+            });
+        }
+        _realtimeChannel = channel
             .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLES.app_settings }, () => {
                 _loadAllAppSettings();
             })
@@ -3510,15 +3522,21 @@ const AppBootstrapper = {
         this._runStep('local-state', () => {
             loadLocalState();
             hydrateManagedCachesFromLegacy();
-            loadAvisos();
             loadFtAuditTrail();
             loadFtLaunches();
             refreshFtLabelsForToday();
-            loadFtReasons();
-            loadReciclagemTemplates();
-            loadReciclagemOverrides();
-            loadReciclagemHistory();
-            loadReciclagemNotes();
+            if (isDashboardFeatureEnabled('avisos')) {
+                loadAvisos();
+            }
+            if (isDashboardFeatureEnabled('lancamentos')) {
+                loadFtReasons();
+            }
+            if (isDashboardFeatureEnabled('reciclagem')) {
+                loadReciclagemTemplates();
+                loadReciclagemOverrides();
+                loadReciclagemHistory();
+                loadReciclagemNotes();
+            }
             loadSupervisaoMenu();
             loadSupervisaoHistory();
             loadSupervisaoFavorites();
@@ -3528,7 +3546,9 @@ const AppBootstrapper = {
 
         this._runStep('monitors', () => {
             startAutoEscalaMonitor();
-            startReminderMonitor();
+            if (isDashboardFeatureEnabled('avisos')) {
+                startReminderMonitor();
+            }
         });
 
         this._runStep('resources', () => {
@@ -3596,23 +3616,9 @@ function getCommandPaletteCommands() {
     const commands = [];
     const push = (label, keywords, action) => commands.push({ label, keywords, action });
     push('Abrir Busca Rápida', 'busca pesquisar colaborador', () => openTabFromCommand('busca'));
+    push('Abrir Busca Rápida Beta', 'busca beta disponibilidade plantao folga colaborador', () => openTabFromCommand('busca-beta'));
     push('Abrir Unidades', 'unidades postos', () => openTabFromCommand('unidades'));
-    push('Abrir Avisos', 'avisos pendencias lembretes', () => openTabFromCommand('avisos'));
-    push('Abrir Reciclagem', 'reciclagem validade', () => openTabFromCommand('reciclagem'));
-    push('Abrir Lançamentos', 'ft lancamentos diaria', () => openTabFromCommand('lancamentos'));
     push('Abrir Configuração', 'configuracao settings', () => openTabFromCommand('config'));
-    push('Lançamentos • Aba Diária', 'lancamentos diaria foco dia', () => {
-        openTabFromCommand('lancamentos', () => switchLancamentosTab('diaria'));
-    });
-    push('Lançamentos • Indicadores FT', 'lancamentos dashboard ft', () => {
-        openTabFromCommand('lancamentos', () => switchLancamentosTab('dashboard'));
-    });
-    push('Lançamentos • Planejamento', 'lancamentos planejamento semanal mensal', () => {
-        openTabFromCommand('lancamentos', () => switchLancamentosTab('planejamento'));
-    });
-    push('Lançamentos • Troca de folga', 'lancamentos troca erros', () => {
-        openTabFromCommand('lancamentos', () => switchLancamentosMode('troca'));
-    });
     push('Abrir Supervisão', 'supervisao menu links', () => openSupervisaoPage());
     push('Abrir Gerência', 'gerencia placeholder', () => openGerenciaPage());
     push('Voltar para Página Inicial', 'inicio home gateway', () => resetToGateway());
@@ -4596,6 +4602,13 @@ function pickRePadrao(row) {
     return row?.re_padrao || row?.re_padrap || '';
 }
 
+function pickFirstDefined(...values) {
+    for (const value of values) {
+        if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return '';
+}
+
 function normalizePhoneValue(value) {
     return String(value || '').replace(/\D/g, '');
 }
@@ -4607,7 +4620,8 @@ function mapSupabaseCollaboratorRow(row) {
         _collabReColumnDetected = true;
     }
     const rePadrao = String(pickRePadrao(row) || '').trim();
-    const re = rePadrao || String(row?.matricula || row?.re_folha || '').trim();
+    const reNovo = pickFirstDefined(row?.re_folha, row?.re_novo);
+    const re = rePadrao || String(row?.matricula || reNovo || '').trim();
     const nome = String(row?.colaborador || row?.nome || '').trim().toUpperCase();
     const posto = String(row?.posto || '').trim().toUpperCase();
     const escalaRaw = String(row?.escala || '').trim();
@@ -4615,11 +4629,23 @@ function mapSupabaseCollaboratorRow(row) {
     const turma = parseInt(row?.turma, 10);
     const unidadeNegocio = String(row?.unidade_de_negocio || '').trim();
     const grupo = inferGroupKeyFromRow(row);
+    const dataAdmissao = pickFirstDefined(row?.data_admissao, row?.admissao);
+    const reciclagemBombeiro = pickFirstDefined(row?.["reciclagem bombeiro"], row?.reciclagem_bombeiro);
+    const nr10 = pickFirstDefined(row?.nr_10, row?.nr10);
+    const nr20 = pickFirstDefined(row?.nr_20, row?.nr20);
+    const nr33 = pickFirstDefined(row?.nr_33, row?.nr33);
+    const nr35 = pickFirstDefined(row?.nr_35, row?.nr35);
+    const telefoneEmergencia = pickFirstDefined(row?.telefone_emergencia, row?.telefone_de_emergencia);
+    const enderecoColaborador = pickFirstDefined(row?.endereco_colaborador, row?.endereco);
+    const reciclagemCnvVigilante = pickFirstDefined(row?.reciclagem_cnv_vigilante, row?.cnv_vigilante);
     return {
-        dbId: String(row?.matricula || rePadrao || row?.re_folha || row?.cpf || '').trim(),
+        ...row,
+        __raw: row,
+        dbId: String(row?.matricula || rePadrao || reNovo || row?.cpf || '').trim(),
         nome,
         re,
-        re_folha: row?.re_folha || '',
+        re_folha: reNovo || '',
+        re_novo: row?.re_novo || row?.re_folha || '',
         re_padrao: rePadrao,
         matricula: row?.matricula || '',
         colaborador: row?.colaborador || row?.nome || '',
@@ -4630,17 +4656,23 @@ function mapSupabaseCollaboratorRow(row) {
         turno: row?.turno || '',
         telefone: normalizePhoneValue(row?.telefone || ''),
         cpf: row?.cpf ? String(row.cpf) : '',
-        data_admissao: row?.data_admissao || '',
+        data_admissao: dataAdmissao || '',
+        admissao: dataAdmissao || '',
         empresa: row?.empresa || '',
         cliente: row?.cliente || '',
-        turma: Number.isFinite(turma) ? turma : 1,
+        turma: Number.isFinite(turma) ? turma : '',
         ferias: row?.ferias || '',
         aso: row?.aso || '',
-        "reciclagem bombeiro": row?.["reciclagem bombeiro"] || row?.reciclagem_bombeiro || '',
-        nr_10: row?.nr_10 || '',
-        nr_20: row?.nr_20 || '',
-        nr_33: row?.nr_33 || '',
-        nr_35: row?.nr_35 || '',
+        "reciclagem bombeiro": reciclagemBombeiro || '',
+        reciclagem_bombeiro: reciclagemBombeiro || '',
+        nr_10: nr10 || '',
+        nr_20: nr20 || '',
+        nr_33: nr33 || '',
+        nr_35: nr35 || '',
+        nr10: nr10 || '',
+        nr20: nr20 || '',
+        nr33: nr33 || '',
+        nr35: nr35 || '',
         dea: row?.dea || '',
         heliponto: row?.heliponto || '',
         uniforme: row?.uniforme || '',
@@ -4654,18 +4686,22 @@ function mapSupabaseCollaboratorRow(row) {
         rg: row?.rg || '',
         atestados: row?.atestados || '',
         reciclagem_vigilante: row?.reciclagem_vigilante || '',
-        reciclagem_cnv_vigilante: row?.reciclagem_cnv_vigilante || '',
-        telefone_emergencia: row?.telefone_emergencia || '',
+        reciclagem_cnv_vigilante: reciclagemCnvVigilante || '',
+        cnv_vigilante: reciclagemCnvVigilante || '',
+        numeracao_cnv: row?.numeracao_cnv || '',
+        telefone_emergencia: telefoneEmergencia || '',
+        telefone_de_emergencia: telefoneEmergencia || '',
         data_nascimento: row?.data_nascimento || '',
         idade: row?.idade || '',
         unidade_de_negocio: unidadeNegocio,
-        endereco_colaborador: row?.endereco_colaborador || '',
+        endereco_colaborador: enderecoColaborador || '',
         email_login: row?.email_login || '',
         rotulo: row?.rotulo || '',
         rotuloInicio: row?.rotulo_inicio || row?.rotuloInicio || '',
         rotuloFim: row?.rotulo_fim || row?.rotuloFim || '',
         rotuloDetalhe: row?.rotulo_detalhe || row?.rotuloDetalhe || '',
-        endereco: row?.endereco_colaborador || '',
+        endereco: enderecoColaborador || '',
+        pasta_google_drive: row?.pasta_google_drive || '',
         grupoLabel: unidadeNegocio,
         grupo
     };
@@ -4940,11 +4976,36 @@ async function fetchSupabaseUnits(force = false) {
             AppErrorHandler.capture(fetchError, { scope: 'supabase-unidades' }, { silent: true });
             return supaUnitsCache.items || [];
         }
-        const mapped = (allRows).map(row => ({
-            ...row,
-            nome: String(row?.posto || row?.cliente || row?.unidade_de_negocio || '').trim().toUpperCase(),
-            endereco_formatado: formatUnitAddress(row)
-        }));
+        const mapped = (allRows).map(row => {
+            const unidadeNegocio = pickFirstDefined(
+                row?.unidade_de_negocio,
+                row?.unidade_de_negocio_vigilancia,
+                row?.unidade_de_negocio_servicos,
+                row?.unidade_de_negocio_rb
+            );
+            const empresa = pickFirstDefined(
+                row?.empresa,
+                row?.empresa_bombeiros,
+                row?.empresa_servicos,
+                row?.empresa_seguranca,
+                row?.empresa_rb
+            );
+            const dataImplantacao = pickFirstDefined(row?.data_implantacao, row?.data_de_implantacao);
+            const modalidadeReciclagem = pickFirstDefined(row?.modalidade_reciclagem, row?.modalidade_reciclagem_bombeiros, row?.modalidade_reciclagem_de_bombeiros);
+            const heliponto = pickFirstDefined(row?.heliponto, row?.heliponto_na_unidade);
+            const pcms = pickFirstDefined(row?.pcms, row?.pcmso);
+            return {
+                ...row,
+                nome: String(row?.posto || row?.cliente || unidadeNegocio || '').trim().toUpperCase(),
+                unidade_de_negocio: unidadeNegocio || '',
+                empresa: empresa || '',
+                data_implantacao: dataImplantacao || '',
+                modalidade_reciclagem: modalidadeReciclagem || '',
+                heliponto: heliponto || '',
+                pcms: pcms || '',
+                endereco_formatado: formatUnitAddress(row)
+            };
+        });
         supaUnitsCache = { items: mapped, updatedAt: now };
         return mapped;
     } catch (err) {
@@ -5158,7 +5219,7 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap, addressMap) {
             grupoLabel: grupoLabel,
             escala: rawEscala.replace("PRE-ASSINALADO", "").replace("12x36", "").replace("5x2", "").replace("6x1", "").trim(),
             tipoEscala: tipoEscala,
-            turma: parseInt(cols[3]) || 1, // Padrão 1 se falhar, igual ao original
+            turma: parseInt(cols[3]) || '',
             rotulo: '', // Campo para afastamentos/rótulos
             rotuloInicio: '',
             rotuloFim: '',
@@ -5299,9 +5360,21 @@ function getAddressForCollaborator(collab) {
     return collab.endereco || getCollaboratorAddressByRe(collab.re);
 }
 
+function getMapsLocationForCollab(collab, mode = 'endereco') {
+    if (!collab) return '';
+    const normalizedMode = String(mode || 'endereco').toLowerCase();
+    if (normalizedMode === 'posto') {
+        return String(collab.posto || '').trim();
+    }
+    return String(getAddressForCollaborator(collab) || collab.posto || '').trim();
+}
+
 // 4. Renderizar Dashboard (Sistema de Abas)
 function renderDashboard() {
-    const canManageLancamentos = isAdminRole();
+    const avisosEnabled = isDashboardFeatureEnabled('avisos');
+    const reciclagemEnabled = isDashboardFeatureEnabled('reciclagem');
+    const lancamentosEnabled = isDashboardFeatureEnabled('lancamentos');
+    const canManageLancamentos = lancamentosEnabled && isAdminRole();
     searchAdvancedOpen = false;
     contentArea.innerHTML = `
         <div class="breadcrumb-bar">
@@ -5320,10 +5393,8 @@ function renderDashboard() {
         <!-- Navegação de Abas -->
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('busca')">${ICONS.search} Busca Rápida</button>
+            <button class="tab-btn" onclick="switchTab('busca-beta')">${ICONS.search} Busca Rápida Beta</button>
             <button class="tab-btn" onclick="switchTab('unidades')">${ICONS.building} Unidades</button>
-            ${SiteAuth.logged ? `<button class="tab-btn" onclick="switchTab('avisos')">${ICONS.bell} Avisos <span id="avisos-tab-badge" class="tab-badge hidden">0</span></button>` : ''}
-            <button class="tab-btn" onclick="switchTab('reciclagem')">${ICONS.recycle} Reciclagem</button>
-            <button class="tab-btn" onclick="switchTab('lancamentos')">${ICONS.launch} Lançamentos</button>
             <button class="tab-btn" onclick="switchTab('config')">${ICONS.settings} Configuração</button>
         </div>
 
@@ -5336,12 +5407,7 @@ function renderDashboard() {
                                placeholder="Nome, RE, posto, cargo, empresa, escala, telefone..." autocomplete="off">
                         <button id="search-clear-btn" type="button" class="search-clear-btn hidden" onclick="clearSearchInput()" aria-label="Limpar busca">&times;</button>
                     </div>
-                    <button id="btn-invert-plantao" type="button" class="btn-invert-plantao" onclick="toggleInvertPanelOpen()">
-                        <span class="bip-icon">⇄</span>
-                        <span class="bip-label">INVERTER PLANTÃO</span>
-                    </button>
                 </div>
-                <div id="invert-plantao-panel" class="invert-plantao-panel hidden"></div>
                 <div id="search-autocomplete" class="search-autocomplete hidden"></div>
                 <div id="search-suggestions" class="search-suggestions hidden"></div>
                 <div class="search-filters-compact">
@@ -5394,6 +5460,69 @@ function renderDashboard() {
             <div id="search-results" class="results-grid"></div>
         </div>
 
+        <div id="tab-content-busca-beta" class="tab-content hidden">
+            <section class="qbeta-shell">
+                <div class="qbeta-hero">
+                    <div>
+                        <span class="qbeta-eyebrow">Beta operacional</span>
+                        <h2>Busca Rápida Beta</h2>
+                        <p>Consulta read-only para localizar colaboradores, status de plantão/folga e dados completos vinculados à unidade.</p>
+                    </div>
+                    <div class="qbeta-hero-meta">
+                        <span>Fonte: Supabase</span>
+                        <strong id="qbeta-updated">Base carregada</strong>
+                    </div>
+                </div>
+
+                <div class="qbeta-search-panel">
+                    <div class="qbeta-search-main">
+                        <label for="qbeta-search-input">Buscar colaborador, matrícula, posto, cargo, telefone ou dados da unidade</label>
+                        <div class="qbeta-search-box">
+                            ${ICONS.search}
+                            <input id="qbeta-search-input" type="text" placeholder="Digite algumas letras para filtrar..." autocomplete="off" oninput="setQuickBetaFilter('query', this.value)">
+                            <button type="button" onclick="clearQuickBetaSearch()">Limpar</button>
+                        </div>
+                    </div>
+                    <div class="qbeta-filter-grid">
+                        <select id="qbeta-status-filter" onchange="setQuickBetaFilter('status', this.value)">
+                            <option value="all">Todos os status</option>
+                            <option value="plantao">Plantão</option>
+                            <option value="folga">Folga</option>
+                        </select>
+                        <select id="qbeta-group-filter" onchange="setQuickBetaFilter('group', this.value)"></select>
+                        <select id="qbeta-posto-filter" onchange="setQuickBetaFilter('posto', this.value)"></select>
+                        <select id="qbeta-cargo-filter" onchange="setQuickBetaFilter('cargo', this.value)"></select>
+                        <select id="qbeta-escala-filter" onchange="setQuickBetaFilter('escala', this.value)"></select>
+                        <select id="qbeta-turno-filter" onchange="setQuickBetaFilter('turno', this.value)"></select>
+                        <select id="qbeta-turma-filter" onchange="setQuickBetaFilter('turma', this.value)">
+                            <option value="all">Todas as turmas</option>
+                            <option value="1">Turma 1 · ímpar</option>
+                            <option value="2">Turma 2 · par</option>
+                            <option value="invalid">Sem turma</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="qbeta-kpis" class="qbeta-kpis"></div>
+
+                <div class="qbeta-workspace">
+                    <div class="qbeta-results-pane">
+                        <div class="qbeta-results-head">
+                            <strong id="qbeta-result-count">0 colaboradores</strong>
+                            <span id="qbeta-duty-rule">Turma 1: ímpar · Turma 2: par</span>
+                        </div>
+                        <div id="qbeta-results-list" class="qbeta-results-list"></div>
+                    </div>
+                    <aside id="qbeta-detail-panel" class="qbeta-detail-panel">
+                        <div class="qbeta-empty-detail">
+                            <strong>Selecione um colaborador</strong>
+                            <span>O painel exibirá dados completos da planilha e da unidade vinculada.</span>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+        </div>
+
         <div id="tab-content-unidades" class="tab-content hidden">
             <!-- Barra de Estatísticas -->
             <div id="stats-bar" class="stats-bar"></div>
@@ -5444,6 +5573,7 @@ function renderDashboard() {
             <div id="units-list"></div>
         </div>
 
+        ${avisosEnabled ? `
         <div id="tab-content-avisos" class="tab-content hidden">
             <div class="avisos-shell">
                 <div class="avisos-panel">
@@ -5607,7 +5737,9 @@ function renderDashboard() {
                 </div>
             </div>
         </div>
+        ` : ''}
 
+        ${reciclagemEnabled ? `
         <div id="tab-content-reciclagem" class="tab-content hidden">
             <div class="reciclagem-shell">
                 <div class="reciclagem-header">
@@ -5666,7 +5798,9 @@ function renderDashboard() {
                 <div id="reciclagem-type-counts" class="reciclagem-type-counts"></div>
             </div>
         </div>
+        ` : ''}
 
+        ${lancamentosEnabled ? `
         <div id="tab-content-lancamentos" class="tab-content hidden">
             <div class="lancamentos-shell">
                 <div class="lancamentos-top">
@@ -5769,6 +5903,7 @@ function renderDashboard() {
                 </div>
             </div>
         </div>
+        ` : ''}
 
         <div id="tab-content-config" class="tab-content hidden">
             <div class="config-shell">
@@ -5975,23 +6110,23 @@ function renderDashboard() {
                             <div class="config-grid">
                                 <div class="config-card">
                                     <div class="config-card-header">
-                                        <div class="card-title">Inversão de escala</div>
+                                        <div class="card-title">Regra oficial por TURMA</div>
                                     </div>
                                     <div class="config-card-body">
                                         <div class="field-row">
-                                            <label>Inversão manual</label>
+                                            <label>Status operacional</label>
                                             <div class="actions">
-                                                <button class="btn btn-secondary" onclick="toggleEscalaInvertida('todos')">Inverter plantão (todos)</button>
-                                                <span id="escala-invertida-status" class="status-badge-menu view">Padrão</span>
+                                                <span class="status-badge-menu view">TURMA ativa</span>
                                             </div>
                                         </div>
-                                        <div class="config-note">Inversão automática no início de meses pares. Use este botão como correção manual.</div>
-                                        <div class="config-note">Turma 1 → dias pares, Turma 2 → dias ímpares. Afeta busca, dashboards e exportações.</div>
+                                        <div class="config-note">A busca usa exclusivamente a coluna TURMA da planilha.</div>
+                                        <div class="config-note">Turma 1 → plantão em dias ímpares e folga em dias pares. Turma 2 → plantão em dias pares e folga em dias ímpares.</div>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
+                        ${lancamentosEnabled ? `
                         <div class="config-section">
                             <div class="config-section-title">Lançamentos de FT</div>
                             <div class="config-grid">
@@ -6012,6 +6147,7 @@ function renderDashboard() {
                                 </div>
                             </div>
                         </div>
+                        ` : ''}
 
                         <div class="config-section">
                             <div class="config-section-title">Ações rápidas</div>
@@ -6453,15 +6589,15 @@ function renderDashboard() {
                             <div class="help-section">
                                 <h4>1. Visão geral e acesso</h4>
                                 <ol>
-                                    <li>Use o sistema para visualizar escalas, unidades, avisos, reciclagem e lançamentos de FT.</li>
-                                    <li>Perfis com permissão (admin/supervisor) liberam ações de edição e lançamentos.</li>
+                                    <li>Use o sistema para consultar colaboradores, escalas e unidades com foco operacional.</li>
+                                    <li>Perfis com permissão liberam ações de edição nas áreas principais.</li>
                                     <li>Se estiver em modo visualização, você poderá navegar e consultar, mas não salvar alterações.</li>
                                 </ol>
                             </div>
                             <div class="help-section">
                                 <h4>2. Navegação principal</h4>
                                 <ol>
-                                    <li>Use as abas superiores para trocar entre Busca Rápida, Unidades, Avisos, Reciclagem, Lançamentos e Configuração.</li>
+                                    <li>Use as abas superiores para trocar entre Busca Rápida, Unidades e Configuração.</li>
                                     <li>O menu de Supervisão fica na página inicial (tela de seleção), sem precisar escolher unidade.</li>
                                     <li>O breadcrumb no topo mostra o grupo atual e a aba ativa.</li>
                                     <li>Os botões utilitários (Imprimir, Ajuda, Prompts e Guia) ficam no canto superior.</li>
@@ -6510,63 +6646,18 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>6. Avisos e lembretes</h4>
-                                <ol>
-                                    <li>Admins podem criar avisos gerais e lembretes direcionados por grupo ou RE.</li>
-                                    <li>Colaboradores visualizam apenas avisos atribuídos ao próprio RE.</li>
-                                    <li>Use filtros por status e grupo para localizar comunicados com rapidez.</li>
-                                </ol>
-                            </div>
-                            <div class="help-section">
-                                <h4>7. Lançamentos de FT – Dashboard</h4>
-                                <ol>
-                                    <li>Use o filtro de período e status no topo para ajustar os indicadores.</li>
-                                    <li>Consulte os KPIs de pendências, confirmadas e lançadas.</li>
-                                    <li>Analise os relatórios por unidade, colaborador, motivo, turno e dia da semana.</li>
-                                    <li>Verifique pendências recentes e qualidade dos dados para correções rápidas.</li>
-                                </ol>
-                            </div>
-                            <div class="help-section">
-                                <h4>8. Lançamentos de FT – Histórico</h4>
-                                <ol>
-                                    <li>Use busca local, filtros por unidade e colaborador e ordenação para encontrar o lançamento certo.</li>
-                                    <li>Ative "Agrupar por dia" para organizar por data da FT.</li>
-                                    <li>Clique em "Ver detalhes" para ver datas, motivo detalhado, solicitação e responsável.</li>
-                                    <li>Use Copiar link, WhatsApp, Marcar lançado e Remover conforme o status do lançamento.</li>
-                                    <li>Exportar histórico gera um XLSX com os filtros aplicados.</li>
-                                </ol>
-                            </div>
-                            <div class="help-section">
-                                <h4>9. Lançamentos de FT – Novo</h4>
-                                <ol>
-                                    <li>Busque o colaborador, confirme a unidade atual e selecione a unidade da FT.</li>
-                                    <li>Use "Sugerir por proximidade" para indicar quem está de folga.</li>
-                                    <li>Informe data, escala, motivo e o colaborador coberto.</li>
-                                    <li>Após salvar, copie ou envie o link de confirmação ao colaborador.</li>
-                                </ol>
-                            </div>
-                            <div class="help-section">
-                                <h4>10. Reciclagem</h4>
-                                <ol>
-                                    <li>Use filtros por origem, status e pesquisa para localizar colaboradores.</li>
-                                    <li>O resumo mostra vencidos, a vencer, em dia e sem informação.</li>
-                                    <li>Edite registros quando necessário e use o relatório exportável.</li>
-                                </ol>
-                            </div>
-                            <div class="help-section">
-                                <h4>11. Configuração da base</h4>
+                                <h4>6. Configuração da base</h4>
                                 <ol>
                                     <li>Verifique o status da conexão com o Supabase quando necessário.</li>
                                     <li>As alterações são registradas diretamente no Supabase.</li>
                                     <li>Use os atalhos rápidos para recarregar base e exportar dados.</li>
-                                    <li>Em FT, revise motivos e permissões de lançamento.</li>
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>12. Exportações e relatórios</h4>
+                                <h4>7. Exportações e relatórios</h4>
                                 <ol>
                                     <li>Use o menu de exportação para baixar base atualizada, resumos, históricos e PDFs.</li>
-                                    <li>Relatórios de FT e reciclagem podem ser exportados com filtros aplicados.</li>
+                                    <li>Antes de exportar, confirme se o grupo e os filtros ativos estão corretos.</li>
                                     <li>Antes de enviar, valide se a base está atualizada.</li>
                                 </ol>
                             </div>
@@ -6576,6 +6667,7 @@ function renderDashboard() {
             </div>
         </div>
 
+        ${reciclagemEnabled ? `
         <!-- Modal Reciclagem -->
         <div id="reciclagem-modal" class="modal hidden">
             <div class="modal-content">
@@ -6624,6 +6716,7 @@ function renderDashboard() {
                 <div class="hint">Observação visível para todos.</div>
             </div>
         </div>
+        ` : ''}
     `;
 
     if (isPublicAccessMode() || SiteAuth.logged) {
@@ -6773,85 +6866,89 @@ function renderDashboard() {
 
     // Renderizar lista de unidades (já deixa pronto, mas oculto)
     renderizarUnidades();
-    const avisoGroupSelect = document.getElementById('aviso-group-select');
-    if (avisoGroupSelect) {
-        avisoGroupSelect.addEventListener('change', hydrateAvisoForm);
+    if (avisosEnabled) {
+        const avisoGroupSelect = document.getElementById('aviso-group-select');
+        if (avisoGroupSelect) {
+            avisoGroupSelect.addEventListener('change', hydrateAvisoForm);
+        }
+        const reminderGroupSelect = document.getElementById('reminder-group-select');
+        if (reminderGroupSelect) {
+            reminderGroupSelect.addEventListener('change', hydrateLembreteForm);
+        }
+        const avisoCollabSearch = document.getElementById('aviso-collab-search');
+        if (avisoCollabSearch) {
+            avisoCollabSearch.addEventListener('input', filterAvisoCollabs);
+        }
+        const avisoCollabSelect = document.getElementById('aviso-collab-select');
+        if (avisoCollabSelect) {
+            avisoCollabSelect.addEventListener('change', syncAvisoUnitWithCollab);
+        }
+        const reminderCollabSearch = document.getElementById('reminder-collab-search');
+        if (reminderCollabSearch) {
+            reminderCollabSearch.addEventListener('input', filterLembreteCollabs);
+        }
+        const reminderCollabSelect = document.getElementById('reminder-collab-select');
+        if (reminderCollabSelect) {
+            reminderCollabSelect.addEventListener('change', syncLembreteUnitWithCollab);
+        }
     }
-    const reminderGroupSelect = document.getElementById('reminder-group-select');
-    if (reminderGroupSelect) {
-        reminderGroupSelect.addEventListener('change', hydrateLembreteForm);
+    if (lancamentosEnabled) {
+        const ftSearch = document.getElementById('ft-search');
+        if (ftSearch) {
+            ftSearch.addEventListener('input', filterFtCollabs);
+        }
+        const ftCollabSelect = document.getElementById('ft-collab-select');
+        if (ftCollabSelect) {
+            ftCollabSelect.addEventListener('change', syncFtUnitWithCollab);
+        }
+        const ftCoveringSearch = document.getElementById('ft-covering-search');
+        if (ftCoveringSearch) {
+            ftCoveringSearch.addEventListener('input', filterFtCovering);
+        }
+        const ftCoveringSelect = document.getElementById('ft-covering-select');
+        if (ftCoveringSelect) {
+            ftCoveringSelect.addEventListener('change', syncFtCoveringSelection);
+        }
+        const ftUnitTarget = document.getElementById('ft-unit-target');
+        if (ftUnitTarget) {
+            ftUnitTarget.dataset.auto = '1';
+            ftUnitTarget.addEventListener('change', () => {
+                ftUnitTarget.dataset.auto = '0';
+                const sugg = document.getElementById('ft-coverage-suggestions');
+                if (sugg) sugg.innerHTML = '';
+            });
+        }
+        const ftShift = document.getElementById('ft-shift');
+        if (ftShift) {
+            ftShift.dataset.auto = '1';
+            ftShift.addEventListener('change', () => {
+                ftShift.dataset.auto = '0';
+            });
+        }
     }
-    const avisoCollabSearch = document.getElementById('aviso-collab-search');
-    if (avisoCollabSearch) {
-        avisoCollabSearch.addEventListener('input', filterAvisoCollabs);
+    if (isDashboardFeatureEnabled('avisos')) {
+        initAvisosFilters();
+        updateAvisosUI();
     }
-    const avisoCollabSelect = document.getElementById('aviso-collab-select');
-    if (avisoCollabSelect) {
-        avisoCollabSelect.addEventListener('change', syncAvisoUnitWithCollab);
-    }
-    const reminderCollabSearch = document.getElementById('reminder-collab-search');
-    if (reminderCollabSearch) {
-        reminderCollabSearch.addEventListener('input', filterLembreteCollabs);
-    }
-    const reminderCollabSelect = document.getElementById('reminder-collab-select');
-    if (reminderCollabSelect) {
-        reminderCollabSelect.addEventListener('change', syncLembreteUnitWithCollab);
-    }
-    const ftSearch = document.getElementById('ft-search');
-    if (ftSearch) {
-        ftSearch.addEventListener('input', filterFtCollabs);
-    }
-    const ftCollabSelect = document.getElementById('ft-collab-select');
-    if (ftCollabSelect) {
-        ftCollabSelect.addEventListener('change', syncFtUnitWithCollab);
-    }
-    const ftCoveringSearch = document.getElementById('ft-covering-search');
-    if (ftCoveringSearch) {
-        ftCoveringSearch.addEventListener('input', filterFtCovering);
-    }
-    const ftCoveringSelect = document.getElementById('ft-covering-select');
-    if (ftCoveringSelect) {
-        ftCoveringSelect.addEventListener('change', syncFtCoveringSelection);
-    }
-    const ftUnitTarget = document.getElementById('ft-unit-target');
-    if (ftUnitTarget) {
-        ftUnitTarget.dataset.auto = '1';
-        ftUnitTarget.addEventListener('change', () => {
-            ftUnitTarget.dataset.auto = '0';
-            const sugg = document.getElementById('ft-coverage-suggestions');
-            if (sugg) sugg.innerHTML = '';
-        });
-    }
-    const ftShift = document.getElementById('ft-shift');
-    if (ftShift) {
-        ftShift.dataset.auto = '1';
-        ftShift.addEventListener('change', () => {
-            ftShift.dataset.auto = '0';
-        });
-    }
-    initAvisosFilters();
-    updateAvisosUI();
 }
 
 function switchTab(tabName, options = {}) {
+    const nextTab = normalizeDashboardTab(tabName);
     closeUtilityDrawer();
-    if (tabName === 'avisos' && !SiteAuth.logged) {
-        showToast("Avisos indisponíveis no momento.", "error");
-        return;
-    }
-    clearTabScopedTimers(tabName);
-    setAppState('currentTab', tabName, { silent: true });
+    clearTabScopedTimers(nextTab);
+    setAppState('currentTab', nextTab, { silent: true });
     
     // Atualiza botões
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
     if (typeof event !== 'undefined' && event?.target) {
         event.target.classList.add('active');
     } else {
-        document.querySelector(`.tab-btn[onclick="switchTab('${tabName}')"]`)?.classList.add('active');
+        document.querySelector(`.tab-btn[onclick="switchTab('${nextTab}')"]`)?.classList.add('active');
     }
 
     // Atualiza conteúdo
     document.getElementById('tab-content-busca')?.classList.add('hidden');
+    document.getElementById('tab-content-busca-beta')?.classList.add('hidden');
     document.getElementById('tab-content-unidades')?.classList.add('hidden');
     document.getElementById('tab-content-supervisao')?.classList.add('hidden');
     document.getElementById('tab-content-avisos')?.classList.add('hidden');
@@ -6860,27 +6957,30 @@ function switchTab(tabName, options = {}) {
     document.getElementById('tab-content-config')?.classList.add('hidden');
     document.getElementById('tab-content-collab-detail')?.classList.add('hidden');
     
-    document.getElementById(`tab-content-${tabName}`)?.classList.remove('hidden');
+    document.getElementById(`tab-content-${nextTab}`)?.classList.remove('hidden');
 
-    if (tabName === 'config' && !SiteAuth.logged) {
+    if (nextTab === 'config' && !SiteAuth.logged) {
         document.getElementById('config-login')?.classList.remove('hidden');
         document.getElementById('config-content')?.classList.add('hidden');
     }
 
-    if (tabName === 'busca') {
-        document.getElementById('search-input').focus();
+    if (nextTab === 'busca') {
+        document.getElementById('search-input')?.focus();
         realizarBusca();
     }
-    if (tabName === 'unidades') {
+    if (nextTab === 'busca-beta') {
+        activateQuickBetaSearch();
+    }
+    if (nextTab === 'unidades') {
         renderizarUnidades();
     }
-    if (tabName === 'avisos') {
+    if (nextTab === 'avisos') {
         renderAvisos();
     }
-    if (tabName === 'reciclagem') {
+    if (nextTab === 'reciclagem') {
         renderReciclagem();
     }
-    if (tabName === 'lancamentos') {
+    if (nextTab === 'lancamentos') {
         renderLancamentos();
     }
 
@@ -6888,7 +6988,7 @@ function switchTab(tabName, options = {}) {
     updateBreadcrumb();
 
     if (!options.skipRouteSync) {
-        syncAppNavigation({ view: 'dashboard', group: currentGroup || 'todos', tab: tabName }, { history: options.history || 'push' });
+        syncAppNavigation({ view: 'dashboard', group: currentGroup || 'todos', tab: nextTab }, { history: options.history || 'push' });
     }
 }
 
@@ -6921,59 +7021,17 @@ function getDesiredEscalaInvertida(monthNumber) {
 }
 
 function applyAutoEscalaInvertida(options = {}) {
-    const month = getCurrentMonthNumber();
-    if (escalaInvertidaAutoMonth === month) return;
-    const desired = getDesiredEscalaInvertida(month);
-    (CONFIG?.groupRules || []).forEach(r => { if (r?.key) escalaInvertidaByGroup[r.key] = desired; });
-    escalaInvertidaAutoMonth = month;
-    saveEscalaInvertida(options.silent);
-    renderEscalaInvertidaUI();
-    if (document.getElementById('units-list')) {
-        renderizarUnidades();
-    }
-    if (currentTab === 'busca' && document.getElementById('search-input')) {
-        realizarBusca();
-    }
-    if (options.notify) {
-        showToast(`Escala ajustada automaticamente para ${desired ? 'invertida' : 'padrão'}.`, 'success');
-    }
+    // Desativado: o status oficial agora vem exclusivamente da coluna TURMA.
+    if (options.notify) showToast('A inversão de plantão foi desativada. Ajuste a coluna TURMA na planilha.', 'info');
 }
 
 function startAutoEscalaMonitor() {
-    applyAutoEscalaInvertida({ silent: true, notify: false });
-    autoEscalaTimer = AppTimerManager.setInterval(APP_TIMERS.autoEscala, () => {
-        applyAutoEscalaInvertida({ silent: true, notify: false });
-    }, 60 * 60 * 1000);
-
-    if (autoEscalaBound) return;
-    AppEventManager.on(document, 'visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
-            applyAutoEscalaInvertida({ silent: true, notify: false });
-        }
-    }, false, { scope: 'auto-escala', key: 'auto-escala-visibility' });
+    // Mantido como no-op para compatibilidade com inicialização antiga.
     autoEscalaBound = true;
 }
 
 function toggleEscalaInvertida(groupKey) {
-    if (!canEditBase()) {
-        showToast('Você não tem permissão para alterar a escala.', 'error');
-        return;
-    }
-    const groups = (CONFIG?.groupRules || []).map(r => r?.key).filter(Boolean);
-    if (!groupKey || groupKey === 'todos') {
-        // Define novo valor global: inverte todos para o mesmo estado
-        const newVal = !groups.every(k => escalaInvertidaByGroup[k]);
-        groups.forEach(k => { escalaInvertidaByGroup[k] = newVal; });
-    } else {
-        escalaInvertidaByGroup[groupKey] = !escalaInvertidaByGroup[groupKey];
-    }
-    escalaInvertidaAutoMonth = getCurrentMonthNumber();
-    saveEscalaInvertida();
-    renderEscalaInvertidaUI();
-    renderizarUnidades();
-    if (currentTab === 'busca') realizarBusca(document.getElementById('search-input')?.value || '');
-    const anyInv = groups.some(k => escalaInvertidaByGroup[k]);
-    showToast(anyInv ? 'Escala invertida aplicada.' : 'Escala padrão restaurada.', 'success');
+    showToast('A inversão de plantão foi desativada. Ajuste a coluna TURMA na planilha.', 'info');
 }
 
 function switchConfigTab(tabName, sourceBtn = null) {
@@ -7149,8 +7207,9 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
         resultados = resultados.filter(({ item }) => {
             const statusInfo = getStatusInfo(item);
             const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
+            const isFolga = statusInfo.text === 'FOLGA';
             if (filterStatus === 'plantao') return isPlantao;
-            if (filterStatus === 'folga') return !isPlantao;
+            if (filterStatus === 'folga') return isFolga;
             if (filterStatus === 'ft') return statusInfo.text.includes('FT');
             if (filterStatus === 'afastado') return !!item.rotulo;
             if (filterStatus === 'favorites') return isCollaboratorFavorite(item.re);
@@ -7346,10 +7405,6 @@ function renderSearchCard(item, termsForHl, termsNormForHl) {
         : '';
     const ftDetailHtml = buildFtDetailsHtml(item.re);
     const ftWeekPreview = buildFtWeekPreviewHtmlForRe(item.re);
-    const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
-    const recIcon = recSummary
-        ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
-        : '';
     const roleLabel = getCollaboratorRoleLabel(item);
     const reJs = JSON.stringify(item.re || '');
     const nameJs = JSON.stringify(item.nome || '');
@@ -7369,11 +7424,14 @@ function renderSearchCard(item, termsForHl, termsNormForHl) {
     const mapTitle = !canOpenMap ? 'Colaborador indisponível' : (hasAddress ? 'Ver endereço do colaborador' : 'Endereço não cadastrado');
     const favoriteActive = isCollaboratorFavorite(item.re);
     const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
+    const isFolga = statusInfo.text === 'FOLGA';
     const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
-    const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
+    const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : (isFolga ? 'bg-folga' : 'bg-indefinido'));
     const homenageado = isHomenageado(item);
     const selectedClass = searchSelectedIds.has(item.id) ? 'card-selected' : '';
-    const activeDot = isPlantao ? '<span class="active-dot active-dot-on" title="Em plantão"></span>' : '<span class="active-dot active-dot-off" title="De folga"></span>';
+    const activeDot = isPlantao
+        ? '<span class="active-dot active-dot-on" title="Em plantão"></span>'
+        : (isFolga ? '<span class="active-dot active-dot-off" title="De folga"></span>' : '<span class="active-dot active-dot-neutral" title="Status indefinido"></span>');
 
     // Highlighted fields
     const nomeHl = homenageado ? highlightSearchTerm(item.nome, termsForHl, termsNormForHl) + ' ✨' : highlightSearchTerm(item.nome, termsForHl, termsNormForHl);
@@ -7396,8 +7454,7 @@ function renderSearchCard(item, termsForHl, termsNormForHl) {
     const escalaBadge = getEscalaBadgeHtml(item.escala);
     // Hover preview data
     const previewPhone = item.telefone ? `Tel: ${item.telefone}` : 'Sem telefone';
-    const nextRec = recSummary ? recSummary.title : 'Nenhuma reciclagem pendente';
-    const previewData = escapeHtml(`${previewPhone} | ${nextRec}`);
+    const previewData = escapeHtml(previewPhone);
 
     return `
         <div class="result-card ${bgClass} ${homenageado ? 'card-homenageado' : ''} ${selectedClass}" data-collab-re="${escapeHtml(item.re || '')}" data-collab-id="${item.id}" data-preview="${previewData}" style="border-left: 5px solid ${statusInfo.color}">
@@ -7408,9 +7465,6 @@ function renderSearchCard(item, termsForHl, termsNormForHl) {
                     <div class="card-name-block">
                         <div class="card-name-row">
                             <a class="colaborador-nome colaborador-link ${homenageado ? 'homenageado-nome' : ''}" href="javascript:void(0)" onclick="openCollaboratorPage(${detailJsAttr})">${nomeHl}</a>
-                            ${recIcon}
-                            ${getPendingAvisosByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
-                            ${getPendingRemindersByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                             <span class="status-badge" style="background-color: ${statusInfo.color}">${statusInfo.text}</span>
                             ${rotulosHtml}
                             ${retornoInfo}
@@ -7445,7 +7499,8 @@ function renderSearchCard(item, termsForHl, termsNormForHl) {
 function renderSearchTableRow(item, termsForHl, termsNormForHl) {
     const statusInfo = getStatusInfo(item);
     const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
-    const bgClass = isPlantao ? 'bg-plantao' : (item.rotulo ? 'bg-afastado' : 'bg-folga');
+    const isFolga = statusInfo.text === 'FOLGA';
+    const bgClass = isPlantao ? 'bg-plantao' : (item.rotulo ? 'bg-afastado' : (isFolga ? 'bg-folga' : 'bg-indefinido'));
     const detailKey = item.id != null ? item.id : (item.re || '');
     const detailJsAttr = escapeHtml(JSON.stringify(detailKey));
     const reJsAttr = escapeHtml(JSON.stringify(item.re || ''));
@@ -7541,7 +7596,7 @@ function bulkSearchAction(action) {
             realizarBusca();
         });
     } else if (action === 'aviso') {
-        showToast(`Criação de aviso para ${items.length} colaborador(es) - abra a aba Avisos.`, 'info');
+        showToast(`O módulo de avisos está desativado no momento. Nenhuma ação foi criada para ${items.length} colaborador(es).`, 'info');
     }
 }
 
@@ -7569,6 +7624,497 @@ function exportSearchResults() {
 function buildSubstituteReason() { return ""; }
 function runSubstituteSearch() {}
 function rankSubstituteCandidates(list) { return list; }
+
+// 5.1 Busca Rápida Beta
+function activateQuickBetaSearch() {
+    renderQuickBetaSearch();
+    fetchSupabaseCollaborators(false)
+        .then(() => {
+            if (currentTab === 'busca-beta') renderQuickBetaSearch();
+        })
+        .catch(err => AppErrorHandler.capture(err, { scope: 'quick-beta-collaborators' }, { silent: true }));
+    fetchSupabaseUnits(false)
+        .then(() => {
+            if (currentTab === 'busca-beta') renderQuickBetaSearch();
+        })
+        .catch(err => AppErrorHandler.capture(err, { scope: 'quick-beta-units' }, { silent: true }));
+    setTimeout(() => document.getElementById('qbeta-search-input')?.focus(), 0);
+}
+
+function setQuickBetaFilter(key, value) {
+    if (!Object.prototype.hasOwnProperty.call(quickBetaState, key)) return;
+    quickBetaState[key] = String(value || '').trim();
+    if (key !== 'selectedKey') quickBetaState.selectedKey = '';
+    renderQuickBetaSearch();
+}
+
+function clearQuickBetaSearch() {
+    quickBetaState = {
+        query: '',
+        status: 'all',
+        group: 'all',
+        posto: 'all',
+        cargo: 'all',
+        escala: 'all',
+        turno: 'all',
+        turma: 'all',
+        selectedKey: ''
+    };
+    renderQuickBetaSearch();
+}
+
+function normalizeQuickBetaValue(value) {
+    return String(value ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\u00a0/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toUpperCase();
+}
+
+function getQuickBetaRowKey(item, fallbackIndex = 0) {
+    return String(item?.matricula || item?.re || item?.re_padrao || item?.cpf || fallbackIndex).trim();
+}
+
+function getQuickBetaRawCollaborator(item) {
+    const raw = item?.__raw && typeof item.__raw === 'object' ? item.__raw : item;
+    return raw && typeof raw === 'object' ? raw : {};
+}
+
+function getQuickBetaRawUnit(unit) {
+    return unit && typeof unit === 'object' ? unit : {};
+}
+
+function buildQuickBetaUnitIndex(units = []) {
+    const map = new Map();
+    (units || []).forEach(unit => {
+        const keys = [
+            unit?.posto,
+            unit?.nome,
+            unit?.cliente
+        ].map(normalizeUnitKey).filter(Boolean);
+        keys.forEach(key => {
+            if (!map.has(key)) map.set(key, unit);
+        });
+    });
+    return map;
+}
+
+function collectQuickBetaSearchText(value, depth = 0) {
+    if (value == null || depth > 2) return '';
+    if (typeof value !== 'object') return String(value);
+    if (Array.isArray(value)) return value.map(v => collectQuickBetaSearchText(v, depth + 1)).join(' ');
+    return Object.entries(value)
+        .filter(([key]) => !String(key).startsWith('__'))
+        .map(([key, val]) => `${key} ${collectQuickBetaSearchText(val, depth + 1)}`)
+        .join(' ');
+}
+
+function getQuickBetaRows() {
+    const units = supaUnitsCache.items || [];
+    quickBetaUnitIndex = buildQuickBetaUnitIndex(units);
+    const source = allCollaboratorsCache.items && allCollaboratorsCache.items.length
+        ? allCollaboratorsCache.items
+        : (currentData || []);
+
+    quickBetaRowsCache = (source || []).map((item, index) => {
+        const unit = quickBetaUnitIndex.get(normalizeUnitKey(item?.posto || '')) || null;
+        const rawCollaborator = getQuickBetaRawCollaborator(item);
+        const rawUnit = getQuickBetaRawUnit(unit);
+        const baseDuty = getDutyStatusByTurma(item?.turma);
+        const duty = baseDuty;
+        const key = getQuickBetaRowKey(item, index);
+        const searchText = normalizeQuickBetaValue([
+            collectQuickBetaSearchText(rawCollaborator),
+            collectQuickBetaSearchText(rawUnit),
+            item?.nome,
+            item?.matricula,
+            item?.re,
+            item?.posto,
+            item?.cargo,
+            item?.escala,
+            item?.turno,
+            item?.telefone,
+            unit?.endereco_formatado
+        ].join(' '));
+
+        return {
+            key,
+            item,
+            unit,
+            rawCollaborator,
+            rawUnit,
+            duty,
+            baseDuty,
+            searchText
+        };
+    });
+
+    return quickBetaRowsCache;
+}
+
+function filterQuickBetaRows(rows) {
+    const queryTerms = normalizeQuickBetaValue(quickBetaState.query).split(/\s+/).filter(Boolean);
+    return (rows || []).filter(row => {
+        const item = row.item || {};
+        const dutyCode = row.baseDuty?.code || 'sem_turma';
+
+        if (queryTerms.length && !queryTerms.every(term => row.searchText.includes(term))) return false;
+        if (quickBetaState.status === 'plantao' && row.duty.text !== 'PLANTÃO') return false;
+        if (quickBetaState.status === 'folga' && row.duty.text !== 'FOLGA') return false;
+        if (quickBetaState.group !== 'all' && String(item.grupo || '') !== quickBetaState.group) return false;
+        if (quickBetaState.posto !== 'all' && normalizeQuickBetaValue(item.posto) !== quickBetaState.posto) return false;
+        if (quickBetaState.cargo !== 'all' && normalizeQuickBetaValue(item.cargo) !== quickBetaState.cargo) return false;
+        if (quickBetaState.escala !== 'all' && normalizeQuickBetaValue(item.escala) !== quickBetaState.escala) return false;
+        if (quickBetaState.turno !== 'all' && normalizeQuickBetaValue(item.turno) !== quickBetaState.turno) return false;
+        if (quickBetaState.turma === '1' && String(item.turma || '') !== '1') return false;
+        if (quickBetaState.turma === '2' && String(item.turma || '') !== '2') return false;
+        if (quickBetaState.turma === 'invalid' && dutyCode !== 'sem_turma') return false;
+        return true;
+    }).sort((a, b) => {
+        const aDuty = a.duty.text === 'FOLGA' ? 0 : a.duty.text === 'PLANTÃO' ? 1 : 2;
+        const bDuty = b.duty.text === 'FOLGA' ? 0 : b.duty.text === 'PLANTÃO' ? 1 : 2;
+        if (aDuty !== bDuty) return aDuty - bDuty;
+        return String(a.item?.nome || '').localeCompare(String(b.item?.nome || ''), 'pt-BR');
+    });
+}
+
+function buildQuickBetaSelectOptions(rows, getter, allLabel, selectedValue) {
+    const map = new Map();
+    (rows || []).forEach(row => {
+        const raw = getter(row);
+        const value = normalizeQuickBetaValue(raw);
+        if (!value || map.has(value)) return;
+        map.set(value, String(raw || '').trim());
+    });
+    const options = Array.from(map.entries())
+        .sort((a, b) => a[1].localeCompare(b[1], 'pt-BR'))
+        .map(([value, label]) => `<option value="${escapeHtml(value)}" ${selectedValue === value ? 'selected' : ''}>${escapeHtml(label)}</option>`)
+        .join('');
+    return `<option value="all" ${selectedValue === 'all' ? 'selected' : ''}>${escapeHtml(allLabel)}</option>${options}`;
+}
+
+function hydrateQuickBetaFilters(rows) {
+    const input = document.getElementById('qbeta-search-input');
+    if (input && input.value !== quickBetaState.query) input.value = quickBetaState.query;
+
+    const status = document.getElementById('qbeta-status-filter');
+    if (status) status.value = quickBetaState.status || 'all';
+
+    const group = document.getElementById('qbeta-group-filter');
+    if (group) {
+        const labelMap = getGroupLabelMap();
+        const groups = Array.from(new Set((rows || []).map(row => row.item?.grupo).filter(Boolean)))
+            .sort((a, b) => String(labelMap[a] || a).localeCompare(String(labelMap[b] || b), 'pt-BR'));
+        group.innerHTML = `<option value="all" ${quickBetaState.group === 'all' ? 'selected' : ''}>Todos os grupos</option>` +
+            groups.map(key => `<option value="${escapeHtml(key)}" ${quickBetaState.group === key ? 'selected' : ''}>${escapeHtml(labelMap[key] || key)}</option>`).join('');
+        if (!Array.from(group.options).some(opt => opt.value === quickBetaState.group)) quickBetaState.group = 'all';
+        group.value = quickBetaState.group;
+    }
+
+    const filterConfigs = [
+        ['qbeta-posto-filter', row => row.item?.posto, 'Todos os postos', 'posto'],
+        ['qbeta-cargo-filter', row => row.item?.cargo, 'Todos os cargos', 'cargo'],
+        ['qbeta-escala-filter', row => row.item?.escala, 'Todas as escalas', 'escala'],
+        ['qbeta-turno-filter', row => row.item?.turno, 'Todos os turnos', 'turno']
+    ];
+
+    filterConfigs.forEach(([id, getter, label, key]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.innerHTML = buildQuickBetaSelectOptions(rows, getter, label, quickBetaState[key]);
+        if (!Array.from(el.options).some(opt => opt.value === quickBetaState[key])) {
+            quickBetaState[key] = 'all';
+            el.value = 'all';
+        }
+    });
+
+    const turma = document.getElementById('qbeta-turma-filter');
+    if (turma) turma.value = quickBetaState.turma || 'all';
+}
+
+function renderQuickBetaSearch() {
+    const shell = document.getElementById('tab-content-busca-beta');
+    if (!shell) return;
+
+    const rows = getQuickBetaRows();
+    hydrateQuickBetaFilters(rows);
+    const filtered = filterQuickBetaRows(rows);
+    const selectedExists = filtered.some(row => row.key === quickBetaState.selectedKey);
+    if (!selectedExists) quickBetaState.selectedKey = '';
+
+    renderQuickBetaKpis(rows, filtered);
+
+    const countEl = document.getElementById('qbeta-result-count');
+    if (countEl) countEl.textContent = `${filtered.length} colaborador${filtered.length === 1 ? '' : 'es'}`;
+
+    const updatedEl = document.getElementById('qbeta-updated');
+    if (updatedEl) updatedEl.textContent = lastUpdatedAt ? `Atualizado ${lastUpdatedAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : 'Base carregada';
+
+    const list = document.getElementById('qbeta-results-list');
+    if (!list) return;
+    if (!filtered.length) {
+        list.innerHTML = `<div class="qbeta-empty-list">Nenhum colaborador encontrado para os filtros atuais.</div>`;
+        renderQuickBetaEmptyDetail();
+        return;
+    }
+
+    list.innerHTML = filtered.map(renderQuickBetaCard).join('');
+
+    if (quickBetaState.selectedKey) {
+        const selected = filtered.find(row => row.key === quickBetaState.selectedKey);
+        if (selected) renderQuickBetaDetail(selected);
+    } else {
+        renderQuickBetaEmptyDetail();
+    }
+}
+
+function renderQuickBetaKpis(rows, filtered) {
+    const el = document.getElementById('qbeta-kpis');
+    if (!el) return;
+    const source = filtered || [];
+    const total = source.length;
+    const plantao = source.filter(row => row.duty.text === 'PLANTÃO').length;
+    const folga = source.filter(row => row.duty.text === 'FOLGA').length;
+    const semTurma = source.filter(row => row.baseDuty?.code === 'sem_turma').length;
+    const semUnidade = source.filter(row => !row.unit).length;
+    el.innerHTML = [
+        ['Resultados', total, 'Registros filtrados'],
+        ['Plantão', plantao, 'Trabalhando hoje'],
+        ['Folga', folga, 'Potencial cobertura'],
+        ['Sem turma', semTurma, 'Corrigir na planilha'],
+        ['Sem unidade', semUnidade, 'Posto sem vínculo']
+    ].map(([label, value, hint]) => `
+        <div class="qbeta-kpi">
+            <span>${label}</span>
+            <strong>${value}</strong>
+            <small>${hint}</small>
+        </div>
+    `).join('');
+}
+
+function renderQuickBetaCard(row) {
+    const item = row.item || {};
+    const duty = row.duty || { text: 'N/I', color: '#64748b' };
+    const keyAttr = escapeHtml(JSON.stringify(row.key));
+    const name = item.nome || item.colaborador || 'Sem nome';
+    const statusClass = duty.text === 'PLANTÃO' ? 'plantao' : duty.text === 'FOLGA' ? 'folga' : 'indefinido';
+    const selected = row.key === quickBetaState.selectedKey ? 'selected' : '';
+    const phoneJs = escapeHtml(JSON.stringify(item.telefone || ''));
+    const nameJs = escapeHtml(JSON.stringify(name));
+    const reJs = escapeHtml(JSON.stringify(item.re || item.matricula || ''));
+    const unitJs = escapeHtml(JSON.stringify(item.posto || ''));
+    const detailKey = escapeHtml(JSON.stringify(row.key));
+    return `
+        <article class="qbeta-card ${statusClass} ${selected}" data-qbeta-key="${escapeHtml(row.key)}" onclick="openQuickBetaDetail(${detailKey})">
+            <div class="qbeta-card-top">
+                <div class="qbeta-person">
+                    ${buildCollabAvatarHtml(name)}
+                    <div>
+                        <strong>${escapeHtml(name)}</strong>
+                        <span>${escapeHtml(item.matricula || item.re || 'Sem matrícula')}</span>
+                    </div>
+                </div>
+                <span class="qbeta-status ${statusClass}">${escapeHtml(duty.text)}</span>
+            </div>
+            <div class="qbeta-card-grid">
+                <span><b>Posto</b>${escapeHtml(item.posto || 'N/I')}</span>
+                <span><b>Cargo</b>${escapeHtml(item.cargo || 'N/I')}</span>
+                <span><b>Escala</b>${escapeHtml(item.escala || 'N/I')}</span>
+                <span><b>Turno</b>${escapeHtml(item.turno || 'N/I')}</span>
+                <span><b>Turma</b>${escapeHtml(item.turma || 'Sem turma')}</span>
+                <span><b>Telefone</b>${escapeHtml(item.telefone || 'N/I')}</span>
+            </div>
+            <div class="qbeta-card-actions" onclick="event.stopPropagation()">
+                <button type="button" onclick="openPhoneModal(${nameJs}, ${phoneJs})" ${item.telefone ? '' : 'disabled'}>Contato</button>
+                <button type="button" onclick="openAddressModalForCollaborator(${reJs}, ${nameJs}, ${unitJs})">Mapa</button>
+                <button type="button" onclick="navigateToUnit(${unitJs})">Unidade</button>
+                <button type="button" onclick="copyQuickBetaSummary(${keyAttr})">Copiar</button>
+            </div>
+        </article>
+    `;
+}
+
+function openQuickBetaDetail(key) {
+    quickBetaState.selectedKey = String(key || '');
+    const row = quickBetaRowsCache.find(item => item.key === quickBetaState.selectedKey);
+    if (!row) {
+        renderQuickBetaSearch();
+        return;
+    }
+    document.querySelectorAll('.qbeta-card').forEach(card => card.classList.remove('selected'));
+    const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(quickBetaState.selectedKey) : quickBetaState.selectedKey.replace(/"/g, '\\"');
+    document.querySelector(`.qbeta-card[data-qbeta-key="${escaped}"]`)?.classList.add('selected');
+    renderQuickBetaDetail(row);
+}
+
+function renderQuickBetaEmptyDetail() {
+    const panel = document.getElementById('qbeta-detail-panel');
+    if (!panel) return;
+    panel.innerHTML = `
+        <div class="qbeta-empty-detail">
+            <strong>Selecione um colaborador</strong>
+            <span>O painel exibirá dados completos da planilha e da unidade vinculada.</span>
+        </div>
+    `;
+}
+
+function getQuickBetaField(raw, keys) {
+    for (const key of keys) {
+        if (raw?.[key] !== undefined && raw?.[key] !== null && raw?.[key] !== '') return raw[key];
+    }
+    return '';
+}
+
+function renderQuickBetaInfoGrid(fields) {
+    return `<div class="qbeta-info-grid">${fields.map(([label, value]) => `
+        <div class="qbeta-info-item">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value || 'N/I')}</strong>
+        </div>
+    `).join('')}</div>`;
+}
+
+function renderQuickBetaSection(title, fields) {
+    return `
+        <section class="qbeta-detail-section">
+            <h4>${escapeHtml(title)}</h4>
+            ${renderQuickBetaInfoGrid(fields)}
+        </section>
+    `;
+}
+
+function renderQuickBetaRawTable(title, raw) {
+    const entries = Object.entries(raw || {})
+        .filter(([key]) => !String(key).startsWith('__'))
+        .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+    if (!entries.length) {
+        return renderQuickBetaSection(title, [['Status', 'Sem dados vinculados']]);
+    }
+    return `
+        <section class="qbeta-detail-section qbeta-raw-section">
+            <h4>${escapeHtml(title)}</h4>
+            <div class="qbeta-raw-table">
+                ${entries.map(([key, value]) => `
+                    <div>
+                        <span>${escapeHtml(key)}</span>
+                        <strong>${escapeHtml(value == null || value === '' ? 'N/I' : String(value))}</strong>
+                    </div>
+                `).join('')}
+            </div>
+        </section>
+    `;
+}
+
+function renderQuickBetaDetail(row) {
+    const panel = document.getElementById('qbeta-detail-panel');
+    if (!panel) return;
+    const item = row.item || {};
+    const unit = row.unit || null;
+    const raw = row.rawCollaborator || {};
+    const rawUnit = row.rawUnit || {};
+    const name = item.nome || item.colaborador || 'Sem nome';
+    const statusClass = row.duty.text === 'PLANTÃO' ? 'plantao' : row.duty.text === 'FOLGA' ? 'folga' : 'indefinido';
+    const nameJs = escapeHtml(JSON.stringify(name));
+    const phoneJs = escapeHtml(JSON.stringify(item.telefone || ''));
+    const reJs = escapeHtml(JSON.stringify(item.re || item.matricula || ''));
+    const unitJs = escapeHtml(JSON.stringify(item.posto || ''));
+
+    panel.innerHTML = `
+        <div class="qbeta-detail-header ${statusClass}">
+            <div>
+                <span>Colaborador selecionado</span>
+                <h3>${escapeHtml(name)}</h3>
+                <p>${escapeHtml(item.posto || 'Unidade não vinculada')}</p>
+            </div>
+            <strong>${escapeHtml(row.duty.text)}</strong>
+        </div>
+        <div class="qbeta-detail-actions">
+            <button type="button" onclick="openPhoneModal(${nameJs}, ${phoneJs})" ${item.telefone ? '' : 'disabled'}>Contato</button>
+            <button type="button" onclick="openAddressModalForCollaborator(${reJs}, ${nameJs}, ${unitJs})">Mapa</button>
+            <button type="button" onclick="copyQuickBetaSummary(${escapeHtml(JSON.stringify(row.key))})">Copiar resumo</button>
+        </div>
+        ${renderQuickBetaSection('Operação', [
+            ['Matrícula', item.matricula || raw.matricula],
+            ['RE padrão', item.re_padrao || raw.re_padrao],
+            ['RE novo', item.re_novo || raw.re_novo],
+            ['Cargo', item.cargo || raw.cargo],
+            ['Posto', item.posto || raw.posto],
+            ['Escala', item.escala || raw.escala],
+            ['Turno', item.turno || raw.turno],
+            ['Turma', item.turma || raw.turma],
+            ['Admissão', item.admissao || raw.admissao]
+        ])}
+        ${renderQuickBetaSection('Contato', [
+            ['Telefone', item.telefone || raw.telefone],
+            ['Telefone emergência', item.telefone_de_emergencia || raw.telefone_de_emergencia],
+            ['Endereço', item.endereco || raw.endereco],
+            ['Pasta Google Drive', item.pasta_google_drive || raw.pasta_google_drive]
+        ])}
+        ${renderQuickBetaSection('Unidade vinculada', unit ? [
+            ['Posto', unit.posto || unit.nome],
+            ['Cliente', unit.cliente],
+            ['Empresa', unit.empresa || unit.empresa_bombeiros || unit.empresa_servicos || unit.empresa_seguranca || unit.empresa_rb],
+            ['Unidade de negócio', unit.unidade_de_negocio || unit.unidade_de_negocio_vigilancia || unit.unidade_de_negocio_servicos || unit.unidade_de_negocio_rb],
+            ['Endereço', unit.endereco_formatado || formatUnitAddress(unit)],
+            ['E-mail supervisor', unit.email_supervisor_da_unidade],
+            ['E-mail SESMT', unit.email_sesmt]
+        ] : [['Status', 'Unidade não vinculada pelo posto']])}
+        ${renderQuickBetaSection('Documentos e treinamentos', [
+            ['ASO', getQuickBetaField(raw, ['aso'])],
+            ['Reciclagem bombeiro', getQuickBetaField(raw, ['reciclagem_bombeiro'])],
+            ['Reciclagem vigilante', getQuickBetaField(raw, ['reciclagem_vigilante'])],
+            ['CNV vigilante', getQuickBetaField(raw, ['cnv_vigilante'])],
+            ['NR10', getQuickBetaField(raw, ['nr10'])],
+            ['NR20', getQuickBetaField(raw, ['nr20'])],
+            ['NR33', getQuickBetaField(raw, ['nr33'])],
+            ['NR35', getQuickBetaField(raw, ['nr35'])],
+            ['DEA', getQuickBetaField(raw, ['dea'])],
+            ['Heliponto', getQuickBetaField(raw, ['heliponto'])],
+            ['Uniforme', getQuickBetaField(raw, ['uniforme'])],
+            ['PGR unidade', getQuickBetaField(rawUnit, ['pgr'])],
+            ['PCMSO unidade', getQuickBetaField(rawUnit, ['pcmso'])]
+        ])}
+        ${renderQuickBetaSection('Dados pessoais', [
+            ['CPF', getQuickBetaField(raw, ['cpf'])],
+            ['RG', getQuickBetaField(raw, ['rg'])],
+            ['PIS', getQuickBetaField(raw, ['pis'])],
+            ['CTPS número', getQuickBetaField(raw, ['ctps_numero'])],
+            ['CTPS série', getQuickBetaField(raw, ['ctps_serie'])],
+            ['Data nascimento', getQuickBetaField(raw, ['data_nascimento'])],
+            ['Idade', getQuickBetaField(raw, ['idade'])]
+        ])}
+        ${renderQuickBetaSection('Observações e histórico', [
+            ['Férias', getQuickBetaField(raw, ['ferias'])],
+            ['Suspensão', getQuickBetaField(raw, ['suspensao'])],
+            ['Advertência', getQuickBetaField(raw, ['advertencia'])],
+            ['Recolhimento', getQuickBetaField(raw, ['recolhimento'])],
+            ['Observações', getQuickBetaField(raw, ['observacoes'])]
+        ])}
+        ${renderQuickBetaRawTable('Dados brutos do colaborador', raw)}
+        ${renderQuickBetaRawTable('Dados brutos da unidade', rawUnit)}
+    `;
+}
+
+function copyQuickBetaSummary(key) {
+    const row = quickBetaRowsCache.find(item => item.key === String(key || ''));
+    if (!row) return;
+    const item = row.item || {};
+    const unit = row.unit || {};
+    copyTextToClipboard([
+        `Nome: ${item.nome || item.colaborador || ''}`,
+        `Matrícula/RE: ${item.matricula || item.re || ''}`,
+        `Posto: ${item.posto || ''}`,
+        `Cargo: ${item.cargo || ''}`,
+        `Escala: ${item.escala || ''}`,
+        `Turno: ${item.turno || ''}`,
+        `Turma: ${item.turma || ''}`,
+        `Status: ${row.duty?.text || ''}`,
+        `Telefone: ${item.telefone || ''}`,
+        `Endereço unidade: ${unit.endereco_formatado || formatUnitAddress(unit) || ''}`
+    ].join('\n'));
+}
 
 // 6. Lógica de Unidades
 function getFtTodayByUnit(unitName, groupKey) {
@@ -7626,7 +8172,7 @@ function renderizarUnidades() {
         });
         const timeFolga = efetivo.filter(p => {
             const s = getStatusInfo(p);
-            const isFolga = !s.text.includes('PLANTÃO') && !s.text.includes('FT');
+            const isFolga = s.text === 'FOLGA';
             return (statusFilter === 'all' || statusFilter === 'folga') && isFolga;
         });
 
@@ -7656,14 +8202,6 @@ function renderizarUnidades() {
         }
 
         const hasUnitLabel = !!meta.rotulo;
-        const avisosPendentes = getPendingAvisosByUnit(posto, groupFilter === 'all' ? 'todos' : groupFilter);
-        const lembretesPendentes = getPendingRemindersByUnit(posto, groupFilter === 'all' ? 'todos' : groupFilter);
-        const avisosBadge = avisosPendentes > 0
-            ? `<span class="unit-aviso-badge">${avisosPendentes} pend.</span>`
-            : '';
-        const lembretesBadge = lembretesPendentes > 0
-            ? `<span class="unit-reminder-badge">${lembretesPendentes} lemb.</span>`
-            : '';
         const ftTodayItems = getFtTodayByUnit(posto, groupFilter === 'all' ? '' : groupFilter);
         const ftBadge = ftTodayItems.length
             ? `<span class="unit-ft-badge">FT hoje: ${ftTodayItems.length}</span>`
@@ -7687,13 +8225,10 @@ function renderizarUnidades() {
         return `
             <div class="unit-section ${hasUnitLabel ? 'unit-labeled' : ''}" id="${safeId}" data-unit-name="${postoAttr}">
                 <h3 class="unit-title">
-                    <span>${postoAttr} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${ftBadge} ${avisosBadge} ${lembretesBadge}</span>
+                    <span>${postoAttr} <span class="count-badge">${efetivo.length}</span> ${rotuloUnitHtml} ${ftBadge}</span>
                     <div class="unit-actions">
                         <button class="action-btn" onclick="openAddressModal(${postoJsAttr})" title="Endereço">
                             ${ICONS.mapPin}
-                        </button>
-                        <button class="action-btn" onclick="openAvisosForUnit(${postoJsAttr})" title="Avisos da unidade">
-                            ${ICONS.bell}
                         </button>
                         <button class="action-btn" onclick="openUnitDetailsModal(${postoJsAttr})" title="Detalhes da unidade">
                             ${ICONS.details}
@@ -7745,7 +8280,7 @@ function atualizarEstatisticas(dados, groupFilter) {
 
     const total = dadosFiltrados.length;
     const plantao = dadosFiltrados.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT')).length;
-    const folga = dadosFiltrados.filter(d => !getStatusInfo(d).text.includes('PLANTÃO') && !getStatusInfo(d).text.includes('FT')).length;
+    const folga = dadosFiltrados.filter(d => getStatusInfo(d).text === 'FOLGA').length;
 
     statsContainer.innerHTML = `
         <div class="stat-card total">
@@ -7884,6 +8419,7 @@ function updateLastUpdatedDisplay() {
 // ==========================================================================
 
 function loadReciclagemTemplates() {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     try {
         const stored = localStorage.getItem('reciclagemTemplates');
         reciclagemTemplates = stored ? JSON.parse(stored) || [] : [];
@@ -7898,11 +8434,13 @@ function loadReciclagemTemplates() {
 }
 
 function saveReciclagemTemplates(silent = false) {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     localStorage.setItem('reciclagemTemplates', JSON.stringify(reciclagemTemplates));
     scheduleLocalSync('reciclagem-templates', { silent, notify: !silent });
 }
 
 function loadReciclagemOverrides() {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     try {
         const stored = localStorage.getItem('reciclagemOverrides');
         reciclagemOverrides = stored ? JSON.parse(stored) || {} : {};
@@ -7912,11 +8450,13 @@ function loadReciclagemOverrides() {
 }
 
 function saveReciclagemOverrides(silent = false) {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     localStorage.setItem('reciclagemOverrides', JSON.stringify(reciclagemOverrides));
     scheduleLocalSync('reciclagem-overrides', { silent, notify: !silent });
 }
 
 function loadReciclagemHistory() {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     try {
         const stored = localStorage.getItem('reciclagemHistory');
         reciclagemHistory = stored ? JSON.parse(stored) || [] : [];
@@ -7926,11 +8466,13 @@ function loadReciclagemHistory() {
 }
 
 function saveReciclagemHistory(silent = false) {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     localStorage.setItem('reciclagemHistory', JSON.stringify(reciclagemHistory));
     scheduleLocalSync('reciclagem-history', { silent, notify: !silent });
 }
 
 function loadReciclagemNotes() {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     try {
         const stored = localStorage.getItem('reciclagemNotes');
         reciclagemNotes = stored ? JSON.parse(stored) || {} : {};
@@ -7940,6 +8482,7 @@ function loadReciclagemNotes() {
 }
 
 function saveReciclagemNotes(silent = false) {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     localStorage.setItem('reciclagemNotes', JSON.stringify(reciclagemNotes));
     scheduleLocalSync('reciclagem-notes', { silent, notify: !silent });
 }
@@ -8096,6 +8639,7 @@ function getReciclagemSummaryForCollab(re, name) {
 }
 
 async function loadReciclagemData(force = false) {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     if (!force && reciclagemLoadedAt) return;
     setAppState('reciclagemData', {}, { silent: true });
     setAppState('reciclagemLoadedAt', new Date(), { silent: true });
@@ -8105,6 +8649,7 @@ async function loadReciclagemData(force = false) {
 }
 
 async function refreshReciclagemIfNeeded() {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     const before = reciclagemLoadedAt ? reciclagemLoadedAt.getTime() : 0;
     await loadReciclagemData(false);
     const after = reciclagemLoadedAt ? reciclagemLoadedAt.getTime() : 0;
@@ -8361,6 +8906,7 @@ function renderReciclagemSummary(items) {
 }
 
 async function renderReciclagem() {
+    if (!isDashboardFeatureEnabled('reciclagem')) return;
     const list = document.getElementById('reciclagem-list');
     if (!list) return;
     const typeCountsEl = document.getElementById('reciclagem-type-counts');
@@ -9170,23 +9716,6 @@ function buildCollaboratorPerformanceSnapshot(collabRe = '', collabName = '') {
         });
     }
 
-    const recSummary = getReciclagemSummaryForCollab(re, displayName);
-    const recStatus = recSummary?.status || 'unknown';
-    const recLines = String(recSummary?.title || 'Reciclagem: sem dados')
-        .split('\n')
-        .map(v => v.trim())
-        .filter(Boolean);
-    const recLabelMap = {
-        ok: 'Em dia',
-        due: 'Próxima do vencimento',
-        expired: 'Vencida',
-        unknown: 'Sem dados'
-    };
-
-    const scopeGroup = currentGroup || 'todos';
-    const pendingAvisos = getPendingAvisosByCollaborator(displayRe, scopeGroup);
-    const pendingReminders = getPendingRemindersByCollaborator(displayRe, scopeGroup);
-
     return {
         re: displayRe,
         name: displayName,
@@ -9208,14 +9737,7 @@ function buildCollaboratorPerformanceSnapshot(collabRe = '', collabName = '') {
         monthTotal,
         future30,
         recent,
-        weekPlan,
-        reciclagem: {
-            status: recStatus,
-            label: recLabelMap[recStatus] || 'Sem dados',
-            lines: recLines
-        },
-        avisos: pendingAvisos,
-        reminders: pendingReminders
+        weekPlan
     };
 }
 
@@ -9251,21 +9773,12 @@ function buildCollaboratorPerformanceModalHtml(snapshot) {
         `).join('')
         : '<p class="empty-state">Sem histórico recente de FT.</p>';
 
-    const recHtml = snapshot.reciclagem.lines.length
-        ? `<ul class="performance-list">${snapshot.reciclagem.lines.map(line => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`
-        : '<p class="empty-state">Sem dados de reciclagem.</p>';
-
     return `
         <div class="performance-head">
             <div>
                 <div class="performance-title">${escapeHtml(snapshot.name)} <span class="performance-re">(RE ${escapeHtml(snapshot.re)})</span></div>
                 <div class="performance-meta">Unidade: ${escapeHtml(snapshot.unit)} • Grupo: ${escapeHtml(snapshot.group)} • Cargo: ${escapeHtml(snapshot.role)}</div>
                 <div class="performance-meta">Escala: ${escapeHtml(snapshot.schedule)} • Status atual: <span class="performance-status" style="background:${snapshot.statusInfo.color};">${escapeHtml(snapshot.statusInfo.text)}</span></div>
-            </div>
-            <div class="performance-flags">
-                <span class="perf-flag">Avisos pendentes: ${snapshot.avisos}</span>
-                <span class="perf-flag">Lembretes pendentes: ${snapshot.reminders}</span>
-                <span class="perf-flag reciclagem ${snapshot.reciclagem.status}">Reciclagem: ${escapeHtml(snapshot.reciclagem.label)}</span>
             </div>
         </div>
 
@@ -9289,10 +9802,6 @@ function buildCollaboratorPerformanceModalHtml(snapshot) {
             <div class="performance-block">
                 <h4>Próximas FT (30 dias)</h4>
                 <div class="performance-lines">${upcomingHtml}</div>
-            </div>
-            <div class="performance-block">
-                <h4>Reciclagem</h4>
-                ${recHtml}
             </div>
         </div>
 
@@ -9827,10 +10336,6 @@ function renderUnitTable(lista) {
                     ${lista.map(p => {
                         const homenageado = isHomenageado(p);
                         const nomeDisplay = homenageado ? `${p.nome} ✨` : p.nome;
-                        const recSummary = getReciclagemSummaryForCollab(p.re, p.nome);
-                        const recIcon = recSummary
-                            ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
-                            : '';
                         const ftDetailHtml = buildFtDetailsHtml(p.re);
                         const roleLabel = getCollaboratorRoleLabel(p);
                         const reJs = JSON.stringify(p.re || '');
@@ -9847,9 +10352,6 @@ function renderUnitTable(lista) {
                                 <td>
                                     <div class="colab-cell">
                                         <strong class="${homenageado ? 'homenageado-nome' : ''}">${nomeDisplay}</strong>
-                                        ${recIcon}
-                                        ${getPendingAvisosByCollaborator(p.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
-                                        ${getPendingRemindersByCollaborator(p.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                                         ${p.rotulo ? `
                                             ${p.rotulo.split(',').map(r => `
                                                 <span class="mini-label">
@@ -9935,10 +10437,39 @@ function getStatusInfo(item) {
         }
     }
 
-    // 2. Verifica Escala Padrão
-    const trabalha = verificarEscala(item.turma, item.grupo);
-    if (trabalha) return { text: 'PLANTÃO', color: '#dc3545' }; // Vermelho
-    return { text: 'FOLGA', color: '#28a745' }; // Verde
+    // 2. Verifica escala oficial pela coluna TURMA da planilha.
+    const duty = getDutyStatusByTurma(item.turma);
+    return { text: duty.text, color: duty.color };
+}
+
+function getDutyStatusByTurma(turma, date = new Date()) {
+    const turmaText = String(turma ?? '').trim();
+    const turmaNumber = /^[12]$/.test(turmaText) ? Number(turmaText) : NaN;
+    const dateObj = date instanceof Date
+        ? date
+        : new Date(`${normalizeFtDateKey(date) || getTodayKey()}T00:00:00`);
+
+    if (!Number.isFinite(turmaNumber) || (turmaNumber !== 1 && turmaNumber !== 2) || Number.isNaN(dateObj.getTime())) {
+        return {
+            code: 'sem_turma',
+            text: 'STATUS INDEFINIDO',
+            label: 'Sem turma',
+            color: '#64748b',
+            onDuty: null,
+            turma: turmaNumber || null
+        };
+    }
+
+    const isOddDay = dateObj.getDate() % 2 !== 0;
+    const onDuty = turmaNumber === 1 ? isOddDay : !isOddDay;
+    return {
+        code: onDuty ? 'plantao' : 'folga',
+        text: onDuty ? 'PLANTÃO' : 'FOLGA',
+        label: onDuty ? 'Plantão previsto' : 'Folga prevista',
+        color: onDuty ? '#dc3545' : '#28a745',
+        onDuty,
+        turma: turmaNumber
+    };
 }
 
 // --- AI search removed (stubs) ---
@@ -10751,14 +11282,8 @@ function verificarEscalaPorData(turma, dateKey, groupKey) {
     if (!dayKey) return false;
     const date = new Date(`${dayKey}T00:00:00`);
     if (Number.isNaN(date.getTime())) return false;
-    const dayNumber = date.getDate();
-    const isImpar = dayNumber % 2 !== 0;
-    let trabalha = null;
-    if (turma == 1) trabalha = isImpar;
-    if (turma == 2) trabalha = !isImpar;
-    if (trabalha === null) return false;
-    if (isGroupInvertido(groupKey)) trabalha = !trabalha;
-    return trabalha;
+    const duty = getDutyStatusByTurma(turma, date);
+    return duty.onDuty === true;
 }
 
 function getDutyForecastForDate(collab, dateKey) {
@@ -11091,10 +11616,6 @@ function renderAiResultCard(item, target, options = {}) {
         : '';
     const ftDetailHtml = buildFtDetailsHtml(item.re);
     const ftWeekPreview = buildFtWeekPreviewHtmlForRe(item.re);
-    const recSummary = getReciclagemSummaryForCollab(item.re, item.nome);
-    const recIcon = recSummary
-        ? `<span class="reciclagem-icon ${recSummary.status}" title="${recSummary.title}">${ICONS.recycle}</span>`
-        : '';
     const roleLabel = getCollaboratorRoleLabel(item);
     const reJs = JSON.stringify(item.re || '');
     const nameJs = JSON.stringify(item.nome || '');
@@ -11131,8 +11652,9 @@ function renderAiResultCard(item, target, options = {}) {
         }).join('');
     }
     const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
+    const isFolga = statusInfo.text === 'FOLGA';
     const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
-    const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : 'bg-folga');
+    const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : (isFolga ? 'bg-folga' : 'bg-indefinido'));
     const reason = options.reasonOverride || buildAiReason(item, target);
     const reasonNote = options.reasonNote ? `<div class="ai-reason-note">${options.reasonNote}</div>` : '';
     const actionHtml = options.actionHtml || '';
@@ -11156,9 +11678,6 @@ function renderAiResultCard(item, target, options = {}) {
                     <div class="card-name-block">
                         <div class="card-name-row">
                             <a class="colaborador-nome colaborador-link ${homenageado ? 'homenageado-nome' : ''}" href="javascript:void(0)" onclick="openCollaboratorPage(${detailJsAttr})">${nomeDisplay}</a>
-                            ${recIcon}
-                            ${getPendingAvisosByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag">Aviso</span>` : ''}
-                            ${getPendingRemindersByCollaborator(item.re, currentGroup || 'todos') > 0 ? `<span class="colab-flag reminder">Lembrete</span>` : ''}
                             <span class="status-badge" style="background-color: ${statusInfo.color}">${statusInfo.text}</span>
                             ${rotulosHtml}
                             ${retornoInfo}
@@ -11499,7 +12018,7 @@ function renderCollabDetailPage(item) {
                     </div>
                 </div>
                 <div class="cph-right">
-                    <button class="status-badge status-badge-lg status-badge-btn" style="background-color:${statusInfo.color}" onclick="confirmInvertPlantao()" title="Inverter plantão/folga">${statusInfo.text}</button>
+                    <span class="status-badge status-badge-lg" style="background-color:${statusInfo.color}" title="Status calculado pela coluna TURMA">${statusInfo.text}</span>
                     ${rotulosHtml}
                     <button class="edit-btn-icon favorite-btn ${favoriteActive ? 'active' : ''}" onclick="toggleCollaboratorFavorite('${escapeHtml(item.re || '')}'); renderCollabDetailPage(findCollaboratorById(${JSON.stringify(item.id != null ? item.id : item.re)}))" title="${favoriteActive ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}">${favoriteActive ? ICONS.starFilled : ICONS.star}</button>
                     <button class="edit-btn-icon ${item.telefone ? 'whatsapp-icon' : 'disabled-icon'}" onclick="openPhoneModal(${escapeHtml(nameJs)}, ${escapeHtml(phoneJs)})" title="${item.telefone ? 'Contato WhatsApp' : 'Sem telefone'}">${ICONS.whatsapp}</button>
@@ -11906,7 +12425,8 @@ function getCollaboratorDbSelector(item) {
     if (item.matricula) return { column: 'matricula', value: item.matricula };
     if (item.re_padrao) return { column: COLLAB_RE_PADRAO_COLUMN, value: item.re_padrao };
     if (item.re_padrap) return { column: 're_padrap', value: item.re_padrap };
-    if (item.re_folha) return { column: 're_folha', value: item.re_folha };
+    if (item.re_novo) return { column: 're_novo', value: item.re_novo };
+    if (item.re_folha) return { column: 're_novo', value: item.re_folha };
     if (item.re) return { column: COLLAB_RE_PADRAO_COLUMN, value: item.re };
     return null;
 }
@@ -11917,25 +12437,49 @@ function buildCollaboratorDbUpdate(item) {
         telefone: item.telefone || '',
         posto: item.posto || '',
         escala: item.escala || '',
-        turma: item.turma || 1,
+        turma: item.turma || null,
         rotulo: item.rotulo || '',
         rotulo_inicio: item.rotuloInicio || item.rotulo_inicio || '',
         rotulo_fim: item.rotuloFim || item.rotulo_fim || '',
         rotulo_detalhe: item.rotuloDetalhe || item.rotulo_detalhe || ''
     };
     // Campos expandidos para edição completa
-    const extraFields = [
-        'matricula', 're_folha', 'cargo', 'turno', 'cpf', 'rg', 'pis',
-        'ctps_numero', 'ctps_serie', 'data_nascimento', 'idade',
-        'telefone_emergencia', 'email_login', 'endereco_colaborador',
-        'empresa', 'cliente', 'unidade_de_negocio', 'data_admissao',
-        'ferias', 'aso', 'atestados',
-        'reciclagem bombeiro', 'reciclagem_vigilante', 'reciclagem_cnv_vigilante',
-        'nr_10', 'nr_20', 'nr_33', 'nr_35', 'dea', 'heliponto',
-        'uniforme', 'suspensao', 'advertencia', 'recolhimento', 'observacoes'
-    ];
-    extraFields.forEach(key => {
-        if (item[key] != null) payload[key] = item[key];
+    Object.assign(payload, {
+        matricula: item.matricula || '',
+        re_novo: item.re_novo || item.re_folha || '',
+        cargo: item.cargo || '',
+        turno: item.turno || '',
+        cpf: item.cpf || '',
+        rg: item.rg || '',
+        pis: item.pis || '',
+        ctps_numero: item.ctps_numero || '',
+        ctps_serie: item.ctps_serie || '',
+        data_nascimento: item.data_nascimento || '',
+        idade: item.idade || '',
+        telefone_de_emergencia: item.telefone_de_emergencia || item.telefone_emergencia || '',
+        endereco: item.endereco || item.endereco_colaborador || '',
+        empresa: item.empresa || '',
+        cliente: item.cliente || '',
+        unidade_de_negocio: item.unidade_de_negocio || '',
+        admissao: item.admissao || item.data_admissao || '',
+        ferias: item.ferias || '',
+        aso: item.aso || '',
+        reciclagem_bombeiro: item.reciclagem_bombeiro || item["reciclagem bombeiro"] || '',
+        reciclagem_vigilante: item.reciclagem_vigilante || '',
+        numeracao_cnv: item.numeracao_cnv || '',
+        cnv_vigilante: item.cnv_vigilante || item.reciclagem_cnv_vigilante || '',
+        nr10: item.nr10 || item.nr_10 || '',
+        nr20: item.nr20 || item.nr_20 || '',
+        nr33: item.nr33 || item.nr_33 || '',
+        nr35: item.nr35 || item.nr_35 || '',
+        dea: item.dea || '',
+        heliponto: item.heliponto || '',
+        uniforme: item.uniforme || '',
+        suspensao: item.suspensao || '',
+        advertencia: item.advertencia || '',
+        recolhimento: item.recolhimento || '',
+        observacoes: item.observacoes || '',
+        pasta_google_drive: item.pasta_google_drive || ''
     });
     payload[COLLAB_RE_PADRAO_COLUMN] = item.re_padrao || item.re || '';
     return payload;
@@ -11967,18 +12511,18 @@ async function updateCollaboratorInSupabase(item) {
 async function insertCollaboratorInSupabase(item) {
     if (!isSupabaseReady()) return false;
     const payload = {
+        sheet_sync_key: item.sheet_sync_key || '',
         matricula: item.matricula || item.re || '',
-        re_folha: item.re_folha || '',
+        re_novo: item.re_novo || item.re_folha || '',
         colaborador: item.nome || item.colaborador || '',
         posto: item.posto || '',
         cargo: item.cargo || '',
         escala: item.escala || '',
         turno: item.turno || '',
         telefone: item.telefone || '',
-        turma: item.turma || 1,
+        turma: item.turma || null,
         unidade_de_negocio: item.unidade_de_negocio || '',
-        endereco_colaborador: item.endereco_colaborador || '',
-        email_login: item.email_login || ''
+        endereco: item.endereco || item.endereco_colaborador || ''
     };
     payload[COLLAB_RE_PADRAO_COLUMN] = item.re_padrao || item.re || '';
     try {
@@ -12164,10 +12708,7 @@ function toggleUnitRotuloDesc() {
 async function updateUnitInSupabase(oldName, newName, meta = {}) {
     if (!isSupabaseReady()) return false;
     const payload = {
-        posto: newName,
-        rotulo: meta.rotulo || '',
-        rotulo_detalhe: meta.detalhe || '',
-        rotulo_responsavel: meta.responsavel || ''
+        posto: newName
     };
     try {
         const { error } = await supabaseClient
@@ -13717,16 +14258,12 @@ function restoreSupervisaoHistory(index) {
 // ==========================================================================
 
 function openAvisosTab() {
-    if (!SiteAuth.logged) {
-        showToast("Avisos indisponíveis no momento.", "error");
-        return;
-    }
-    if (!appContainer || appContainer.style.display === 'none') return;
-    closeAvisosMini();
-    switchTab('avisos');
+    showToast("O módulo de avisos está desativado temporariamente.", "info");
+    switchTab('busca');
 }
 
 function updateAvisosUI() {
+    if (!isDashboardFeatureEnabled('avisos')) return;
     const bell = document.getElementById('avisos-bell');
     const badge = document.getElementById('avisos-badge');
     const tabBadge = document.getElementById('avisos-tab-badge');
@@ -13757,6 +14294,7 @@ function updateAvisosUI() {
 }
 
 function updateLancamentosUI() {
+    if (!isDashboardFeatureEnabled('lancamentos')) return;
     if (currentTab === 'lancamentos') {
         renderLancamentos();
     }
@@ -13904,6 +14442,7 @@ function renderAvisoCard(a) {
 }
 
 function renderAvisos() {
+    if (!isDashboardFeatureEnabled('avisos')) return;
     const list = document.getElementById('avisos-list');
     const summary = document.getElementById('avisos-assignee-summary');
     if (!list) return;
@@ -14468,12 +15007,8 @@ function exportarAvisosMensal() {
 }
 
 function openAvisosForUnit(unitName) {
-    switchTab('avisos');
-    const unitFilter = document.getElementById('aviso-unit-filter');
-    const groupFilter = document.getElementById('aviso-group-filter');
-    if (unitFilter) unitFilter.value = unitName;
-    if (groupFilter && currentGroup && currentGroup !== 'todos') groupFilter.value = currentGroup;
-    renderAvisos();
+    showToast(`Avisos da unidade ${unitName} estão desativados temporariamente.`, "info");
+    switchTab('unidades');
 }
 
 function playAvisoSound(priority) {
@@ -14549,6 +15084,7 @@ function renderReminderAlerts(items) {
 }
 
 function checkReminderAlerts() {
+    if (!isDashboardFeatureEnabled('avisos')) return;
     if (!SiteAuth.logged) {
         renderReminderAlerts([]);
         return;
@@ -14581,6 +15117,7 @@ function checkReminderAlerts() {
 }
 
 function startReminderMonitor() {
+    if (!isDashboardFeatureEnabled('avisos')) return;
     checkReminderAlerts();
     reminderCheckTimer = AppTimerManager.setInterval(APP_TIMERS.reminderCheck, checkReminderAlerts, 60000);
     AppEventManager.on(document, 'visibilitychange', () => {
@@ -15555,6 +16092,7 @@ function renderLancamentosPlanejamento() {
 }
 
 function renderLancamentos() {
+    if (!isDashboardFeatureEnabled('lancamentos')) return;
     ftLaunches = normalizeFtLaunchEntries(ftLaunches);
     const panelDiaria = document.getElementById('lancamentos-panel-diaria');
     const panelTroca = document.getElementById('lancamentos-panel-troca');
@@ -18628,7 +19166,7 @@ function updateMenuStatus() {
     if (teamNoAccessEl) {
         teamNoAccessEl.classList.toggle('hidden', !!(SiteAuth.logged && canManageUsers()));
     }
-    if (SiteAuth.logged && canEditBase()) {
+    if (SiteAuth.logged && canEditBase() && isDashboardFeatureEnabled('lancamentos')) {
         renderFtReasonsConfig();
     }
     renderMyRoleDescription();
@@ -18638,7 +19176,9 @@ function updateMenuStatus() {
     renderConfigSummary();
     renderRoadmapList();
     renderAuditList();
-    updateAvisosUI();
+    if (isDashboardFeatureEnabled('avisos')) {
+        updateAvisosUI();
+    }
 }
 
 function reloadCurrentGroupData() {
