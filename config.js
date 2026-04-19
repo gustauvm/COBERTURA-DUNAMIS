@@ -6,7 +6,7 @@ const CONFIG = {
         anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ2cGNidmlnZ2J4bnBxb3BybnhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0OTAzMTYsImV4cCI6MjA4OTA2NjMxNn0.ViZumUOJRgeCdpv6eVlcsSwv10WBAgp7mqZHaWEdkZs'
     },
     auth: {
-        requireLogin: true,
+        requireLogin: false,
         publicUrl: 'https://dunamispro.online/',
         bootstrapAdmins: ['nextibombeiros@gmail.com']
     },
