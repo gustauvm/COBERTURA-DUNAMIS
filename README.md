@@ -1,10 +1,21 @@
 # Dunamis Pro V5
 
-Rebuild moderno do Dunamis Pro com React 19, Vite 8, TypeScript, Tailwind CSS 4 e Supabase.
+V5 focada exclusivamente na Busca Rápida operacional.
+
+## Rodar localmente
+
+Como esta pasta está dentro de um caminho com `#`, o Vite dev server pode servir TSX sem transformar corretamente. Use o preview compilado:
+
+```powershell
+npm run dev
+```
+
+Esse comando executa `build` e abre o preview em `http://127.0.0.1:5173`.
 
 ## Scripts
 
-- `npm run dev`: desenvolvimento local.
+- `npm run dev`: build + preview local seguro.
+- `npm run dev:vite`: Vite dev puro, use só fora de caminhos com `#`.
 - `npm run build`: build de produção.
 - `npm run preview`: preview local do build.
 - `npm run lint`: validação ESLint.

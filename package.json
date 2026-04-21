@@ -4,13 +4,14 @@
   "version": "5.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "npm run build && vite preview --host 127.0.0.1 --port 5173",
     "build": "tsc -b && vite build",
     "lint": "eslint . --max-warnings=0",
-    "preview": "vite preview",
+    "preview": "vite preview --host 127.0.0.1 --port 5173",
     "typecheck": "tsc -b --noEmit",
     "check": "npm run lint && npm run typecheck && npm run build",
-    "deploy:dry": "npm run check"
+    "deploy:dry": "npm run check",
+    "dev:vite": "vite"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
