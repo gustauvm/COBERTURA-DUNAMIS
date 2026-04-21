@@ -143,23 +143,87 @@ let quickBetaState = {
 };
 let quickBetaRowsCache = [];
 let quickBetaUnitIndex = new Map();
-const FORMALIZADOR_REQUESTER_KEY = 'formalizadorRequesterV1';
+const FORMALIZADOR_REQUESTER_KEY = 'formalizadorRequesterV2';
 const FORMALIZADOR_TYPES = Object.freeze({
-    troca_posto: { label: 'Troca de posto', needsDestination: true, hint: 'Mudança planejada entre postos.' },
-    remanejamento: { label: 'Remanejamento', needsDestination: true, hint: 'Realocação operacional por demanda.' },
-    desligamento: { label: 'Solicitação de desligamento', needsDestination: false, hint: 'Pedido formal para iniciar desligamento.' },
-    termino_experiencia: { label: 'Término de experiência', needsDestination: false, hint: 'Avaliação/finalização do período de experiência.' },
-    alteracao_beneficios: { label: 'Alteração de benefícios', needsDestination: false, hint: 'Formalização de impacto em benefícios.' },
-    cobertura: { label: 'Cobertura', needsDestination: true, hint: 'Cobertura temporária ou definitiva de posto.' }
+    troca_posto: {
+        label: 'Troca de posto',
+        shortLabel: 'Troca',
+        noun: 'troca de posto',
+        needsDestination: true,
+        hint: 'Transferência planejada de um colaborador entre postos.',
+        accent: 'blue'
+    },
+    remanejamento: {
+        label: 'Remanejamento',
+        shortLabel: 'Remanejamento',
+        noun: 'remanejamento',
+        needsDestination: true,
+        hint: 'Realocação operacional por contrato, cobertura ou necessidade do cliente.',
+        accent: 'amber'
+    },
+    desligamento: {
+        label: 'Solicitação de desligamento',
+        shortLabel: 'Desligamento',
+        noun: 'solicitação de desligamento',
+        needsDestination: false,
+        hint: 'Registro formal para análise administrativa de desligamento.',
+        accent: 'red'
+    },
+    termino_experiencia: {
+        label: 'Término de experiência',
+        shortLabel: 'Experiência',
+        noun: 'término de experiência',
+        needsDestination: false,
+        requiresEndDate: true,
+        hint: 'Formalização de término ou decisão sobre período de experiência.',
+        accent: 'slate'
+    },
+    alteracao_beneficios: {
+        label: 'Alteração de benefícios',
+        shortLabel: 'Benefícios',
+        noun: 'alteração de benefícios',
+        needsDestination: false,
+        requiresBenefitImpact: true,
+        hint: 'Solicitação para revisar VT, refeição, adicional ou escala/turno.',
+        accent: 'green'
+    },
+    cobertura: {
+        label: 'Cobertura',
+        shortLabel: 'Cobertura',
+        noun: 'cobertura de posto',
+        needsDestination: true,
+        hint: 'Registro de cobertura temporária ou definitiva de posto.',
+        accent: 'cyan'
+    }
 });
 const FORMALIZADOR_STATUS = Object.freeze({
-    formalizado: 'Formalizado',
+    registrado: 'Registrado',
     em_analise: 'Em análise',
-    concluido: 'Concluído',
+    aguardando_dp: 'Aguardando DP',
+    aguardando_operacao: 'Aguardando operação',
+    aprovado: 'Aprovado',
+    executado: 'Executado',
     cancelado: 'Cancelado'
 });
+const FORMALIZADOR_MOTIVOS = Object.freeze({
+    cobertura_contrato: 'Cobertura de contrato/posto',
+    ferias: 'Férias programadas',
+    falta: 'Falta ou ausência',
+    pedido_cliente: 'Solicitação do cliente',
+    desempenho: 'Desempenho / adequação ao posto',
+    experiencia: 'Término ou avaliação de experiência',
+    beneficios: 'Ajuste de benefícios',
+    escala: 'Ajuste de escala ou turno',
+    desligamento: 'Desligamento',
+    outro: 'Outro motivo operacional'
+});
+const FORMALIZADOR_COVERAGE_TYPES = Object.freeze({
+    sem_cobertura: 'Sem cobertura definida',
+    cobertura_definida: 'Cobertura já definida',
+    temporaria: 'Cobertura temporária',
+    definitiva: 'Cobertura definitiva'
+});
 let formalizadorState = {
-    step: 1,
     type: '',
     requester: { nome: '', cargo: '', telefone: '', email: '' },
     collaboratorKey: '',
@@ -183,7 +247,7 @@ let formalizadorState = {
         observacoes: ''
     },
     coverage: {
-        tipo: 'sem_cobertura',
+        tipo: '',
         periodo: '',
         observacoes: ''
     },
@@ -191,10 +255,12 @@ let formalizadorState = {
     events: {},
     historyFilters: { search: '', status: 'all', tipo: 'all' },
     selectedHistoryId: '',
-    lastCreatedId: ''
+    lastCreatedId: '',
+    lastCreatedRecord: null,
+    focus: 'request'
 };
 let formalizadorCache = { items: [], updatedAt: 0 };
-let formalizadorEventsCache = {};
+let formalizadorEventsCache = { items: {}, updatedAt: 0 };
 let searchRenderedCount = 0;
 let searchTotalFiltered = 0;
 let searchFilteredCache = [];
@@ -8206,104 +8272,46 @@ function copyQuickBetaSummary(key) {
 // 5.2 Formalizador de Mudanças de Postos
 function getFormalizadorDefaultDraft() {
     return {
-        step: 1,
-        type: '',
-        requester: { nome: '', cargo: '', telefone: '', email: '' },
-        collaboratorKey: '',
-        destinationKey: '',
-        coverageKey: '',
+        type: '', requester: { nome: '', cargo: '', telefone: '', email: '' }, collaboratorKey: '', destinationKey: '', coverageKey: '',
         queries: { collaborator: '', destination: '', coverage: '' },
-        form: {
-            prioridade: 'normal',
-            data_efetiva: getTodayKey(),
-            data_fim: '',
-            motivo_categoria: '',
-            motivo_observacao: '',
-            email_recipients: ''
-        },
-        benefits: {
-            vale_transporte: false,
-            vale_refeicao: false,
-            adicional_noturno: false,
-            intrajornada: false,
-            escala_turno: false,
-            observacoes: ''
-        },
-        coverage: {
-            tipo: 'sem_cobertura',
-            periodo: '',
-            observacoes: ''
-        }
+        form: { prioridade: 'normal', data_efetiva: getTodayKey(), data_fim: '', motivo_categoria: '', motivo_observacao: '', email_recipients: '' },
+        benefits: { vale_transporte: false, vale_refeicao: false, adicional_noturno: false, intrajornada: false, escala_turno: false, observacoes: '' },
+        coverage: { tipo: '', periodo: '', observacoes: '' }, focus: 'request'
     };
 }
 
 function mergeFormalizadorDraft(patch = {}) {
-    formalizadorState = {
-        ...formalizadorState,
-        ...patch,
-        requester: { ...formalizadorState.requester, ...(patch.requester || {}) },
-        queries: { ...formalizadorState.queries, ...(patch.queries || {}) },
-        form: { ...formalizadorState.form, ...(patch.form || {}) },
-        benefits: { ...formalizadorState.benefits, ...(patch.benefits || {}) },
-        coverage: { ...formalizadorState.coverage, ...(patch.coverage || {}) }
-    };
+    formalizadorState = { ...formalizadorState, ...patch, requester: { ...formalizadorState.requester, ...(patch.requester || {}) }, queries: { ...formalizadorState.queries, ...(patch.queries || {}) }, form: { ...formalizadorState.form, ...(patch.form || {}) }, benefits: { ...formalizadorState.benefits, ...(patch.benefits || {}) }, coverage: { ...formalizadorState.coverage, ...(patch.coverage || {}) } };
 }
 
 function loadFormalizadorRequester() {
     try {
-        const raw = localStorage.getItem(FORMALIZADOR_REQUESTER_KEY);
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
+        const parsed = JSON.parse(localStorage.getItem(FORMALIZADOR_REQUESTER_KEY) || 'null');
         if (!parsed || typeof parsed !== 'object') return;
-        formalizadorState.requester = {
-            nome: String(parsed.nome || ''),
-            cargo: String(parsed.cargo || ''),
-            telefone: String(parsed.telefone || ''),
-            email: String(parsed.email || '')
-        };
+        formalizadorState.requester = { nome: String(parsed.nome || ''), cargo: String(parsed.cargo || ''), telefone: String(parsed.telefone || ''), email: String(parsed.email || '') };
     } catch {}
 }
 
 function saveFormalizadorRequester() {
-    try {
-        localStorage.setItem(FORMALIZADOR_REQUESTER_KEY, JSON.stringify(formalizadorState.requester || {}));
-    } catch {}
+    try { localStorage.setItem(FORMALIZADOR_REQUESTER_KEY, JSON.stringify(formalizadorState.requester || {})); } catch {}
 }
 
 function resetFormalizadorDraft() {
     const keepRequester = { ...(formalizadorState.requester || {}) };
     const next = getFormalizadorDefaultDraft();
-    formalizadorState = {
-        ...formalizadorState,
-        ...next,
-        requester: keepRequester,
-        history: formalizadorState.history || [],
-        events: formalizadorState.events || {},
-        historyFilters: formalizadorState.historyFilters || { search: '', status: 'all', tipo: 'all' },
-        selectedHistoryId: formalizadorState.selectedHistoryId || '',
-        lastCreatedId: formalizadorState.lastCreatedId || ''
-    };
+    formalizadorState = { ...formalizadorState, ...next, requester: keepRequester, history: formalizadorState.history || [], events: formalizadorState.events || {}, historyFilters: formalizadorState.historyFilters || { search: '', status: 'all', tipo: 'all' }, selectedHistoryId: formalizadorState.selectedHistoryId || '', lastCreatedId: '', lastCreatedRecord: null };
     renderFormalizador();
 }
 
+function startNewFormalizacao() { resetFormalizadorDraft(); showToast('Nova solicitação iniciada.', 'info'); }
+
 async function activateFormalizador() {
     const root = document.getElementById('formalizador-root');
-    if (root) {
-        root.innerHTML = `<div class="formalizador-loading">Carregando colaboradores, unidades e histórico...</div>`;
-    }
+    if (root) root.innerHTML = `<div class="formalizador-loading">Carregando portal, colaboradores, unidades e histórico...</div>`;
     loadFormalizadorRequester();
-    if (!formalizadorState.form?.data_efetiva) {
-        mergeFormalizadorDraft({ form: { data_efetiva: getTodayKey() } });
-    }
-    try {
-        await Promise.all([
-            fetchSupabaseCollaborators(false),
-            fetchSupabaseUnits(false),
-            fetchFormalizacoes(false)
-        ]);
-    } catch (err) {
-        AppErrorHandler.capture(err, { scope: 'formalizador-activate' }, { silent: true });
-    }
+    if (!formalizadorState.form?.data_efetiva) mergeFormalizadorDraft({ form: { data_efetiva: getTodayKey() } });
+    try { await Promise.all([fetchSupabaseCollaborators(false), fetchSupabaseUnits(false), fetchFormalizacoes(false)]); }
+    catch (err) { AppErrorHandler.capture(err, { scope: 'formalizador-activate' }, { silent: true }); }
     renderFormalizador();
 }
 
@@ -8312,25 +8320,18 @@ async function fetchFormalizacoes(force = false) {
     const now = Date.now();
     if (!force && formalizadorCache.items && (now - formalizadorCache.updatedAt) < SUPABASE_CACHE_TTL_MS) {
         formalizadorState.history = formalizadorCache.items || [];
-        formalizadorState.events = formalizadorEventsCache.items || formalizadorEventsCache || {};
+        formalizadorState.events = formalizadorEventsCache.items || {};
         return formalizadorState.history;
     }
     try {
-        const { data, error } = await supabaseClient
-            .from(SUPABASE_TABLES.formalizacoes_postos)
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(500);
+        const { data, error } = await supabaseClient.from(SUPABASE_TABLES.formalizacoes_postos).select('*').order('created_at', { ascending: false }).limit(500);
         if (error) throw error;
         formalizadorCache = { items: data || [], updatedAt: now, error: '' };
         formalizadorState.history = formalizadorCache.items;
         await fetchFormalizacaoEvents(force);
         return formalizadorState.history;
     } catch (err) {
-        formalizadorCache = {
-            ...(formalizadorCache || {}),
-            error: String(err?.message || err || 'Erro ao carregar formalizações')
-        };
+        formalizadorCache = { ...(formalizadorCache || {}), error: String(err?.message || err || 'Erro ao carregar formalizações') };
         AppErrorHandler.capture(err, { scope: 'formalizador-fetch-history' }, { silent: true });
         return formalizadorState.history || [];
     }
@@ -8344,11 +8345,7 @@ async function fetchFormalizacaoEvents(force = false) {
         return formalizadorState.events;
     }
     try {
-        const { data, error } = await supabaseClient
-            .from(SUPABASE_TABLES.formalizacoes_status_events)
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(1200);
+        const { data, error } = await supabaseClient.from(SUPABASE_TABLES.formalizacoes_status_events).select('*').order('created_at', { ascending: false }).limit(1200);
         if (error) throw error;
         const grouped = {};
         (data || []).forEach(event => {
@@ -8357,1187 +8354,272 @@ async function fetchFormalizacaoEvents(force = false) {
             if (!grouped[key]) grouped[key] = [];
             grouped[key].push(event);
         });
-        Object.keys(grouped).forEach(key => {
-            grouped[key].sort((a, b) => Date.parse(a.created_at || '') - Date.parse(b.created_at || ''));
-        });
+        Object.keys(grouped).forEach(key => grouped[key].sort((a, b) => Date.parse(a.created_at || '') - Date.parse(b.created_at || '')));
         formalizadorEventsCache = { items: grouped, updatedAt: now, error: '' };
         formalizadorState.events = grouped;
         return grouped;
     } catch (err) {
-        formalizadorEventsCache = {
-            ...(formalizadorEventsCache || {}),
-            error: String(err?.message || err || 'Erro ao carregar eventos')
-        };
+        formalizadorEventsCache = { ...(formalizadorEventsCache || {}), error: String(err?.message || err || 'Erro ao carregar eventos') };
         AppErrorHandler.capture(err, { scope: 'formalizador-fetch-events' }, { silent: true });
         return formalizadorState.events || {};
     }
 }
 
 function getFormalizadorCollaborators() {
-    const source = allCollaboratorsCache.items && allCollaboratorsCache.items.length
-        ? allCollaboratorsCache.items
-        : (currentData || []);
-    return (source || []).map((item, index) => ({
-        key: getFormalizadorCollaboratorKey(item, index),
-        item,
-        unit: getFormalizadorUnitForCollaborator(item)
-    }));
+    const source = allCollaboratorsCache.items && allCollaboratorsCache.items.length ? allCollaboratorsCache.items : (currentData || []);
+    return (source || []).map((item, index) => ({ key: getFormalizadorCollaboratorKey(item, index), item, unit: getFormalizadorUnitForCollaborator(item) }));
 }
-
-function getFormalizadorUnits() {
-    return (supaUnitsCache.items || []).map((unit, index) => ({
-        key: getFormalizadorUnitKey(unit, index),
-        unit
-    }));
-}
-
-function getFormalizadorCollaboratorKey(item, fallbackIndex = 0) {
-    return String(item?.matricula || item?.re || item?.re_padrao || item?.re_novo || `${item?.nome || item?.colaborador || 'colaborador'}-${fallbackIndex}`).trim();
-}
-
-function getFormalizadorUnitKey(unit, fallbackIndex = 0) {
-    return normalizeUnitKey(unit?.posto || unit?.nome || unit?.cliente || `unidade-${fallbackIndex}`);
-}
-
-function getFormalizadorUnitForCollaborator(item) {
-    const units = supaUnitsCache.items || [];
-    if (!units.length) return null;
-    const index = buildQuickBetaUnitIndex(units);
-    return index.get(normalizeUnitKey(item?.posto || '')) || null;
-}
-
-function getSelectedFormalizadorCollaborator() {
-    const key = String(formalizadorState.collaboratorKey || '');
-    return getFormalizadorCollaborators().find(row => row.key === key) || null;
-}
-
-function getSelectedFormalizadorDestination() {
-    const key = String(formalizadorState.destinationKey || '');
-    return getFormalizadorUnits().find(row => row.key === key) || null;
-}
-
-function getSelectedFormalizadorCoverage() {
-    const key = String(formalizadorState.coverageKey || '');
-    return getFormalizadorCollaborators().find(row => row.key === key) || null;
-}
-
-function normalizeFormalizadorSearch(value) {
-    return normalizeQuickBetaValue(value);
-}
-
-function formalizadorIncludesQuery(searchText, query) {
-    const terms = normalizeFormalizadorSearch(query).split(/\s+/).filter(Boolean);
-    if (!terms.length) return true;
-    return terms.every(term => searchText.includes(term));
-}
-
-function buildFormalizadorSearchText(...values) {
-    return normalizeFormalizadorSearch(values.map(v => collectQuickBetaSearchText(v)).join(' '));
-}
-
-function getFormalizadorFilteredCollaborators(kind = 'collaborator', limit = 18) {
+function getFormalizadorUnits() { return (supaUnitsCache.items || []).map((unit, index) => ({ key: getFormalizadorUnitKey(unit, index), unit })); }
+function getFormalizadorCollaboratorKey(item, fallbackIndex = 0) { return String(item?.matricula || item?.re || item?.re_padrao || item?.re_novo || `${item?.nome || item?.colaborador || 'colaborador'}-${fallbackIndex}`).trim(); }
+function getFormalizadorUnitKey(unit, fallbackIndex = 0) { return normalizeUnitKey(unit?.posto || unit?.nome || unit?.cliente || `unidade-${fallbackIndex}`); }
+function getFormalizadorUnitForCollaborator(item) { const units = supaUnitsCache.items || []; if (!units.length) return null; return buildQuickBetaUnitIndex(units).get(normalizeUnitKey(item?.posto || '')) || null; }
+function getSelectedFormalizadorCollaborator() { return getFormalizadorCollaborators().find(row => row.key === String(formalizadorState.collaboratorKey || '')) || null; }
+function getSelectedFormalizadorDestination() { return getFormalizadorUnits().find(row => row.key === String(formalizadorState.destinationKey || '')) || null; }
+function getSelectedFormalizadorCoverage() { return getFormalizadorCollaborators().find(row => row.key === String(formalizadorState.coverageKey || '')) || null; }
+function normalizeFormalizadorSearch(value) { return normalizeQuickBetaValue(value); }
+function formalizadorIncludesQuery(searchText, query) { const terms = normalizeFormalizadorSearch(query).split(/\s+/).filter(Boolean); return !terms.length || terms.every(term => searchText.includes(term)); }
+function buildFormalizadorSearchText(...values) { return normalizeFormalizadorSearch(values.map(v => collectQuickBetaSearchText(v)).join(' ')); }
+function getFormalizadorFilteredCollaborators(kind = 'collaborator', limit = 12) {
     const query = formalizadorState.queries?.[kind] || '';
-    const rows = getFormalizadorCollaborators();
     const selected = kind === 'coverage' ? formalizadorState.coverageKey : formalizadorState.collaboratorKey;
-    return rows
-        .filter(row => row.key !== selected || kind !== 'coverage')
-        .filter(row => {
-            const searchText = buildFormalizadorSearchText(row.item, row.unit);
-            return formalizadorIncludesQuery(searchText, query);
-        })
-        .sort((a, b) => String(a.item?.nome || a.item?.colaborador || '').localeCompare(String(b.item?.nome || b.item?.colaborador || ''), 'pt-BR'))
-        .slice(0, limit);
+    return getFormalizadorCollaborators().filter(row => row.key !== selected || kind !== 'coverage').filter(row => formalizadorIncludesQuery(buildFormalizadorSearchText(row.item, row.unit), query)).sort((a, b) => String(a.item?.nome || a.item?.colaborador || '').localeCompare(String(b.item?.nome || b.item?.colaborador || ''), 'pt-BR')).slice(0, limit);
 }
+function getFormalizadorFilteredUnits(limit = 12) { return getFormalizadorUnits().filter(row => formalizadorIncludesQuery(buildFormalizadorSearchText(row.unit), formalizadorState.queries?.destination || '')).sort((a, b) => String(a.unit?.posto || a.unit?.nome || '').localeCompare(String(b.unit?.posto || b.unit?.nome || ''), 'pt-BR')).slice(0, limit); }
+function formatFormalizadorType(type) { return FORMALIZADOR_TYPES[type]?.label || String(type || 'Não definido'); }
+function formatFormalizadorStatus(status) { return FORMALIZADOR_STATUS[status] || String(status || 'Indefinido'); }
+function formatFormalizadorPriority(priority) { return ({ baixa: 'Baixa', normal: 'Normal', alta: 'Alta', urgente: 'Urgente' }[priority] || 'Normal'); }
+function formatFormalizadorDate(value) { if (!value) return ''; const key = normalizeFtDateKey(value); if (!key) return String(value); const [y, m, d] = key.split('-'); return `${d}/${m}/${y}`; }
+function formatFormalizadorDateTime(value) { if (!value) return ''; const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+function getFormalizadorCollabName(item = {}) { return item.nome || item.colaborador || ''; }
+function getFormalizadorUnitName(unit = {}) { return unit.posto || unit.nome || unit.cliente || ''; }
+function getFormalizadorCompany(value = {}) { return pickFirstDefined(value?.empresa, value?.empresa_bombeiros, value?.empresa_servicos, value?.empresa_seguranca, value?.empresa_rb, value?.cliente); }
+function getFormalizadorTypeConfig() { return FORMALIZADOR_TYPES[formalizadorState.type] || null; }
 
-function getFormalizadorFilteredUnits(limit = 18) {
-    const query = formalizadorState.queries?.destination || '';
-    return getFormalizadorUnits()
-        .filter(row => formalizadorIncludesQuery(buildFormalizadorSearchText(row.unit), query))
-        .sort((a, b) => String(a.unit?.posto || a.unit?.nome || '').localeCompare(String(b.unit?.posto || b.unit?.nome || ''), 'pt-BR'))
-        .slice(0, limit);
-}
-
-function formatFormalizadorType(type) {
-    return FORMALIZADOR_TYPES[type]?.label || String(type || 'Não definido');
-}
-
-function formatFormalizadorStatus(status) {
-    return FORMALIZADOR_STATUS[status] || String(status || 'Indefinido');
-}
-
-function formatFormalizadorPriority(priority) {
-    const map = { baixa: 'Baixa', normal: 'Normal', alta: 'Alta', urgente: 'Urgente' };
-    return map[priority] || 'Normal';
-}
-
-function formatFormalizadorDate(value) {
-    if (!value) return 'Não informada';
-    const key = normalizeFtDateKey(value);
-    if (!key) return String(value);
-    const [y, m, d] = key.split('-');
-    return `${d}/${m}/${y}`;
-}
-
-function getFormalizadorCollabName(item = {}) {
-    return item.nome || item.colaborador || 'Sem nome';
-}
-
-function getFormalizadorUnitName(unit = {}) {
-    return unit.posto || unit.nome || unit.cliente || 'Sem posto';
-}
-
-function getFormalizadorCompany(value = {}) {
-    return pickFirstDefined(
-        value?.empresa,
-        value?.empresa_bombeiros,
-        value?.empresa_servicos,
-        value?.empresa_seguranca,
-        value?.empresa_rb,
-        value?.cliente
-    );
-}
-
-function setFormalizadorStep(step) {
-    const parsed = parseInt(step, 10);
-    if (!Number.isFinite(parsed)) return;
-    formalizadorState.step = Math.min(Math.max(parsed, 1), 7);
+function setFormalizadorFocus(focus) {
+    formalizadorState.focus = focus || 'request';
     renderFormalizador();
+    setTimeout(() => document.querySelector(`[data-formalizador-section="${formalizadorState.focus}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
 }
-
-function nextFormalizadorStep() {
-    const validation = validateFormalizadorStep(formalizadorState.step);
-    if (!validation.ok) {
-        showToast(validation.message, 'warning');
-        return;
-    }
-    setFormalizadorStep((formalizadorState.step || 1) + 1);
-}
-
-function prevFormalizadorStep() {
-    setFormalizadorStep((formalizadorState.step || 1) - 1);
-}
-
-function selectFormalizadorType(type) {
-    if (!FORMALIZADOR_TYPES[type]) return;
-    formalizadorState.type = type;
-    if (!FORMALIZADOR_TYPES[type].needsDestination) {
-        formalizadorState.destinationKey = '';
-        formalizadorState.queries.destination = '';
-    }
-    renderFormalizador();
-}
-
-function setFormalizadorRequesterField(field, value) {
-    if (!Object.prototype.hasOwnProperty.call(formalizadorState.requester, field)) return;
-    formalizadorState.requester[field] = value;
-    saveFormalizadorRequester();
-}
-
-function setFormalizadorFormField(field, value) {
-    if (!Object.prototype.hasOwnProperty.call(formalizadorState.form, field)) return;
-    formalizadorState.form[field] = value;
-}
-
-function setFormalizadorBenefit(field, value) {
-    if (!Object.prototype.hasOwnProperty.call(formalizadorState.benefits, field)) return;
-    formalizadorState.benefits[field] = value;
-}
-
-function setFormalizadorCoverageField(field, value) {
-    if (!Object.prototype.hasOwnProperty.call(formalizadorState.coverage, field)) return;
-    formalizadorState.coverage[field] = value;
-    if (field === 'tipo' && value === 'sem_cobertura') {
-        formalizadorState.coverageKey = '';
-        formalizadorState.queries.coverage = '';
-    }
-    renderFormalizador();
-}
-
-function setFormalizadorQuery(kind, value) {
-    if (!formalizadorState.queries) formalizadorState.queries = {};
-    formalizadorState.queries[kind] = value || '';
-    renderFormalizadorPicker(kind);
-}
-
-function selectFormalizadorCollaborator(key) {
-    formalizadorState.collaboratorKey = String(key || '');
-    renderFormalizador();
-}
-
-function selectFormalizadorDestination(key) {
-    formalizadorState.destinationKey = String(key || '');
-    renderFormalizador();
-}
-
-function selectFormalizadorCoverage(key) {
-    formalizadorState.coverageKey = String(key || '');
-    renderFormalizador();
-}
-
-function setFormalizadorHistoryFilter(field, value) {
-    if (!formalizadorState.historyFilters) formalizadorState.historyFilters = { search: '', status: 'all', tipo: 'all' };
-    formalizadorState.historyFilters[field] = value || '';
-    renderFormalizadorHistoryList();
-}
-
-function selectFormalizacaoHistory(id) {
-    formalizadorState.selectedHistoryId = String(id || '');
-    renderFormalizadorHistoryList();
-}
+function selectFormalizadorType(type) { if (!FORMALIZADOR_TYPES[type]) return; formalizadorState.type = type; formalizadorState.focus = 'form'; if (!FORMALIZADOR_TYPES[type].needsDestination) { formalizadorState.destinationKey = ''; formalizadorState.queries.destination = ''; } renderFormalizador(); }
+function setFormalizadorRequesterField(field, value) { if (!Object.prototype.hasOwnProperty.call(formalizadorState.requester, field)) return; formalizadorState.requester[field] = value; saveFormalizadorRequester(); }
+function setFormalizadorFormField(field, value) { if (!Object.prototype.hasOwnProperty.call(formalizadorState.form, field)) return; formalizadorState.form[field] = value; }
+function setFormalizadorBenefit(field, value) { if (!Object.prototype.hasOwnProperty.call(formalizadorState.benefits, field)) return; formalizadorState.benefits[field] = value; }
+function setFormalizadorCoverageTextField(field, value) { if (!Object.prototype.hasOwnProperty.call(formalizadorState.coverage, field)) return; formalizadorState.coverage[field] = value; }
+function setFormalizadorCoverageType(value) { if (!FORMALIZADOR_COVERAGE_TYPES[value]) return; formalizadorState.coverage.tipo = value; if (value === 'sem_cobertura') { formalizadorState.coverageKey = ''; formalizadorState.queries.coverage = ''; } renderFormalizador(); }
+function setFormalizadorQuery(kind, value) { if (!formalizadorState.queries) formalizadorState.queries = {}; formalizadorState.queries[kind] = value || ''; renderFormalizadorPicker(kind); }
+function selectFormalizadorCollaborator(key) { formalizadorState.collaboratorKey = String(key || ''); renderFormalizador(); }
+function selectFormalizadorDestination(key) { formalizadorState.destinationKey = String(key || ''); renderFormalizador(); }
+function selectFormalizadorCoverage(key) { formalizadorState.coverageKey = String(key || ''); renderFormalizador(); }
+function setFormalizadorHistoryFilter(field, value) { if (!formalizadorState.historyFilters) formalizadorState.historyFilters = { search: '', status: 'all', tipo: 'all' }; formalizadorState.historyFilters[field] = value || ''; renderFormalizadorHistoryList(); }
+function selectFormalizacaoHistory(id) { formalizadorState.selectedHistoryId = String(id || ''); renderFormalizadorHistoryList(); }
 
 function renderFormalizador() {
     const root = document.getElementById('formalizador-root');
     if (!root) return;
-    const historyCount = (formalizadorState.history || []).length;
-    const collabCount = getFormalizadorCollaborators().length;
-    const unitCount = getFormalizadorUnits().length;
-    const setupWarning = formalizadorCache.error ? `
-        <div class="formalizador-warning">
-            Não consegui carregar o histórico do Formalizador. Aplique o SQL <strong>formalizador_setup.sql</strong> no Supabase antes de formalizar.
-        </div>
-    ` : '';
-
+    const validation = validateFormalizador({ silent: true });
+    const setupWarning = formalizadorCache.error ? `<div class="formalizador-alert danger">O histórico do Formalizador não carregou. Verifique o SQL do Formalizador no Supabase antes de usar em produção.</div>` : '';
     root.innerHTML = `
-        <div class="formalizador-hero">
-            <div>
-                <span class="formalizador-eyebrow">Processo corporativo</span>
-                <h2>Formalizador</h2>
-                <p>Crie protocolos de troca de posto, remanejamento, desligamento, término de experiência, benefícios e cobertura sem alterar a planilha nem a base operacional.</p>
-            </div>
-            <div class="formalizador-hero-metrics">
-                <span><strong>${collabCount}</strong> colaboradores</span>
-                <span><strong>${unitCount}</strong> unidades</span>
-                <span><strong>${historyCount}</strong> protocolos</span>
-            </div>
-        </div>
-        ${setupWarning}
-        <div class="formalizador-workspace">
-            <section class="formalizador-wizard">
-                ${renderFormalizadorStepper()}
-                <div id="formalizador-step-content" class="formalizador-step-content">
-                    ${renderFormalizadorCurrentStep()}
-                </div>
-                ${renderFormalizadorNav()}
-            </section>
-            <aside id="formalizador-history-panel" class="formalizador-history-panel">
-                ${renderFormalizadorHistoryPanel()}
-            </aside>
-        </div>
-    `;
+        <div class="formalizador-app-hero">
+            <div><span class="formalizador-eyebrow">Portal de solicitações operacionais</span><h2>Formalizador</h2><p>Registre mudanças de posto, remanejamentos, desligamentos, experiências, benefícios e coberturas como casos rastreáveis, com comunicação pronta para envio.</p></div>
+            <div class="formalizador-health-grid"><span><strong>${getFormalizadorCollaborators().length}</strong> colaboradores</span><span><strong>${getFormalizadorUnits().length}</strong> unidades</span><span><strong>${(formalizadorState.history || []).length}</strong> protocolos</span><span><strong>${validation.ok ? 'Pronto' : 'Pendente'}</strong> validação</span></div>
+        </div>${setupWarning}
+        <div class="formalizador-portal-grid">
+            <aside class="formalizador-catalog" data-formalizador-section="request">${renderFormalizadorCatalog()}</aside>
+            <main class="formalizador-case-workspace" data-formalizador-section="form">${formalizadorState.lastCreatedRecord ? renderFormalizadorSuccess() : renderFormalizadorCaseBuilder()}</main>
+            <aside class="formalizador-history-panel" data-formalizador-section="history">${renderFormalizadorHistoryPanel()}</aside>
+        </div>`;
 }
 
-function renderFormalizadorStepper() {
-    const steps = [
-        [1, 'Solicitante'],
-        [2, 'Tipo'],
-        [3, 'Colaborador'],
-        [4, 'Mudança'],
-        [5, 'Benefícios'],
-        [6, 'Cobertura'],
-        [7, 'Revisão']
-    ];
-    return `
-        <div class="formalizador-stepper">
-            ${steps.map(([idx, label]) => {
-                const status = idx === formalizadorState.step ? 'active' : idx < formalizadorState.step ? 'done' : '';
-                return `<button type="button" class="${status}" onclick="setFormalizadorStep(${idx})"><span>${idx}</span>${escapeHtml(label)}</button>`;
-            }).join('')}
-        </div>
-    `;
+function renderFormalizadorCatalog() {
+    return `<div class="formalizador-panel-title"><span>1. Tipo de solicitação</span><strong>Escolha o processo</strong></div><div class="formalizador-type-list">${Object.entries(FORMALIZADOR_TYPES).map(([key, cfg]) => `<button type="button" class="formalizador-type-item ${cfg.accent} ${formalizadorState.type === key ? 'selected' : ''}" onclick="selectFormalizadorType('${escapeHtml(key)}')"><span>${escapeHtml(cfg.shortLabel)}</span><strong>${escapeHtml(cfg.label)}</strong><small>${escapeHtml(cfg.hint)}</small></button>`).join('')}</div><div class="formalizador-catalog-note"><strong>Referência de fluxo</strong><p>Catálogo de serviços, caso operacional, formulário condicional e workflow de acompanhamento.</p></div>`;
 }
 
-function renderFormalizadorCurrentStep() {
-    switch (formalizadorState.step) {
-        case 1: return renderFormalizadorRequesterStep();
-        case 2: return renderFormalizadorTypeStep();
-        case 3: return renderFormalizadorCollaboratorStep();
-        case 4: return renderFormalizadorChangeStep();
-        case 5: return renderFormalizadorBenefitsStep();
-        case 6: return renderFormalizadorCoverageStep();
-        case 7: return renderFormalizadorReviewStep();
-        default: return renderFormalizadorRequesterStep();
-    }
+function renderFormalizadorCaseBuilder() {
+    const type = getFormalizadorTypeConfig();
+    const validation = validateFormalizador({ silent: true });
+    const preview = type && validation.ok ? buildFormalizadorPreview() : null;
+    return `<div class="formalizador-builder-head"><div><span>2. Caso operacional</span><h3>${escapeHtml(type?.label || 'Selecione uma solicitação')}</h3><p>${escapeHtml(type?.hint || 'Comece escolhendo uma ação no catálogo ao lado.')}</p></div><div class="formalizador-builder-actions"><button type="button" onclick="resetFormalizadorDraft()">Limpar</button><button type="button" class="primary" onclick="submitFormalizacao()" ${validation.ok ? '' : 'disabled'}>Registrar protocolo</button></div></div>${!type ? renderFormalizadorEmptyStart() : `${!validation.ok ? `<div class="formalizador-alert warning">${escapeHtml(validation.message)}</div>` : ''}${renderFormalizadorRequesterBlock()}${renderFormalizadorCollaboratorBlock()}${renderFormalizadorChangeBlock()}${renderFormalizadorBenefitsBlock()}${renderFormalizadorCoverageBlock()}${renderFormalizadorReviewBlock(preview)}`}`;
 }
 
-function renderFormalizadorNav() {
-    const isLast = formalizadorState.step === 7;
-    return `
-        <div class="formalizador-nav">
-            <button type="button" class="formalizador-btn ghost" onclick="resetFormalizadorDraft()">Limpar</button>
-            <div>
-                <button type="button" class="formalizador-btn secondary" onclick="prevFormalizadorStep()" ${formalizadorState.step <= 1 ? 'disabled' : ''}>Voltar</button>
-                ${isLast
-                    ? `<button type="button" class="formalizador-btn primary" onclick="submitFormalizacao()">Formalizar</button>`
-                    : `<button type="button" class="formalizador-btn primary" onclick="nextFormalizadorStep()">Avançar</button>`}
-            </div>
-        </div>
-    `;
-}
+function renderFormalizadorEmptyStart() { return `<div class="formalizador-empty-start"><strong>Escolha uma solicitação para montar o caso.</strong><p>O formulário será ajustado automaticamente para evitar campos desnecessários e textos incompletos.</p></div>`; }
 
-function renderFormalizadorRequesterStep() {
+function renderFormalizadorRequesterBlock() {
     const r = formalizadorState.requester || {};
-    return `
-        <div class="formalizador-step-head">
-            <span>Etapa 1</span>
-            <h3>Dados do solicitante</h3>
-            <p>Esses dados ficam salvos somente neste aparelho para acelerar novos pedidos.</p>
-        </div>
-        <div class="formalizador-form-grid">
-            <label>
-                Nome do solicitante *
-                <input type="text" value="${escapeHtml(r.nome)}" oninput="setFormalizadorRequesterField('nome', this.value)" placeholder="Nome completo">
-            </label>
-            <label>
-                Função / cargo *
-                <input type="text" value="${escapeHtml(r.cargo)}" oninput="setFormalizadorRequesterField('cargo', this.value)" placeholder="Supervisor, coordenador...">
-            </label>
-            <label>
-                Telefone
-                <input type="tel" value="${escapeHtml(r.telefone)}" oninput="setFormalizadorRequesterField('telefone', this.value)" placeholder="(11) 99999-9999">
-            </label>
-            <label>
-                E-mail
-                <input type="email" value="${escapeHtml(r.email)}" oninput="setFormalizadorRequesterField('email', this.value)" placeholder="nome@empresa.com.br">
-            </label>
-        </div>
-    `;
+    return `<section class="formalizador-case-section"><div class="formalizador-section-title"><span>Solicitante</span><strong>Quem está registrando</strong></div><div class="formalizador-form-grid"><label>Nome completo *<input type="text" value="${escapeHtml(r.nome)}" oninput="setFormalizadorRequesterField('nome', this.value)" placeholder="Ex.: Gustavo Cortes"></label><label>Função / cargo *<input type="text" value="${escapeHtml(r.cargo)}" oninput="setFormalizadorRequesterField('cargo', this.value)" placeholder="Ex.: Assistente ADM"></label><label>Telefone *<input type="tel" value="${escapeHtml(r.telefone)}" oninput="setFormalizadorRequesterField('telefone', this.value)" placeholder="Ex.: 11 93384-1730"></label><label>E-mail<input type="email" value="${escapeHtml(r.email)}" oninput="setFormalizadorRequesterField('email', this.value)" placeholder="nome@empresa.com.br"></label></div></section>`;
 }
 
-function renderFormalizadorTypeStep() {
-    return `
-        <div class="formalizador-step-head">
-            <span>Etapa 2</span>
-            <h3>Tipo de formalização</h3>
-            <p>Escolha o processo. Os campos obrigatórios mudam conforme o tipo.</p>
-        </div>
-        <div class="formalizador-type-grid">
-            ${Object.entries(FORMALIZADOR_TYPES).map(([key, cfg]) => `
-                <button type="button" class="formalizador-type-card ${formalizadorState.type === key ? 'selected' : ''}" onclick="selectFormalizadorType('${escapeHtml(key)}')">
-                    <strong>${escapeHtml(cfg.label)}</strong>
-                    <span>${escapeHtml(cfg.hint)}</span>
-                </button>
-            `).join('')}
-        </div>
-    `;
-}
-
-function renderFormalizadorCollaboratorStep() {
+function renderFormalizadorCollaboratorBlock() {
     const selected = getSelectedFormalizadorCollaborator();
-    return `
-        <div class="formalizador-step-head">
-            <span>Etapa 3</span>
-            <h3>Selecionar colaborador</h3>
-            <p>Busque por nome, matrícula, RE, posto, cargo, empresa, cliente ou telefone.</p>
-        </div>
-        ${selected ? renderFormalizadorSelectedCollab(selected, 'Colaborador selecionado') : ''}
-        <div class="formalizador-search-box">
-            ${ICONS.search}
-            <input type="text" value="${escapeHtml(formalizadorState.queries.collaborator || '')}" oninput="setFormalizadorQuery('collaborator', this.value)" placeholder="Digite para localizar o colaborador">
-        </div>
-        <div id="formalizador-collaborator-results" class="formalizador-result-list">
-            ${renderFormalizadorCollaboratorResults('collaborator')}
-        </div>
-    `;
+    return `<section class="formalizador-case-section"><div class="formalizador-section-title"><span>Colaborador</span><strong>Localizar pessoa e contexto atual</strong></div>${selected ? renderFormalizadorSelectedPerson(selected, 'Selecionado') : ''}<div class="formalizador-search-field">${ICONS.search}<input type="text" value="${escapeHtml(formalizadorState.queries.collaborator || '')}" oninput="setFormalizadorQuery('collaborator', this.value)" placeholder="Buscar por nome, matrícula, RE, posto, cargo, telefone ou empresa"></div><div id="formalizador-collaborator-results" class="formalizador-picker-list">${renderFormalizadorCollaboratorResults('collaborator')}</div></section>`;
 }
 
-function renderFormalizadorChangeStep() {
+function renderFormalizadorChangeBlock() {
+    const type = getFormalizadorTypeConfig();
     const selected = getSelectedFormalizadorCollaborator();
     const destination = getSelectedFormalizadorDestination();
-    const needsDestination = FORMALIZADOR_TYPES[formalizadorState.type]?.needsDestination;
     const currentUnit = selected?.unit || null;
-    return `
-        <div class="formalizador-step-head">
-            <span>Etapa 4</span>
-            <h3>Mudança solicitada</h3>
-            <p>Defina data, prioridade, motivo e posto destino quando o processo exigir.</p>
-        </div>
-        <div class="formalizador-compare">
-            <div>
-                <span>Antes</span>
-                ${selected ? renderFormalizadorSelectedCollab(selected, 'Situação atual') : '<p>Selecione o colaborador na etapa anterior.</p>'}
-                ${currentUnit ? renderFormalizadorUnitSummary(currentUnit) : ''}
-            </div>
-            <div>
-                <span>Depois</span>
-                ${needsDestination
-                    ? (destination ? renderFormalizadorUnitSummary(destination.unit) : '<p class="formalizador-muted">Selecione o posto destino abaixo.</p>')
-                    : '<p class="formalizador-muted">Este tipo não exige posto destino.</p>'}
-            </div>
-        </div>
-        <div class="formalizador-form-grid">
-            <label>
-                Data efetiva *
-                <input type="date" value="${escapeHtml(formalizadorState.form.data_efetiva || '')}" onchange="setFormalizadorFormField('data_efetiva', this.value)">
-            </label>
-            <label>
-                Data fim / experiência
-                <input type="date" value="${escapeHtml(formalizadorState.form.data_fim || '')}" onchange="setFormalizadorFormField('data_fim', this.value)">
-            </label>
-            <label>
-                Prioridade
-                <select onchange="setFormalizadorFormField('prioridade', this.value)">
-                    ${['baixa', 'normal', 'alta', 'urgente'].map(opt => `<option value="${opt}" ${formalizadorState.form.prioridade === opt ? 'selected' : ''}>${formatFormalizadorPriority(opt)}</option>`).join('')}
-                </select>
-            </label>
-            <label>
-                Motivo categoria
-                <select onchange="setFormalizadorFormField('motivo_categoria', this.value)">
-                    ${['', 'cobertura_contrato', 'ferias', 'falta', 'pedido_cliente', 'desempenho', 'experiencia', 'beneficios', 'outro'].map(opt => `<option value="${opt}" ${formalizadorState.form.motivo_categoria === opt ? 'selected' : ''}>${escapeHtml(opt ? opt.replace(/_/g, ' ') : 'Selecione')}</option>`).join('')}
-                </select>
-            </label>
-        </div>
-        <label class="formalizador-wide-label">
-            Observações da mudança
-            <textarea rows="4" oninput="setFormalizadorFormField('motivo_observacao', this.value)" placeholder="Explique o motivo e qualquer condição relevante.">${escapeHtml(formalizadorState.form.motivo_observacao || '')}</textarea>
-        </label>
-        ${needsDestination ? `
-            <div class="formalizador-search-box">
-                ${ICONS.search}
-                <input type="text" value="${escapeHtml(formalizadorState.queries.destination || '')}" oninput="setFormalizadorQuery('destination', this.value)" placeholder="Buscar posto destino por posto, cliente, empresa, cidade ou e-mail">
-            </div>
-            <div id="formalizador-destination-results" class="formalizador-result-list">
-                ${renderFormalizadorUnitResults()}
-            </div>
-        ` : ''}
-    `;
+    return `<section class="formalizador-case-section"><div class="formalizador-section-title"><span>Alteração solicitada</span><strong>Antes x Depois</strong></div><div class="formalizador-compare-board"><div><span>Antes</span>${selected ? renderFormalizadorSelectedPerson(selected, 'Situação atual') : '<p>Selecione o colaborador para preencher a situação atual.</p>'}${currentUnit ? renderFormalizadorUnitCard(currentUnit, 'Unidade atual') : ''}</div><div><span>Depois</span>${type?.needsDestination ? (destination ? renderFormalizadorUnitCard(destination.unit, 'Posto destino') : '<p>Selecione o posto destino para concluir a comparação.</p>') : '<p>Este tipo de solicitação não exige posto destino.</p>'}</div></div><div class="formalizador-form-grid"><label>Data efetiva *<input type="date" value="${escapeHtml(formalizadorState.form.data_efetiva || '')}" onchange="setFormalizadorFormField('data_efetiva', this.value)"></label><label>Data fim ${type?.requiresEndDate ? '*' : ''}<input type="date" value="${escapeHtml(formalizadorState.form.data_fim || '')}" onchange="setFormalizadorFormField('data_fim', this.value)"></label><label>Prioridade<select onchange="setFormalizadorFormField('prioridade', this.value)">${['baixa', 'normal', 'alta', 'urgente'].map(opt => `<option value="${opt}" ${formalizadorState.form.prioridade === opt ? 'selected' : ''}>${formatFormalizadorPriority(opt)}</option>`).join('')}</select></label><label>Motivo / categoria *<select onchange="setFormalizadorFormField('motivo_categoria', this.value)"><option value="">Selecione o motivo</option>${Object.entries(FORMALIZADOR_MOTIVOS).map(([value, label]) => `<option value="${value}" ${formalizadorState.form.motivo_categoria === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></label></div><label class="formalizador-wide-label">Observações do solicitante<textarea rows="3" oninput="setFormalizadorFormField('motivo_observacao', this.value)" placeholder="Explique o motivo, contexto ou orientação operacional.">${escapeHtml(formalizadorState.form.motivo_observacao || '')}</textarea></label>${type?.needsDestination ? `<div class="formalizador-search-field">${ICONS.search}<input type="text" value="${escapeHtml(formalizadorState.queries.destination || '')}" oninput="setFormalizadorQuery('destination', this.value)" placeholder="Buscar posto destino por posto, cliente, empresa, cidade ou e-mail"></div><div id="formalizador-destination-results" class="formalizador-picker-list">${renderFormalizadorUnitResults()}</div>` : ''}</section>`;
 }
 
-function renderFormalizadorBenefitsStep() {
+function renderFormalizadorBenefitsBlock() {
     const b = formalizadorState.benefits || {};
-    const options = [
-        ['vale_transporte', 'Vale transporte', 'Marque se muda VT, rota, integração ou desconto.'],
-        ['vale_refeicao', 'Vale refeição / refeição no local', 'Marque se muda VR, refeitório, marmita ou local de refeição.'],
-        ['adicional_noturno', 'Adicional noturno', 'Marque se a mudança altera período noturno.'],
-        ['intrajornada', 'Intrajornada', 'Marque se altera pausa/intervalo contratual.'],
-        ['escala_turno', 'Escala / turno', 'Marque se altera escala, horário ou turma.']
-    ];
-    return `
-        <div class="formalizador-step-head">
-            <span>Etapa 5</span>
-            <h3>Impactos em benefícios</h3>
-            <p>Marque tudo que precisa ser avaliado pelo administrativo/DP.</p>
-        </div>
-        <div class="formalizador-check-grid">
-            ${options.map(([key, label, hint]) => `
-                <label class="formalizador-check-card">
-                    <input type="checkbox" ${b[key] ? 'checked' : ''} onchange="setFormalizadorBenefit('${key}', this.checked)">
-                    <span>
-                        <strong>${escapeHtml(label)}</strong>
-                        <small>${escapeHtml(hint)}</small>
-                    </span>
-                </label>
-            `).join('')}
-        </div>
-        <label class="formalizador-wide-label">
-            Observações sobre benefícios
-            <textarea rows="4" oninput="setFormalizadorBenefit('observacoes', this.value)" placeholder="Ex.: passa a ter adicional noturno; unidade destino possui refeição no local.">${escapeHtml(b.observacoes || '')}</textarea>
-        </label>
-    `;
+    const options = [['vale_transporte', 'Vale transporte', 'verificar rota, integração, desconto ou necessidade de ajuste'], ['vale_refeicao', 'Refeição / VR', 'verificar VR, refeição no local, marmita ou regra da unidade'], ['adicional_noturno', 'Adicional noturno', 'verificar impacto por horário noturno'], ['intrajornada', 'Intrajornada', 'verificar intervalo ou condição contratual'], ['escala_turno', 'Escala / turno', 'verificar alteração de escala, horário ou turma']];
+    return `<section class="formalizador-case-section"><div class="formalizador-section-title"><span>Impactos</span><strong>Benefícios e escala</strong></div><div class="formalizador-impact-grid">${options.map(([key, label, hint]) => `<label class="formalizador-impact-card ${b[key] ? 'selected' : ''}"><input type="checkbox" ${b[key] ? 'checked' : ''} onchange="setFormalizadorBenefit('${key}', this.checked); this.closest('.formalizador-impact-card').classList.toggle('selected', this.checked)"><span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(hint)}</small></span></label>`).join('')}</div><label class="formalizador-wide-label">Observações de benefícios<textarea rows="3" oninput="setFormalizadorBenefit('observacoes', this.value)" placeholder="Ex.: unidade destino possui refeição no local; revisar adicional noturno.">${escapeHtml(b.observacoes || '')}</textarea></label></section>`;
 }
 
-function renderFormalizadorCoverageStep() {
+function renderFormalizadorCoverageBlock() {
     const c = formalizadorState.coverage || {};
     const selected = getSelectedFormalizadorCoverage();
-    const needsSubstitute = c.tipo !== 'sem_cobertura';
-    return `
-        <div class="formalizador-step-head">
-            <span>Etapa 6</span>
-            <h3>Cobertura do posto</h3>
-            <p>Informe se há cobertura para o remanejamento ou se ficará pendente.</p>
-        </div>
-        <div class="formalizador-radio-grid">
-            ${[
-                ['sem_cobertura', 'Sem cobertura definida'],
-                ['cobertura_definida', 'Cobertura já definida'],
-                ['temporaria', 'Cobertura temporária'],
-                ['definitiva', 'Cobertura definitiva']
-            ].map(([value, label]) => `
-                <label class="formalizador-radio-card ${c.tipo === value ? 'selected' : ''}">
-                    <input type="radio" name="formalizador_coverage" value="${value}" ${c.tipo === value ? 'checked' : ''} onchange="setFormalizadorCoverageField('tipo', this.value)">
-                    <span>${escapeHtml(label)}</span>
-                </label>
-            `).join('')}
-        </div>
-        <div class="formalizador-form-grid">
-            <label>
-                Período da cobertura
-                <input type="text" value="${escapeHtml(c.periodo || '')}" oninput="setFormalizadorCoverageFieldNoRender('periodo', this.value)" placeholder="Ex.: 20/04 a 05/05, até nova definição">
-            </label>
-        </div>
-        ${needsSubstitute ? `
-            ${selected ? renderFormalizadorSelectedCollab(selected, 'Substituto / cobertura selecionada') : ''}
-            <div class="formalizador-search-box">
-                ${ICONS.search}
-                <input type="text" value="${escapeHtml(formalizadorState.queries.coverage || '')}" oninput="setFormalizadorQuery('coverage', this.value)" placeholder="Buscar colaborador substituto">
-            </div>
-            <div id="formalizador-coverage-results" class="formalizador-result-list">
-                ${renderFormalizadorCollaboratorResults('coverage')}
-            </div>
-        ` : `
-            <div class="formalizador-warning compact">Sem cobertura definida: o protocolo ficará com alerta de pendência operacional.</div>
-        `}
-        <label class="formalizador-wide-label">
-            Observações de cobertura
-            <textarea rows="4" oninput="setFormalizadorCoverageFieldNoRender('observacoes', this.value)" placeholder="Detalhe pendências, substituto provisório ou prazo.">${escapeHtml(c.observacoes || '')}</textarea>
-        </label>
-    `;
+    const needsSubstitute = c.tipo && c.tipo !== 'sem_cobertura';
+    return `<section class="formalizador-case-section"><div class="formalizador-section-title"><span>Cobertura</span><strong>Pendência operacional</strong></div><div class="formalizador-coverage-options">${Object.entries(FORMALIZADOR_COVERAGE_TYPES).map(([value, label]) => `<button type="button" class="${c.tipo === value ? 'selected' : ''}" onclick="setFormalizadorCoverageType('${escapeHtml(value)}')"><strong>${escapeHtml(label)}</strong></button>`).join('')}</div>${c.tipo === 'sem_cobertura' ? '<div class="formalizador-alert warning compact">A solicitação ficará marcada com pendência operacional de cobertura.</div>' : ''}${needsSubstitute ? `${selected ? renderFormalizadorSelectedPerson(selected, 'Cobertura selecionada') : ''}<div class="formalizador-search-field">${ICONS.search}<input type="text" value="${escapeHtml(formalizadorState.queries.coverage || '')}" oninput="setFormalizadorQuery('coverage', this.value)" placeholder="Buscar colaborador substituto por nome, RE, matrícula, posto ou telefone"></div><div id="formalizador-coverage-results" class="formalizador-picker-list">${renderFormalizadorCollaboratorResults('coverage')}</div>` : ''}<div class="formalizador-form-grid single"><label>Período da cobertura<input type="text" value="${escapeHtml(c.periodo || '')}" oninput="setFormalizadorCoverageTextField('periodo', this.value)" placeholder="Ex.: 22/04 a 05/05 ou até nova definição"></label></div><label class="formalizador-wide-label">Observações de cobertura<textarea rows="3" oninput="setFormalizadorCoverageTextField('observacoes', this.value)" placeholder="Informe justificativa, substituto externo ou pendência.">${escapeHtml(c.observacoes || '')}</textarea></label></section>`;
 }
 
-function setFormalizadorCoverageFieldNoRender(field, value) {
-    if (!Object.prototype.hasOwnProperty.call(formalizadorState.coverage, field)) return;
-    formalizadorState.coverage[field] = value;
+function renderFormalizadorReviewBlock(preview) {
+    const validation = validateFormalizador({ silent: true });
+    if (!formalizadorState.form.email_recipients) { const recipients = getFormalizadorDefaultRecipients(); if (recipients) formalizadorState.form.email_recipients = recipients; }
+    return `<section class="formalizador-case-section formalizador-review-section"><div class="formalizador-section-title"><span>3. Revisão</span><strong>Comunicação pronta</strong></div>${renderFormalizadorReviewSummary()}<label class="formalizador-wide-label">Destinatários sugeridos<input type="text" value="${escapeHtml(formalizadorState.form.email_recipients || '')}" oninput="setFormalizadorFormField('email_recipients', this.value)" placeholder="email1@empresa.com.br, email2@empresa.com.br"></label>${preview ? `<div class="formalizador-message-preview"><div><span>Assunto</span><strong>${escapeHtml(preview.subject)}</strong></div><pre>${escapeHtml(preview.body)}</pre></div>` : ''}<div class="formalizador-final-actions"><button type="button" onclick="copyFormalizadorDraftText()" ${preview ? '' : 'disabled'}>Copiar prévia</button><button type="button" class="primary" onclick="submitFormalizacao()" ${validation.ok ? '' : 'disabled'}>Registrar protocolo</button></div></section>`;
 }
 
-function renderFormalizadorReviewStep() {
-    const validation = validateFormalizador();
+function renderFormalizadorReviewSummary() {
     const collab = getSelectedFormalizadorCollaborator();
     const destination = getSelectedFormalizadorDestination();
-    const defaultRecipients = getFormalizadorDefaultRecipients();
-    if (!formalizadorState.form.email_recipients && defaultRecipients) {
-        formalizadorState.form.email_recipients = defaultRecipients;
-    }
-    const preview = buildFormalizadorPreview();
-    return `
-        <div class="formalizador-step-head">
-            <span>Etapa 7</span>
-            <h3>Revisar e formalizar</h3>
-            <p>O supervisor revisa tudo antes de enviar e-mail ou WhatsApp. O site registra o protocolo, mas não executa a mudança.</p>
-        </div>
-        ${validation.ok ? '' : `<div class="formalizador-warning">${escapeHtml(validation.message)}</div>`}
-        <div class="formalizador-review-grid">
-            <section>
-                <h4>Antes x Depois</h4>
-                <div class="formalizador-compare slim">
-                    <div>
-                        <span>Antes</span>
-                        ${collab ? renderFormalizadorSelectedCollab(collab, 'Colaborador') : '<p>Sem colaborador.</p>'}
-                    </div>
-                    <div>
-                        <span>Depois</span>
-                        ${destination ? renderFormalizadorUnitSummary(destination.unit) : '<p class="formalizador-muted">Sem posto destino.</p>'}
-                    </div>
-                </div>
-            </section>
-            <section>
-                <h4>Resumo</h4>
-                ${renderFormalizadorSummaryList(preview)}
-            </section>
-        </div>
-        <label class="formalizador-wide-label">
-            Destinatários do e-mail
-            <input type="text" value="${escapeHtml(formalizadorState.form.email_recipients || '')}" oninput="setFormalizadorFormField('email_recipients', this.value)" placeholder="email1@empresa.com.br, email2@empresa.com.br">
-        </label>
-        <div class="formalizador-preview">
-            <div>
-                <strong>Assunto</strong>
-                <span>${escapeHtml(preview.subject)}</span>
-            </div>
-            <pre>${escapeHtml(preview.body)}</pre>
-        </div>
-        <div class="formalizador-safe-note">O histórico do Formalizador não grava CPF, RG, PIS, CTPS nem endereço residencial.</div>
-        ${formalizadorState.lastCreatedId ? `
-            <div class="formalizador-post-actions">
-                <button type="button" class="formalizador-btn secondary" onclick="copyFormalizacaoText('${escapeHtml(formalizadorState.lastCreatedId)}')">Copiar texto</button>
-                <button type="button" class="formalizador-btn secondary" onclick="openFormalizacaoEmail('${escapeHtml(formalizadorState.lastCreatedId)}')">Abrir e-mail</button>
-                <button type="button" class="formalizador-btn secondary" onclick="shareFormalizacaoWhatsapp('${escapeHtml(formalizadorState.lastCreatedId)}')">WhatsApp</button>
-            </div>
-        ` : ''}
-    `;
+    const items = [['Tipo', formatFormalizadorType(formalizadorState.type)], ['Colaborador', getFormalizadorCollabName(collab?.item || {})], ['Posto atual', collab?.item?.posto || ''], ['Posto destino', destination?.unit ? getFormalizadorUnitName(destination.unit) : ''], ['Data efetiva', formatFormalizadorDate(formalizadorState.form.data_efetiva)], ['Motivo', FORMALIZADOR_MOTIVOS[formalizadorState.form.motivo_categoria] || ''], ['Impactos', getFormalizadorBenefitsLabel()], ['Cobertura', getFormalizadorCoverageLabel()]].filter(([, value]) => String(value || '').trim());
+    return `<div class="formalizador-review-grid">${items.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}</div>`;
 }
 
-function renderFormalizadorPicker(kind) {
-    if (kind === 'destination') {
-        const el = document.getElementById('formalizador-destination-results');
-        if (el) el.innerHTML = renderFormalizadorUnitResults();
-        return;
-    }
-    const id = kind === 'coverage' ? 'formalizador-coverage-results' : 'formalizador-collaborator-results';
-    const el = document.getElementById(id);
-    if (el) el.innerHTML = renderFormalizadorCollaboratorResults(kind);
+function renderFormalizadorSuccess() {
+    const record = formalizadorState.lastCreatedRecord;
+    return `<div class="formalizador-success"><span>Protocolo registrado</span><h3>${escapeHtml(record?.protocolo || '')}</h3><p>A solicitação foi salva no histórico como caso operacional. O texto formal já foi copiado para a área de transferência.</p>${renderFormalizadorSuccessSummary(record)}<div class="formalizador-success-actions"><button type="button" onclick="copyFormalizacaoText('${escapeHtml(record?.id || '')}')">Copiar e-mail</button><button type="button" onclick="openFormalizacaoEmail('${escapeHtml(record?.id || '')}')">Abrir Gmail</button><button type="button" onclick="shareFormalizacaoWhatsapp('${escapeHtml(record?.id || '')}')">WhatsApp</button><button type="button" onclick="setFormalizadorFocus('history')">Ver histórico</button><button type="button" class="primary" onclick="startNewFormalizacao()">Nova solicitação</button></div></div>`;
 }
+
+function renderFormalizadorSuccessSummary(record) {
+    const rows = [['Tipo', formatFormalizadorType(record?.tipo)], ['Status', formatFormalizadorStatus(record?.status)], ['Colaborador', record?.colaborador_nome], ['Posto atual', record?.posto_atual], ['Posto destino', record?.posto_destino], ['Data efetiva', formatFormalizadorDate(record?.data_efetiva)], ['Cobertura', getFormalizadorCoverageLabel(record?.cobertura_json)]].filter(([, value]) => String(value || '').trim());
+    return `<div class="formalizador-success-summary">${rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}</div>`;
+}
+
+function renderFormalizadorPicker(kind) { const id = kind === 'destination' ? 'formalizador-destination-results' : kind === 'coverage' ? 'formalizador-coverage-results' : 'formalizador-collaborator-results'; const el = document.getElementById(id); if (!el) return; el.innerHTML = kind === 'destination' ? renderFormalizadorUnitResults() : renderFormalizadorCollaboratorResults(kind); }
 
 function renderFormalizadorCollaboratorResults(kind = 'collaborator') {
-    const rows = getFormalizadorFilteredCollaborators(kind, 18);
-    if (!rows.length) return `<div class="formalizador-empty">Nenhum colaborador encontrado.</div>`;
+    const rows = getFormalizadorFilteredCollaborators(kind, 12);
+    if (!rows.length) return `<div class="formalizador-empty-inline">Nenhum colaborador encontrado.</div>`;
     return rows.map(row => {
-        const item = row.item || {};
-        const duty = getDutyStatusByTurma(item.turma);
-        const statusClass = duty.code === 'plantao' ? 'plantao' : duty.code === 'folga' ? 'folga' : 'indefinido';
-        const keyArg = escapeHtml(JSON.stringify(row.key));
-        const selected = (kind === 'coverage' ? formalizadorState.coverageKey : formalizadorState.collaboratorKey) === row.key;
-        return `
-            <button type="button" class="formalizador-result-card ${selected ? 'selected' : ''}" onclick="${kind === 'coverage' ? 'selectFormalizadorCoverage' : 'selectFormalizadorCollaborator'}(${keyArg})">
-                <span class="formalizador-avatar">${escapeHtml(String(getFormalizadorCollabName(item)).slice(0, 1) || '?')}</span>
-                <span>
-                    <strong>${escapeHtml(getFormalizadorCollabName(item))}</strong>
-                    <small>${escapeHtml(item.matricula || item.re || 'Sem matrícula')} • ${escapeHtml(item.cargo || 'Sem cargo')}</small>
-                    <small>${escapeHtml(item.posto || 'Sem posto')} • ${escapeHtml(getFormalizadorCompany(item) || '')}</small>
-                </span>
-                <em class="${statusClass}">${escapeHtml(duty.text)}</em>
-            </button>
-        `;
+        const item = row.item || {}; const duty = getDutyStatusByTurma(item.turma); const statusClass = duty.code === 'plantao' ? 'plantao' : duty.code === 'folga' ? 'folga' : 'indefinido'; const keyArg = escapeHtml(JSON.stringify(row.key)); const selected = (kind === 'coverage' ? formalizadorState.coverageKey : formalizadorState.collaboratorKey) === row.key;
+        return `<button type="button" class="formalizador-picker-card ${selected ? 'selected' : ''}" onclick="${kind === 'coverage' ? 'selectFormalizadorCoverage' : 'selectFormalizadorCollaborator'}(${keyArg})"><span class="avatar">${escapeHtml(String(getFormalizadorCollabName(item)).slice(0, 1) || '?')}</span><span><strong>${escapeHtml(getFormalizadorCollabName(item))}</strong><small>${escapeHtml([item.matricula, item.re, item.cargo].filter(Boolean).join(' • '))}</small><small>${escapeHtml([item.posto, getFormalizadorCompany(item), item.telefone].filter(Boolean).join(' • '))}</small></span><em class="${statusClass}">${escapeHtml(duty.text || '')}</em></button>`;
     }).join('');
 }
 
 function renderFormalizadorUnitResults() {
-    const rows = getFormalizadorFilteredUnits(18);
-    if (!rows.length) return `<div class="formalizador-empty">Nenhuma unidade encontrada.</div>`;
-    return rows.map(row => {
-        const unit = row.unit || {};
-        const keyArg = escapeHtml(JSON.stringify(row.key));
-        const selected = formalizadorState.destinationKey === row.key;
-        return `
-            <button type="button" class="formalizador-result-card unit ${selected ? 'selected' : ''}" onclick="selectFormalizadorDestination(${keyArg})">
-                <span class="formalizador-avatar unit">${escapeHtml(String(getFormalizadorUnitName(unit)).slice(0, 1) || '?')}</span>
-                <span>
-                    <strong>${escapeHtml(getFormalizadorUnitName(unit))}</strong>
-                    <small>${escapeHtml(unit.cliente || getFormalizadorCompany(unit) || 'Sem cliente')} • ${escapeHtml(unit.cidade || '')}</small>
-                    <small>${escapeHtml(unit.endereco_formatado || formatUnitAddress(unit) || 'Endereço não informado')}</small>
-                </span>
-            </button>
-        `;
-    }).join('');
+    const rows = getFormalizadorFilteredUnits(12);
+    if (!rows.length) return `<div class="formalizador-empty-inline">Nenhum posto encontrado.</div>`;
+    return rows.map(row => { const unit = row.unit || {}; const keyArg = escapeHtml(JSON.stringify(row.key)); const selected = formalizadorState.destinationKey === row.key; return `<button type="button" class="formalizador-picker-card unit ${selected ? 'selected' : ''}" onclick="selectFormalizadorDestination(${keyArg})"><span class="avatar unit">${escapeHtml(String(getFormalizadorUnitName(unit)).slice(0, 1) || '?')}</span><span><strong>${escapeHtml(getFormalizadorUnitName(unit))}</strong><small>${escapeHtml([unit.cliente, getFormalizadorCompany(unit), unit.cidade].filter(Boolean).join(' • '))}</small><small>${escapeHtml(unit.endereco_formatado || formatUnitAddress(unit) || '')}</small></span></button>`; }).join('');
 }
 
-function renderFormalizadorSelectedCollab(row, title = 'Colaborador') {
-    const item = row?.item || {};
-    const duty = getDutyStatusByTurma(item.turma);
-    const statusClass = duty.code === 'plantao' ? 'plantao' : duty.code === 'folga' ? 'folga' : 'indefinido';
-    return `
-        <article class="formalizador-selected-card ${statusClass}">
-            <div>
-                <span>${escapeHtml(title)}</span>
-                <strong>${escapeHtml(getFormalizadorCollabName(item))}</strong>
-                <small>${escapeHtml(item.matricula || item.re || 'Sem matrícula')} • ${escapeHtml(item.cargo || 'Sem cargo')}</small>
-            </div>
-            <div>
-                <em>${escapeHtml(duty.text)}</em>
-                <small>${escapeHtml(item.posto || 'Sem posto')}</small>
-                <small>${escapeHtml(item.escala || '')} ${escapeHtml(item.turno || '')} Turma ${escapeHtml(item.turma || '-')}</small>
-            </div>
-        </article>
-    `;
+function renderFormalizadorSelectedPerson(row, label = 'Colaborador') {
+    const item = row?.item || {}; const duty = getDutyStatusByTurma(item.turma); const statusClass = duty.code === 'plantao' ? 'plantao' : duty.code === 'folga' ? 'folga' : 'indefinido';
+    return `<article class="formalizador-person-card ${statusClass}"><div><span>${escapeHtml(label)}</span><strong>${escapeHtml(getFormalizadorCollabName(item))}</strong><small>${escapeHtml([item.matricula, item.re, item.cargo].filter(Boolean).join(' • '))}</small><small>${escapeHtml([item.posto, item.escala, item.turno, item.turma ? `Turma ${item.turma}` : ''].filter(Boolean).join(' • '))}</small></div><em>${escapeHtml(duty.text || '')}</em></article>`;
 }
 
-function renderFormalizadorUnitSummary(unit = {}) {
-    return `
-        <article class="formalizador-unit-summary">
-            <strong>${escapeHtml(getFormalizadorUnitName(unit))}</strong>
-            <span>${escapeHtml(unit.cliente || getFormalizadorCompany(unit) || 'Sem cliente')}</span>
-            <small>${escapeHtml(unit.unidade_de_negocio || '')}</small>
-            <small>${escapeHtml(unit.endereco_formatado || formatUnitAddress(unit) || 'Endereço não informado')}</small>
-            <small>${escapeHtml([unit.email_supervisor_da_unidade, unit.email_sesmt].filter(Boolean).join(' • '))}</small>
-        </article>
-    `;
-}
-
-function renderFormalizadorSummaryList(preview) {
-    const rows = [
-        ['Tipo', formatFormalizadorType(formalizadorState.type)],
-        ['Prioridade', formatFormalizadorPriority(formalizadorState.form.prioridade)],
-        ['Data efetiva', formatFormalizadorDate(formalizadorState.form.data_efetiva)],
-        ['Data fim', formalizadorState.form.data_fim ? formatFormalizadorDate(formalizadorState.form.data_fim) : 'Não se aplica'],
-        ['Cobertura', getFormalizadorCoverageLabel()],
-        ['Benefícios', getFormalizadorBenefitsLabel()],
-        ['Protocolo', preview.protocolo || 'Gerado ao formalizar']
-    ];
-    return `<div class="formalizador-summary-list">${rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || 'N/I')}</strong></div>`).join('')}</div>`;
+function renderFormalizadorUnitCard(unit = {}, label = 'Unidade') {
+    return `<article class="formalizador-unit-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(getFormalizadorUnitName(unit))}</strong><small>${escapeHtml([unit.cliente, getFormalizadorCompany(unit), unit.unidade_de_negocio].filter(Boolean).join(' • '))}</small><small>${escapeHtml([unit.endereco_formatado || formatUnitAddress(unit), unit.email_supervisor_da_unidade, unit.email_sesmt].filter(Boolean).join(' • '))}</small></article>`;
 }
 
 function renderFormalizadorHistoryPanel() {
     const f = formalizadorState.historyFilters || { search: '', status: 'all', tipo: 'all' };
-    return `
-        <div class="formalizador-history-head">
-            <div>
-                <span>Histórico</span>
-                <strong>Protocolos</strong>
-            </div>
-            <button type="button" onclick="fetchFormalizacoes(true).then(renderFormalizador)">Atualizar</button>
-        </div>
-        <div class="formalizador-history-filters">
-            <input type="text" value="${escapeHtml(f.search || '')}" oninput="setFormalizadorHistoryFilter('search', this.value)" placeholder="Protocolo, colaborador, posto...">
-            <select onchange="setFormalizadorHistoryFilter('status', this.value)">
-                <option value="all" ${f.status === 'all' ? 'selected' : ''}>Todos os status</option>
-                ${Object.entries(FORMALIZADOR_STATUS).map(([value, label]) => `<option value="${value}" ${f.status === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
-            </select>
-            <select onchange="setFormalizadorHistoryFilter('tipo', this.value)">
-                <option value="all" ${f.tipo === 'all' ? 'selected' : ''}>Todos os tipos</option>
-                ${Object.entries(FORMALIZADOR_TYPES).map(([value, cfg]) => `<option value="${value}" ${f.tipo === value ? 'selected' : ''}>${escapeHtml(cfg.label)}</option>`).join('')}
-            </select>
-        </div>
-        <div id="formalizador-history-list" class="formalizador-history-list">
-            ${renderFormalizadorHistoryItems()}
-        </div>
-    `;
+    return `<div class="formalizador-panel-title"><span>Histórico</span><strong>Casos registrados</strong></div><div class="formalizador-history-actions"><button type="button" onclick="fetchFormalizacoes(true).then(renderFormalizador)">Atualizar</button></div><div class="formalizador-history-filters"><input type="text" value="${escapeHtml(f.search || '')}" oninput="setFormalizadorHistoryFilter('search', this.value)" placeholder="Protocolo, colaborador, posto, solicitante"><select onchange="setFormalizadorHistoryFilter('status', this.value)"><option value="all" ${f.status === 'all' ? 'selected' : ''}>Todos os status</option>${Object.entries(FORMALIZADOR_STATUS).map(([value, label]) => `<option value="${value}" ${f.status === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select><select onchange="setFormalizadorHistoryFilter('tipo', this.value)"><option value="all" ${f.tipo === 'all' ? 'selected' : ''}>Todos os tipos</option>${Object.entries(FORMALIZADOR_TYPES).map(([value, cfg]) => `<option value="${value}" ${f.tipo === value ? 'selected' : ''}>${escapeHtml(cfg.label)}</option>`).join('')}</select></div><div id="formalizador-history-list" class="formalizador-history-list">${renderFormalizadorHistoryItems()}</div>`;
 }
-
-function renderFormalizadorHistoryList() {
-    const list = document.getElementById('formalizador-history-list');
-    if (list) list.innerHTML = renderFormalizadorHistoryItems();
-}
-
-function getFilteredFormalizadorHistory() {
-    const f = formalizadorState.historyFilters || { search: '', status: 'all', tipo: 'all' };
-    const query = buildFormalizadorSearchText(f.search || '');
-    return (formalizadorState.history || []).filter(item => {
-        if (f.status && f.status !== 'all' && item.status !== f.status) return false;
-        if (f.tipo && f.tipo !== 'all' && item.tipo !== f.tipo) return false;
-        if (!query) return true;
-        const bag = buildFormalizadorSearchText(item);
-        return formalizadorIncludesQuery(bag, f.search);
-    });
-}
-
+function renderFormalizadorHistoryList() { const list = document.getElementById('formalizador-history-list'); if (list) list.innerHTML = renderFormalizadorHistoryItems(); }
+function getFilteredFormalizadorHistory() { const f = formalizadorState.historyFilters || { search: '', status: 'all', tipo: 'all' }; return (formalizadorState.history || []).filter(item => { if (f.status && f.status !== 'all' && item.status !== f.status) return false; if (f.tipo && f.tipo !== 'all' && item.tipo !== f.tipo) return false; return !String(f.search || '').trim() || formalizadorIncludesQuery(buildFormalizadorSearchText(item), f.search); }); }
 function renderFormalizadorHistoryItems() {
     const rows = getFilteredFormalizadorHistory();
-    if (!rows.length) {
-        return `<div class="formalizador-empty">Nenhum protocolo encontrado.</div>`;
-    }
-    const selected = rows.find(row => row.id === formalizadorState.selectedHistoryId) || rows[0];
+    if (!rows.length) return `<div class="formalizador-empty-inline">Nenhum protocolo encontrado.</div>`;
+    const selected = rows.find(row => String(row.id) === String(formalizadorState.selectedHistoryId)) || rows[0];
     if (selected?.id && selected.id !== formalizadorState.selectedHistoryId) formalizadorState.selectedHistoryId = selected.id;
-    return `
-        ${rows.map(item => `
-            <button type="button" class="formalizador-history-card ${item.id === formalizadorState.selectedHistoryId ? 'selected' : ''}" onclick="selectFormalizacaoHistory('${escapeHtml(item.id)}')">
-                <strong>${escapeHtml(item.protocolo || 'Sem protocolo')}</strong>
-                <span>${escapeHtml(formatFormalizadorType(item.tipo))}</span>
-                <small>${escapeHtml(item.colaborador_nome || 'Sem colaborador')} • ${escapeHtml(item.posto_atual || '-')} ${item.posto_destino ? `→ ${escapeHtml(item.posto_destino)}` : ''}</small>
-                <em class="${escapeHtml(item.status || '')}">${escapeHtml(formatFormalizadorStatus(item.status))}</em>
-            </button>
-        `).join('')}
-        ${selected ? renderFormalizadorHistoryDetail(selected) : ''}
-    `;
+    return `${rows.map(item => `<button type="button" class="formalizador-history-card ${String(item.id) === String(formalizadorState.selectedHistoryId) ? 'selected' : ''}" onclick="selectFormalizacaoHistory('${escapeHtml(item.id)}')"><span><strong>${escapeHtml(item.protocolo || '')}</strong><small>${escapeHtml(formatFormalizadorType(item.tipo))}</small><small>${escapeHtml([item.colaborador_nome, item.posto_atual, item.posto_destino].filter(Boolean).join(' • '))}</small></span><em class="${escapeHtml(item.status || '')}">${escapeHtml(formatFormalizadorStatus(item.status))}</em></button>`).join('')}${selected ? renderFormalizadorHistoryDetail(selected) : ''}`;
 }
-
 function renderFormalizadorHistoryDetail(item) {
     const events = formalizadorState.events?.[String(item.id)] || [];
-    return `
-        <div class="formalizador-history-detail">
-            <div class="formalizador-history-detail-head">
-                <div>
-                    <span>Detalhe</span>
-                    <strong>${escapeHtml(item.protocolo || 'Sem protocolo')}</strong>
-                </div>
-                <select onchange="updateFormalizacaoStatus('${escapeHtml(item.id)}', this.value)">
-                    ${Object.entries(FORMALIZADOR_STATUS).map(([value, label]) => `<option value="${value}" ${item.status === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
-                </select>
-            </div>
-            ${renderFormalizadorSummaryListFromRecord(item)}
-            <div class="formalizador-post-actions compact">
-                <button type="button" onclick="copyFormalizacaoText('${escapeHtml(item.id)}')">Copiar</button>
-                <button type="button" onclick="openFormalizacaoEmail('${escapeHtml(item.id)}')">E-mail</button>
-                <button type="button" onclick="shareFormalizacaoWhatsapp('${escapeHtml(item.id)}')">WhatsApp</button>
-            </div>
-            <div class="formalizador-timeline">
-                <strong>Linha do tempo</strong>
-                ${(events.length ? events : [{ status_novo: item.status, ator_nome: item.solicitante_nome, created_at: item.created_at, observacao: 'Formalização registrada.' }]).map(ev => `
-                    <div>
-                        <span>${escapeHtml(formatFormalizadorDateTime(ev.created_at))}</span>
-                        <p>${escapeHtml(formatFormalizadorStatus(ev.status_novo))} por ${escapeHtml(ev.ator_nome || 'Sistema')}</p>
-                        ${ev.observacao ? `<small>${escapeHtml(ev.observacao)}</small>` : ''}
-                    </div>
-                `).join('')}
-            </div>
-        </div>
-    `;
+    return `<div class="formalizador-history-detail"><div class="formalizador-history-detail-head"><div><span>Detalhe</span><strong>${escapeHtml(item.protocolo || '')}</strong></div><select onchange="updateFormalizacaoStatus('${escapeHtml(item.id)}', this.value)">${Object.entries(FORMALIZADOR_STATUS).map(([value, label]) => `<option value="${value}" ${item.status === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></div>${renderFormalizadorRecordSummary(item)}<div class="formalizador-record-actions"><button type="button" onclick="copyFormalizacaoText('${escapeHtml(item.id)}')">Copiar e-mail</button><button type="button" onclick="openFormalizacaoEmail('${escapeHtml(item.id)}')">Gmail</button><button type="button" onclick="shareFormalizacaoWhatsapp('${escapeHtml(item.id)}')">WhatsApp</button></div><div class="formalizador-timeline"><strong>Linha do tempo</strong>${(events.length ? events : [{ status_novo: item.status, ator_nome: item.solicitante_nome, created_at: item.created_at, observacao: 'Caso registrado.' }]).map(ev => `<div><span>${escapeHtml(formatFormalizadorDateTime(ev.created_at))}</span><p>${escapeHtml(formatFormalizadorStatus(ev.status_novo))}</p>${ev.ator_nome ? `<small>Responsável: ${escapeHtml(ev.ator_nome)}</small>` : ''}${ev.observacao ? `<small>${escapeHtml(ev.observacao)}</small>` : ''}</div>`).join('')}</div></div>`;
 }
+function renderFormalizadorRecordSummary(item) { const rows = [['Solicitante', [item.solicitante_nome, item.solicitante_cargo].filter(Boolean).join(' • ')], ['Colaborador', [item.colaborador_nome, item.colaborador_matricula || item.colaborador_re].filter(Boolean).join(' • ')], ['Atual', item.posto_atual], ['Destino', item.posto_destino], ['Data efetiva', formatFormalizadorDate(item.data_efetiva)], ['Motivo', FORMALIZADOR_MOTIVOS[item.motivo_categoria] || item.motivo_categoria], ['Cobertura', getFormalizadorCoverageLabel(item.cobertura_json)]].filter(([, value]) => String(value || '').trim()); return `<div class="formalizador-record-summary">${rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}</div>`; }
 
-function renderFormalizadorSummaryListFromRecord(item) {
-    const rows = [
-        ['Status', formatFormalizadorStatus(item.status)],
-        ['Tipo', formatFormalizadorType(item.tipo)],
-        ['Solicitante', `${item.solicitante_nome || ''} ${item.solicitante_cargo ? `(${item.solicitante_cargo})` : ''}`],
-        ['Colaborador', `${item.colaborador_nome || ''} ${item.colaborador_matricula ? `- ${item.colaborador_matricula}` : ''}`],
-        ['Atual', item.posto_atual || '-'],
-        ['Destino', item.posto_destino || '-'],
-        ['Data efetiva', formatFormalizadorDate(item.data_efetiva)],
-        ['Cobertura', getFormalizadorCoverageLabel(item.cobertura_json)],
-        ['Criado em', formatFormalizadorDateTime(item.created_at)]
-    ];
-    return `<div class="formalizador-summary-list">${rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || 'N/I')}</strong></div>`).join('')}</div>`;
+function validateFormalizador(options = {}) {
+    const type = getFormalizadorTypeConfig(); const r = formalizadorState.requester || {}; const c = formalizadorState.coverage || {}; const fail = (message, focus = 'form') => ({ ok: false, message, focus });
+    if (!type) return fail('Escolha o tipo de solicitação no catálogo.', 'request');
+    if (!String(r.nome || '').trim()) return fail('Informe o nome do solicitante.');
+    if (!String(r.cargo || '').trim()) return fail('Informe a função ou cargo do solicitante.');
+    if (!String(r.telefone || '').replace(/\D/g, '')) return fail('Informe o telefone do solicitante.');
+    if (!getSelectedFormalizadorCollaborator()) return fail('Selecione o colaborador.');
+    if (!formalizadorState.form.data_efetiva) return fail('Informe a data efetiva.');
+    if (!formalizadorState.form.motivo_categoria) return fail('Selecione o motivo ou categoria.');
+    if (type.needsDestination && !getSelectedFormalizadorDestination()) return fail('Selecione o posto destino.');
+    if (type.requiresEndDate && !formalizadorState.form.data_fim) return fail('Informe a data fim para término de experiência.');
+    if (type.requiresBenefitImpact && !hasFormalizadorBenefitImpact() && !String(formalizadorState.benefits?.observacoes || '').trim()) return fail('Marque pelo menos um impacto de benefício ou explique a alteração.');
+    if (!c.tipo || !FORMALIZADOR_COVERAGE_TYPES[c.tipo]) return fail('Informe a situação de cobertura.');
+    if (c.tipo !== 'sem_cobertura' && !getSelectedFormalizadorCoverage() && !String(c.observacoes || '').trim()) return fail('Informe o substituto ou uma observação justificando a cobertura.');
+    return { ok: true, message: '', focus: 'review' };
 }
+function hasFormalizadorBenefitImpact(benefits = formalizadorState.benefits) { return Boolean(benefits?.vale_transporte || benefits?.vale_refeicao || benefits?.adicional_noturno || benefits?.intrajornada || benefits?.escala_turno); }
+function getFormalizadorBenefitsList(benefits = formalizadorState.benefits) { const rows = []; if (benefits?.vale_transporte) rows.push('Vale transporte: verificar rota, integração, desconto ou necessidade de ajuste.'); if (benefits?.vale_refeicao) rows.push('Refeição / VR: verificar alteração conforme regra da unidade.'); if (benefits?.adicional_noturno) rows.push('Adicional noturno: verificar impacto pelo horário informado.'); if (benefits?.intrajornada) rows.push('Intrajornada: verificar intervalo e condição contratual.'); if (benefits?.escala_turno) rows.push('Escala / turno: verificar alteração de horário, escala ou turma.'); return rows; }
+function getFormalizadorBenefitsLabel(benefits = formalizadorState.benefits) { const labels = []; if (benefits?.vale_transporte) labels.push('VT'); if (benefits?.vale_refeicao) labels.push('Refeição / VR'); if (benefits?.adicional_noturno) labels.push('Adicional noturno'); if (benefits?.intrajornada) labels.push('Intrajornada'); if (benefits?.escala_turno) labels.push('Escala / turno'); return labels.join(', '); }
+function getFormalizadorCoverageLabel(coverage = formalizadorState.coverage) { const base = FORMALIZADOR_COVERAGE_TYPES[coverage?.tipo] || ''; const selectedCoverage = getSelectedFormalizadorCoverage(); const sub = coverage?.substituto?.nome || (selectedCoverage?.item ? getFormalizadorCollabName(selectedCoverage.item) : ''); return [base, sub].filter(Boolean).join(' • '); }
+function getFormalizadorDefaultRecipients() { const unit = getSelectedFormalizadorDestination()?.unit || getSelectedFormalizadorCollaborator()?.unit || {}; return Array.from(new Set([unit.email_supervisor_da_unidade, unit.email_sesmt, unit.email_dp, unit.email_rh, unit.email].map(v => String(v || '').trim()).filter(Boolean))).join(', '); }
+function generateFormalizadorProtocol() { return `FP-${getTodayKey().replace(/-/g, '')}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`; }
+function getSafeFormalizadorCollaboratorSnapshot(row) { const item = row?.item || {}; return { matricula: item.matricula || '', re: item.re || '', re_padrao: item.re_padrao || '', re_novo: item.re_novo || item.re_folha || '', nome: getFormalizadorCollabName(item), cargo: item.cargo || '', posto: item.posto || '', escala: item.escala || '', turno: item.turno || '', empresa: getFormalizadorCompany(item) || '', cliente: item.cliente || '', unidade_de_negocio: item.unidade_de_negocio || '', turma: item.turma || '', telefone: item.telefone || '' }; }
+function getSafeFormalizadorUnitSnapshot(unit = {}) { return { posto: getFormalizadorUnitName(unit), cliente: unit.cliente || '', empresa: getFormalizadorCompany(unit) || '', unidade_de_negocio: unit.unidade_de_negocio || '', endereco_formatado: unit.endereco_formatado || formatUnitAddress(unit) || '', cidade: unit.cidade || '', estado: unit.estado || '', email_supervisor_da_unidade: unit.email_supervisor_da_unidade || '', email_sesmt: unit.email_sesmt || '', refeicao_no_local: pickFirstDefined(unit.refeicao_no_local, unit.refeicao, unit.vale_refeicao), intrajornada: unit.intrajornada || '' }; }
 
-function formatFormalizadorDateTime(value) {
-    if (!value) return '-';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return String(value);
-    return date.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
-}
-
-function validateFormalizadorStep(step) {
-    const r = formalizadorState.requester || {};
-    if (step >= 1 && (!String(r.nome || '').trim() || !String(r.cargo || '').trim())) {
-        return { ok: false, message: 'Informe nome e cargo do solicitante.' };
-    }
-    if (step >= 2 && !formalizadorState.type) {
-        return { ok: false, message: 'Escolha o tipo de formalização.' };
-    }
-    if (step >= 3 && !getSelectedFormalizadorCollaborator()) {
-        return { ok: false, message: 'Selecione o colaborador.' };
-    }
-    if (step >= 4) {
-        if (!formalizadorState.form.data_efetiva) {
-            return { ok: false, message: 'Informe a data efetiva.' };
-        }
-        if (FORMALIZADOR_TYPES[formalizadorState.type]?.needsDestination && !getSelectedFormalizadorDestination()) {
-            return { ok: false, message: 'Selecione o posto destino.' };
-        }
-        if (formalizadorState.type === 'termino_experiencia' && !formalizadorState.form.data_fim) {
-            return { ok: false, message: 'Informe a data de término da experiência.' };
-        }
-    }
-    return { ok: true, message: '' };
-}
-
-function validateFormalizador() {
-    return validateFormalizadorStep(7);
-}
-
-function getFormalizadorBenefitsLabel(benefits = formalizadorState.benefits) {
-    const labels = [];
-    if (benefits?.vale_transporte) labels.push('VT');
-    if (benefits?.vale_refeicao) labels.push('VR/refeição');
-    if (benefits?.adicional_noturno) labels.push('Adicional noturno');
-    if (benefits?.intrajornada) labels.push('Intrajornada');
-    if (benefits?.escala_turno) labels.push('Escala/turno');
-    return labels.length ? labels.join(', ') : 'Sem impacto informado';
-}
-
-function getFormalizadorCoverageLabel(coverage = formalizadorState.coverage) {
-    const labels = {
-        sem_cobertura: 'Sem cobertura definida',
-        cobertura_definida: 'Cobertura já definida',
-        temporaria: 'Cobertura temporária',
-        definitiva: 'Cobertura definitiva'
-    };
-    const base = labels[coverage?.tipo] || 'Não informado';
-    const selectedCoverage = getSelectedFormalizadorCoverage();
-    const sub = coverage?.substituto?.nome || (selectedCoverage?.item ? getFormalizadorCollabName(selectedCoverage.item) : '');
-    return [base, sub].filter(Boolean).join(' - ');
-}
-
-function getFormalizadorDefaultRecipients() {
-    const destination = getSelectedFormalizadorDestination()?.unit || null;
-    const collab = getSelectedFormalizadorCollaborator();
-    const currentUnit = collab?.unit || null;
-    const unit = destination || currentUnit || {};
-    const emails = [
-        unit.email_supervisor_da_unidade,
-        unit.email_sesmt,
-        unit.email_dp,
-        unit.email_rh,
-        unit.email
-    ].map(v => String(v || '').trim()).filter(Boolean);
-    return Array.from(new Set(emails)).join(', ');
-}
-
-function generateFormalizadorProtocol() {
-    const today = getTodayKey().replace(/-/g, '');
-    const random = Math.random().toString(36).slice(2, 7).toUpperCase();
-    return `FP-${today}-${random}`;
-}
-
-function getSafeFormalizadorCollaboratorSnapshot(row) {
-    const item = row?.item || {};
-    return {
-        matricula: item.matricula || '',
-        re: item.re || '',
-        re_padrao: item.re_padrao || '',
-        re_novo: item.re_novo || item.re_folha || '',
-        nome: getFormalizadorCollabName(item),
-        cargo: item.cargo || '',
-        posto: item.posto || '',
-        escala: item.escala || '',
-        turno: item.turno || '',
-        empresa: getFormalizadorCompany(item) || '',
-        cliente: item.cliente || '',
-        unidade_de_negocio: item.unidade_de_negocio || '',
-        turma: item.turma || '',
-        telefone: item.telefone || ''
-    };
-}
-
-function getSafeFormalizadorUnitSnapshot(unit = {}) {
-    return {
-        posto: getFormalizadorUnitName(unit),
-        cliente: unit.cliente || '',
-        empresa: getFormalizadorCompany(unit) || '',
-        unidade_de_negocio: unit.unidade_de_negocio || '',
-        endereco_formatado: unit.endereco_formatado || formatUnitAddress(unit) || '',
-        cidade: unit.cidade || '',
-        estado: unit.estado || '',
-        email_supervisor_da_unidade: unit.email_supervisor_da_unidade || '',
-        email_sesmt: unit.email_sesmt || '',
-        refeicao_no_local: pickFirstDefined(unit.refeicao_no_local, unit.refeicao, unit.vale_refeicao),
-        intrajornada: unit.intrajornada || ''
-    };
-}
-
-function buildFormalizadorPreview(protocolo = '') {
-    const record = buildFormalizadorPayload(protocolo || 'PREVIEW', { preview: true });
-    return {
-        protocolo: protocolo || '',
-        subject: record.email_subject,
-        body: record.email_body,
-        whatsapp: record.whatsapp_text
-    };
-}
-
+function buildFormalizadorPreview(protocolo = 'PROTOCOLO') { const record = buildFormalizadorPayload(protocolo, { preview: true }); return { protocolo, subject: record.email_subject, body: record.email_body, whatsapp: record.whatsapp_text }; }
 function buildFormalizadorPayload(protocolo = generateFormalizadorProtocol(), options = {}) {
-    const collabRow = getSelectedFormalizadorCollaborator();
-    const destinationRow = getSelectedFormalizadorDestination();
-    const coverageRow = getSelectedFormalizadorCoverage();
-    const collab = collabRow?.item || {};
-    const destinationUnit = destinationRow?.unit || null;
-    const currentUnit = collabRow?.unit || null;
-    const coverage = {
-        ...(formalizadorState.coverage || {}),
-        substituto: coverageRow ? getSafeFormalizadorCollaboratorSnapshot(coverageRow) : null
-    };
-    const snapshot = {
-        colaborador: collabRow ? getSafeFormalizadorCollaboratorSnapshot(collabRow) : null,
-        unidade_atual: currentUnit ? getSafeFormalizadorUnitSnapshot(currentUnit) : null,
-        unidade_destino: destinationUnit ? getSafeFormalizadorUnitSnapshot(destinationUnit) : null,
-        cobertura: coverage.substituto,
-        email_recipients: formalizadorState.form.email_recipients || getFormalizadorDefaultRecipients(),
-        gerado_em: new Date().toISOString()
-    };
-    const base = {
-        protocolo,
-        tipo: formalizadorState.type || '',
-        status: 'formalizado',
-        prioridade: formalizadorState.form.prioridade || 'normal',
-        solicitante_nome: String(formalizadorState.requester.nome || '').trim(),
-        solicitante_cargo: String(formalizadorState.requester.cargo || '').trim(),
-        solicitante_telefone: String(formalizadorState.requester.telefone || '').trim(),
-        solicitante_email: String(formalizadorState.requester.email || '').trim(),
-        colaborador_matricula: collab.matricula || '',
-        colaborador_re: collab.re || collab.re_padrao || collab.re_novo || '',
-        colaborador_nome: getFormalizadorCollabName(collab),
-        colaborador_cargo: collab.cargo || '',
-        posto_atual: collab.posto || '',
-        posto_destino: destinationUnit ? getFormalizadorUnitName(destinationUnit) : '',
-        data_efetiva: normalizeFtDateKey(formalizadorState.form.data_efetiva) || null,
-        data_fim: normalizeFtDateKey(formalizadorState.form.data_fim) || null,
-        motivo_categoria: formalizadorState.form.motivo_categoria || '',
-        motivo_observacao: formalizadorState.form.motivo_observacao || '',
-        beneficios_json: { ...(formalizadorState.benefits || {}) },
-        cobertura_json: coverage,
-        snapshot_json: snapshot
-    };
-    base.email_subject = buildFormalizadorEmailSubject(base, options.preview);
-    base.email_body = buildFormalizadorMessageBody(base);
-    base.whatsapp_text = buildFormalizadorWhatsappText(base);
-    return base;
+    const collabRow = getSelectedFormalizadorCollaborator(); const destinationRow = getSelectedFormalizadorDestination(); const coverageRow = getSelectedFormalizadorCoverage(); const collab = collabRow?.item || {}; const destinationUnit = destinationRow?.unit || null; const currentUnit = collabRow?.unit || null;
+    const coverage = { ...(formalizadorState.coverage || {}), substituto: coverageRow ? getSafeFormalizadorCollaboratorSnapshot(coverageRow) : null };
+    const snapshot = { colaborador: collabRow ? getSafeFormalizadorCollaboratorSnapshot(collabRow) : null, unidade_atual: currentUnit ? getSafeFormalizadorUnitSnapshot(currentUnit) : null, unidade_destino: destinationUnit ? getSafeFormalizadorUnitSnapshot(destinationUnit) : null, cobertura: coverage.substituto, email_recipients: formalizadorState.form.email_recipients || getFormalizadorDefaultRecipients(), gerado_em: new Date().toISOString() };
+    const base = { protocolo, tipo: formalizadorState.type || '', status: 'registrado', prioridade: formalizadorState.form.prioridade || 'normal', solicitante_nome: String(formalizadorState.requester.nome || '').trim(), solicitante_cargo: String(formalizadorState.requester.cargo || '').trim(), solicitante_telefone: String(formalizadorState.requester.telefone || '').trim(), solicitante_email: String(formalizadorState.requester.email || '').trim(), colaborador_matricula: collab.matricula || '', colaborador_re: collab.re || collab.re_padrao || collab.re_novo || '', colaborador_nome: getFormalizadorCollabName(collab), colaborador_cargo: collab.cargo || '', posto_atual: collab.posto || '', posto_destino: destinationUnit ? getFormalizadorUnitName(destinationUnit) : '', data_efetiva: normalizeFtDateKey(formalizadorState.form.data_efetiva) || null, data_fim: normalizeFtDateKey(formalizadorState.form.data_fim) || null, motivo_categoria: formalizadorState.form.motivo_categoria || '', motivo_observacao: formalizadorState.form.motivo_observacao || '', beneficios_json: { ...(formalizadorState.benefits || {}) }, cobertura_json: coverage, snapshot_json: snapshot };
+    base.email_subject = buildFormalizadorEmailSubject(base, options.preview); base.email_body = buildFormalizadorMessageBody(base); base.whatsapp_text = buildFormalizadorWhatsappText(base); return base;
 }
-
-function buildFormalizadorEmailSubject(payload, preview = false) {
-    const type = formatFormalizadorType(payload.tipo).toUpperCase();
-    const collab = payload.colaborador_nome || 'COLABORADOR';
-    const from = payload.posto_atual || '-';
-    const to = payload.posto_destino || '-';
-    const protocol = preview ? 'PRÉVIA' : payload.protocolo;
-    return `[FORMALIZAÇÃO] ${type} - ${collab} - ${from} -> ${to} - ${protocol}`;
-}
-
+function buildFormalizadorEmailSubject(payload, preview = false) { const movement = payload.posto_destino ? `${payload.posto_atual || 'Posto atual'} -> ${payload.posto_destino}` : (payload.posto_atual || 'Sem posto atual'); const date = formatFormalizadorDate(payload.data_efetiva); return `[Solicitação de ${formatFormalizadorType(payload.tipo)}] ${payload.colaborador_nome} | ${movement}${date ? ` | ${date}` : ''}${preview ? '' : ` | ${payload.protocolo}`}`; }
+function appendFormalizadorLine(lines, label, value) { const text = String(value || '').trim(); if (text) lines.push(`${label}: ${text}`); }
+function appendFormalizadorSection(lines, title, entries = []) { const clean = entries.filter(Boolean).map(v => String(v).trim()).filter(Boolean); if (!clean.length) return; if (lines.length) lines.push(''); lines.push(title); clean.forEach(entry => lines.push(entry)); }
 function buildFormalizadorMessageBody(payload) {
-    const benefits = getFormalizadorBenefitsLabel(payload.beneficios_json);
-    const coverage = getFormalizadorCoverageLabel(payload.cobertura_json);
-    const lines = [
-        `Protocolo: ${payload.protocolo}`,
-        `Tipo: ${formatFormalizadorType(payload.tipo)}`,
-        `Status inicial: ${formatFormalizadorStatus(payload.status)}`,
-        `Prioridade: ${formatFormalizadorPriority(payload.prioridade)}`,
-        '',
-        'Solicitante',
-        `Nome: ${payload.solicitante_nome}`,
-        `Função/Cargo: ${payload.solicitante_cargo}`,
-        `Telefone: ${payload.solicitante_telefone || '-'}`,
-        `E-mail: ${payload.solicitante_email || '-'}`,
-        '',
-        'Colaborador',
-        `Nome: ${payload.colaborador_nome}`,
-        `Matrícula: ${payload.colaborador_matricula || '-'}`,
-        `RE: ${payload.colaborador_re || '-'}`,
-        `Cargo: ${payload.colaborador_cargo || '-'}`,
-        '',
-        'Situação atual',
-        `Posto atual: ${payload.posto_atual || '-'}`,
-        '',
-        'Alteração solicitada',
-        `Posto destino: ${payload.posto_destino || '-'}`,
-        `Data efetiva: ${formatFormalizadorDate(payload.data_efetiva)}`,
-        `Data fim: ${payload.data_fim ? formatFormalizadorDate(payload.data_fim) : '-'}`,
-        `Motivo/categoria: ${payload.motivo_categoria || '-'}`,
-        `Observações: ${payload.motivo_observacao || '-'}`,
-        '',
-        'Impactos em benefícios',
-        benefits,
-        payload.beneficios_json?.observacoes ? `Observações: ${payload.beneficios_json.observacoes}` : '',
-        '',
-        'Cobertura',
-        coverage,
-        payload.cobertura_json?.periodo ? `Período: ${payload.cobertura_json.periodo}` : '',
-        payload.cobertura_json?.observacoes ? `Observações: ${payload.cobertura_json.observacoes}` : '',
-        '',
-        'Confirmação',
-        'Esta mensagem formaliza a solicitação registrada no site Dunamis Pro. A execução administrativa da mudança deve ser validada pelos responsáveis antes de qualquer alteração operacional.'
-    ];
-    return lines.filter(line => line !== '').join('\n');
+    const lines = ['Prezados,', '', `Foi registrada uma solicitação de ${formatFormalizadorType(payload.tipo).toLowerCase()} para análise e providências administrativas.`];
+    appendFormalizadorSection(lines, 'Protocolo', [payload.protocolo, `Status: ${formatFormalizadorStatus(payload.status)}`, `Prioridade: ${formatFormalizadorPriority(payload.prioridade)}`]);
+    const requester = []; appendFormalizadorLine(requester, 'Solicitante', payload.solicitante_nome); appendFormalizadorLine(requester, 'Função/Cargo', payload.solicitante_cargo); appendFormalizadorLine(requester, 'Contato', payload.solicitante_telefone); appendFormalizadorLine(requester, 'E-mail', payload.solicitante_email); appendFormalizadorSection(lines, 'Solicitante', requester);
+    const collaborator = []; appendFormalizadorLine(collaborator, 'Nome', payload.colaborador_nome); appendFormalizadorLine(collaborator, 'Matrícula', payload.colaborador_matricula); appendFormalizadorLine(collaborator, 'RE', payload.colaborador_re); appendFormalizadorLine(collaborator, 'Cargo', payload.colaborador_cargo); appendFormalizadorSection(lines, 'Colaborador', collaborator);
+    const change = []; appendFormalizadorLine(change, 'Posto atual', payload.posto_atual); appendFormalizadorLine(change, 'Posto destino', payload.posto_destino); appendFormalizadorLine(change, 'Data efetiva solicitada', formatFormalizadorDate(payload.data_efetiva)); appendFormalizadorLine(change, 'Data fim', formatFormalizadorDate(payload.data_fim)); appendFormalizadorLine(change, 'Motivo', FORMALIZADOR_MOTIVOS[payload.motivo_categoria] || payload.motivo_categoria); appendFormalizadorSection(lines, 'Alteração solicitada', change);
+    const benefits = getFormalizadorBenefitsList(payload.beneficios_json); if (benefits.length || payload.beneficios_json?.observacoes) appendFormalizadorSection(lines, 'Impactos informados', [...benefits.map(item => `• ${item}`), payload.beneficios_json?.observacoes ? `Observações: ${payload.beneficios_json.observacoes}` : '']);
+    appendFormalizadorSection(lines, 'Cobertura', [buildFormalizadorCoverageText(payload.cobertura_json)]);
+    if (payload.motivo_observacao) appendFormalizadorSection(lines, 'Observações do solicitante', [payload.motivo_observacao]);
+    lines.push('', 'Solicito análise e confirmação dos impactos em escala, benefícios, cobertura e registros administrativos antes da execução da mudança.', '', 'Atenciosamente,', payload.solicitante_nome); if (payload.solicitante_cargo) lines.push(payload.solicitante_cargo); return lines.filter(line => line !== null && line !== undefined).join('\n');
 }
-
-function buildFormalizadorWhatsappText(payload) {
-    return [
-        `Formalização ${payload.protocolo}`,
-        `${formatFormalizadorType(payload.tipo)} | ${formatFormalizadorStatus(payload.status)}`,
-        `Solicitante: ${payload.solicitante_nome} (${payload.solicitante_cargo})`,
-        `Colaborador: ${payload.colaborador_nome} - ${payload.colaborador_matricula || payload.colaborador_re || '-'}`,
-        `Atual: ${payload.posto_atual || '-'}`,
-        `Destino: ${payload.posto_destino || '-'}`,
-        `Data efetiva: ${formatFormalizadorDate(payload.data_efetiva)}`,
-        `Benefícios: ${getFormalizadorBenefitsLabel(payload.beneficios_json)}`,
-        `Cobertura: ${getFormalizadorCoverageLabel(payload.cobertura_json)}`,
-        payload.motivo_observacao ? `Obs.: ${payload.motivo_observacao}` : ''
-    ].filter(Boolean).join('\n');
-}
+function buildFormalizadorCoverageText(coverage = {}) { const parts = []; const label = FORMALIZADOR_COVERAGE_TYPES[coverage?.tipo] || ''; const sub = coverage?.substituto || null; if (coverage?.tipo === 'sem_cobertura') parts.push('Não há cobertura definida para o posto atual neste momento.'); else if (label) parts.push(`${label}.`); if (sub?.nome) parts.push(`Substituto indicado: ${[sub.nome, sub.matricula, sub.re, sub.posto].filter(Boolean).join(' • ')}.`); if (coverage?.periodo) parts.push(`Período: ${coverage.periodo}.`); if (coverage?.observacoes) parts.push(`Observações: ${coverage.observacoes}`); return parts.join(' '); }
+function buildFormalizadorWhatsappText(payload) { return [`Solicitação registrada: ${payload.protocolo}`, `${formatFormalizadorType(payload.tipo)} • ${formatFormalizadorStatus(payload.status)}`, `Solicitante: ${[payload.solicitante_nome, payload.solicitante_cargo].filter(Boolean).join(' • ')}`, `Colaborador: ${[payload.colaborador_nome, payload.colaborador_matricula || payload.colaborador_re].filter(Boolean).join(' • ')}`, payload.posto_destino ? `Mudança: ${payload.posto_atual} -> ${payload.posto_destino}` : `Posto atual: ${payload.posto_atual}`, `Data efetiva: ${formatFormalizadorDate(payload.data_efetiva)}`, `Motivo: ${FORMALIZADOR_MOTIVOS[payload.motivo_categoria] || payload.motivo_categoria}`, hasFormalizadorBenefitImpact(payload.beneficios_json) ? `Impactos: ${getFormalizadorBenefitsLabel(payload.beneficios_json)}` : '', `Cobertura: ${buildFormalizadorCoverageText(payload.cobertura_json)}`, payload.motivo_observacao ? `Observações: ${payload.motivo_observacao}` : ''].filter(v => String(v || '').trim()).join('\n'); }
 
 async function submitFormalizacao() {
     const validation = validateFormalizador();
-    if (!validation.ok) {
-        showToast(validation.message, 'warning');
-        return;
-    }
-    if (!supabaseClient) {
-        showToast('Supabase não configurado. Não foi possível salvar o protocolo.', 'error');
-        return;
-    }
-    const protocolo = generateFormalizadorProtocol();
-    const payload = buildFormalizadorPayload(protocolo);
+    if (!validation.ok) { showToast(validation.message, 'warning'); formalizadorState.focus = validation.focus || 'form'; renderFormalizador(); return; }
+    if (!supabaseClient) { showToast('Supabase não configurado. Não foi possível salvar o protocolo.', 'error'); return; }
+    const payload = buildFormalizadorPayload(generateFormalizadorProtocol());
     try {
-        const { data, error } = await supabaseClient
-            .from(SUPABASE_TABLES.formalizacoes_postos)
-            .insert(payload)
-            .select('*')
-            .single();
+        const { data, error } = await supabaseClient.from(SUPABASE_TABLES.formalizacoes_postos).insert(payload).select('*').single();
         if (error) throw error;
         const saved = data || payload;
         if (saved.id) {
-            const { error: eventError } = await supabaseClient
-                .from(SUPABASE_TABLES.formalizacoes_status_events)
-                .insert({
-                    formalizacao_id: saved.id,
-                    status_anterior: null,
-                    status_novo: 'formalizado',
-                    ator_nome: payload.solicitante_nome || 'Solicitante',
-                    observacao: 'Formalização criada pelo site.'
-                });
-            if (eventError) {
-                AppErrorHandler.capture(eventError, { scope: 'formalizador-submit-event' }, { silent: true });
-            }
+            const { error: eventError } = await supabaseClient.from(SUPABASE_TABLES.formalizacoes_status_events).insert({ formalizacao_id: saved.id, status_anterior: null, status_novo: 'registrado', ator_nome: payload.solicitante_nome || 'Solicitante', observacao: 'Caso operacional registrado pelo Formalizador.' });
+            if (eventError) AppErrorHandler.capture(eventError, { scope: 'formalizador-submit-event' }, { silent: true });
         }
-        formalizadorState.lastCreatedId = saved.id || '';
-        formalizadorState.selectedHistoryId = saved.id || formalizadorState.selectedHistoryId;
-        formalizadorCache.updatedAt = 0;
-        await fetchFormalizacoes(true);
-        copyTextToClipboard(saved.email_body || payload.email_body);
-        showToast(`Protocolo ${saved.protocolo || protocolo} formalizado e texto copiado.`, 'success');
-        renderFormalizador();
-    } catch (err) {
-        AppErrorHandler.capture(err, { scope: 'formalizador-submit' }, { silent: true });
-        showToast(`Erro ao salvar formalização: ${err?.message || err}`, 'error');
-    }
+        formalizadorState.lastCreatedId = saved.id || ''; formalizadorState.selectedHistoryId = saved.id || formalizadorState.selectedHistoryId; formalizadorState.lastCreatedRecord = saved; formalizadorCache.updatedAt = 0;
+        await fetchFormalizacoes(true); copyTextToClipboard(saved.email_body || payload.email_body); showToast(`Protocolo ${saved.protocolo || payload.protocolo} registrado e texto copiado.`, 'success'); renderFormalizador();
+    } catch (err) { AppErrorHandler.capture(err, { scope: 'formalizador-submit' }, { silent: true }); showToast(`Erro ao salvar formalização: ${err?.message || err}`, 'error'); }
 }
-
-function getFormalizacaoRecord(id = '') {
-    const target = String(id || formalizadorState.lastCreatedId || formalizadorState.selectedHistoryId || '');
-    if (!target) return null;
-    return (formalizadorState.history || []).find(item => String(item.id) === target || String(item.protocolo) === target) || null;
-}
-
-function copyFormalizacaoText(id = '') {
-    const record = getFormalizacaoRecord(id);
-    if (record?.email_body) {
-        copyTextToClipboard(record.email_body);
-        return;
-    }
-    const preview = buildFormalizadorPreview();
-    copyTextToClipboard(preview.body);
-}
-
-function openFormalizacaoEmail(id = '') {
-    const record = getFormalizacaoRecord(id);
-    const preview = record || buildFormalizadorPayload(generateFormalizadorProtocol(), { preview: true });
-    const to = record ? getFormalizadorRecipientsFromRecord(record) : (formalizadorState.form.email_recipients || getFormalizadorDefaultRecipients());
-    const subject = preview.email_subject || preview.subject || '';
-    const body = preview.email_body || preview.body || '';
-    copyTextToClipboard(body);
-    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to || '')}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    const win = window.open(gmailUrl, '_blank', 'noopener,noreferrer');
-    if (!win) {
-        const params = new URLSearchParams();
-        if (subject) params.set('subject', subject);
-        if (body) params.set('body', body);
-        window.location.href = `mailto:${to || ''}?${params.toString()}`;
-    }
-}
-
-async function shareFormalizacaoWhatsapp(id = '') {
-    const record = getFormalizacaoRecord(id);
-    const text = record?.whatsapp_text || buildFormalizadorPreview().whatsapp;
-    copyTextToClipboard(text);
-    try {
-        if (navigator.share) {
-            await navigator.share({ text });
-            return;
-        }
-    } catch {}
-    openWhatsApp('', text);
-}
-
-function getFormalizadorRecipientsFromRecord(record = {}) {
-    if (record.email_recipients) return record.email_recipients;
-    const snap = record.snapshot_json || {};
-    if (snap.email_recipients) return snap.email_recipients;
-    const unit = snap.unidade_destino || snap.unidade_atual || {};
-    return [unit.email_supervisor_da_unidade, unit.email_sesmt].filter(Boolean).join(', ');
-}
-
+function copyFormalizadorDraftText() { const validation = validateFormalizador({ silent: true }); if (!validation.ok) { showToast(validation.message, 'warning'); return; } copyTextToClipboard(buildFormalizadorPreview().body); }
+function getFormalizacaoRecord(id = '') { const target = String(id || formalizadorState.lastCreatedId || formalizadorState.selectedHistoryId || ''); if (!target) return null; return (formalizadorState.history || []).find(item => String(item.id) === target || String(item.protocolo) === target) || formalizadorState.lastCreatedRecord || null; }
+function copyFormalizacaoText(id = '') { const record = getFormalizacaoRecord(id); if (record?.email_body) copyTextToClipboard(record.email_body); else copyFormalizadorDraftText(); }
+function openFormalizacaoEmail(id = '') { const record = getFormalizacaoRecord(id); const preview = record || buildFormalizadorPayload(generateFormalizadorProtocol(), { preview: true }); const to = record ? getFormalizadorRecipientsFromRecord(record) : (formalizadorState.form.email_recipients || getFormalizadorDefaultRecipients()); const subject = preview.email_subject || preview.subject || ''; const body = preview.email_body || preview.body || ''; copyTextToClipboard(body); const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to || '')}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`; const win = window.open(gmailUrl, '_blank', 'noopener,noreferrer'); if (!win) { const params = new URLSearchParams(); if (subject) params.set('subject', subject); if (body) params.set('body', body); window.location.href = `mailto:${to || ''}?${params.toString()}`; } }
+async function shareFormalizacaoWhatsapp(id = '') { const record = getFormalizacaoRecord(id); const text = record?.whatsapp_text || buildFormalizadorPreview().whatsapp; copyTextToClipboard(text); try { if (navigator.share) { await navigator.share({ text }); return; } } catch {} openWhatsApp('', text); }
+function getFormalizadorRecipientsFromRecord(record = {}) { if (record.email_recipients) return record.email_recipients; const snap = record.snapshot_json || {}; if (snap.email_recipients) return snap.email_recipients; const unit = snap.unidade_destino || snap.unidade_atual || {}; return [unit.email_supervisor_da_unidade, unit.email_sesmt].filter(Boolean).join(', '); }
 async function updateFormalizacaoStatus(id, nextStatus) {
-    const record = getFormalizacaoRecord(id);
-    if (!record || !FORMALIZADOR_STATUS[nextStatus] || record.status === nextStatus) return;
-    if (!supabaseClient) {
-        showToast('Supabase não configurado.', 'error');
-        return;
-    }
-    const prompted = window.prompt('Observação da mudança de status (opcional):', '');
-    if (prompted === null) {
-        renderFormalizador();
-        return;
-    }
-    const observacao = prompted || '';
-    try {
-        const { error: eventError } = await supabaseClient
-            .from(SUPABASE_TABLES.formalizacoes_status_events)
-            .insert({
-                formalizacao_id: record.id,
-                status_anterior: record.status || null,
-                status_novo: nextStatus,
-                ator_nome: formalizadorState.requester?.nome || 'Operador',
-                observacao
-            });
-        if (eventError) throw eventError;
-        const { error } = await supabaseClient
-            .from(SUPABASE_TABLES.formalizacoes_postos)
-            .update({ status: nextStatus })
-            .eq('id', record.id);
-        if (error) throw error;
-        await fetchFormalizacoes(true);
-        showToast('Status atualizado.', 'success');
-        renderFormalizador();
-    } catch (err) {
-        AppErrorHandler.capture(err, { scope: 'formalizador-status-update' }, { silent: true });
-        showToast(`Erro ao atualizar status: ${err?.message || err}`, 'error');
-        renderFormalizador();
-    }
+    const record = getFormalizacaoRecord(id); if (!record || !FORMALIZADOR_STATUS[nextStatus] || record.status === nextStatus) return; if (!supabaseClient) { showToast('Supabase não configurado.', 'error'); return; }
+    const prompted = window.prompt('Observação da mudança de status (opcional):', ''); if (prompted === null) { renderFormalizador(); return; }
+    try { const { error: eventError } = await supabaseClient.from(SUPABASE_TABLES.formalizacoes_status_events).insert({ formalizacao_id: record.id, status_anterior: record.status || null, status_novo: nextStatus, ator_nome: formalizadorState.requester?.nome || 'Operador', observacao: prompted || '' }); if (eventError) throw eventError; const { error } = await supabaseClient.from(SUPABASE_TABLES.formalizacoes_postos).update({ status: nextStatus }).eq('id', record.id); if (error) throw error; await fetchFormalizacoes(true); showToast('Status atualizado.', 'success'); renderFormalizador(); }
+    catch (err) { AppErrorHandler.capture(err, { scope: 'formalizador-status-update' }, { silent: true }); showToast(`Erro ao atualizar status: ${err?.message || err}`, 'error'); renderFormalizador(); }
 }
 
 // 6. Lógica de Unidades
