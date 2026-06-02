@@ -1,0 +1,40 @@
+LINKS UTEIS
+
+Site em producao:
+https://dunamispro.online/
+
+ChatGPT / GPT Business:
+https://chatgpt.com/
+
+GitHub login:
+https://github.com/login
+
+Repositorio:
+https://github.com/gustauvm/COBERTURA-DUNAMIS.git
+
+Supabase dashboard:
+https://supabase.com/dashboard
+
+Supabase projeto:
+https://supabase.com/dashboard/project/bvpcbviggbxnpqoprnxq
+
+Google Sheets:
+https://docs.google.com/spreadsheets/d/1lg62TTeNf2D_czDus2yJeH17y3QsDZR-0xpcrhLmkgQ/edit
+
+Apps Script:
+Abrir pela planilha em Extensoes > Apps Script
+
+Preview local V5:
+http://127.0.0.1:5173/
+
+Documentacao Supabase CLI:
+https://supabase.com/docs/guides/cli
+
+Documentacao Supabase Edge Functions:
+https://supabase.com/docs/guides/functions
+
+Documentacao Vite:
+https://vite.dev/guide/
+
+Documentacao React:
+https://react.dev/

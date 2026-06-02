@@ -1,0 +1,54 @@
+PROMPT INICIAL PARA USAR NA CONTA GPT BUSINESS
+
+Estou trabalhando no projeto Dunamis Pro.
+
+Pastas:
+v4.1 referencia/producao:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\v4.1 (rebuild)
+
+V5 desenvolvimento:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5
+
+Objetivo:
+Portar a v4.1 para a V5 com o mesmo fluxo e comportamento, mas usando stack moderna: React, TypeScript, Vite, Supabase JS, TanStack Query, Zustand e Zod.
+
+Regra principal:
+A V5 deve ser igual no fluxo da v4.1, mas polida, corrigida e com tecnologias modernas. Nao criar uma interface completamente diferente.
+
+Site:
+https://dunamispro.online/
+
+Repositorio:
+https://github.com/gustauvm/COBERTURA-DUNAMIS.git
+
+Supabase:
+https://supabase.com/dashboard/project/bvpcbviggbxnpqoprnxq
+
+Planilha:
+https://docs.google.com/spreadsheets/d/1lg62TTeNf2D_czDus2yJeH17y3QsDZR-0xpcrhLmkgQ/edit
+
+Regras de dados:
+- Fonte principal: Supabase.
+- Planilha alimenta Supabase.
+- Identificador do colaborador: MATRICULA.
+- Identificador da unidade: posto.
+- Status de plantao/folga depende somente da coluna TURMA.
+- TURMA = 1 trabalha em dias impares e folga em dias pares.
+- TURMA = 2 trabalha em dias pares e folga em dias impares.
+- Turma vazia/invalida deve aparecer como sem turma/status indefinido.
+
+Estado atual desejado:
+- v4.1 continua como referencia e backup.
+- V5 so deve ir para producao depois de aprovada modulo por modulo.
+- Site publico, sem login.
+- Nao reativar seguranca/login sem pedido explicito.
+
+Antes de alterar:
+1. Leia a v4.1.
+2. Compare com a V5.
+3. Preserve o fluxo da v4.1.
+4. Rode npm run check na V5.
+
+Comando de validacao:
+cd "C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5"
+npm run check

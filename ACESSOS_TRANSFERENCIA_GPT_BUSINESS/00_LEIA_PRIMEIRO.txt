@@ -1,0 +1,44 @@
+KIT DE TRANSFERENCIA - GPT BUSINESS / DUNAMIS PRO
+
+Objetivo:
+Deixar nesta pasta tudo que a conta GPT Business precisa para assumir o projeto, abrir os sistemas corretos e saber onde cada acesso deve ser usado.
+
+Pasta de referencia v4.1:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\v4.1 (rebuild)
+
+Pasta de desenvolvimento V5:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5
+
+Arquivos deste kit:
+00_LEIA_PRIMEIRO.txt
+01_MAPA_DE_CONTAS_E_LOGINS.txt
+02_CHECKLIST_PARA_CHEGAR_E_LOGAR.txt
+03_TEMPLATE_DE_SEGREDOS.env.example
+04_PROMPT_INICIAL_GPT_BUSINESS.txt
+05_COMANDOS_DE_SETUP_E_VALIDACAO.txt
+06_LINKS_UTEIS.txt
+
+Regra de seguranca:
+Nao salvar senhas, tokens privados, service_role key, PAT do GitHub, senha do banco, senha de e-mail ou codigo de 2FA em arquivos versionados.
+
+Onde colocar informacoes sensiveis temporarias:
+ACESSOS_TRANSFERENCIA_GPT_BUSINESS\COFRE_LOCAL_NAO_COMMITAR\
+
+Essa pasta foi adicionada ao .gitignore para nao subir ao GitHub.
+Mesmo assim, o ideal e usar um gerenciador de senhas corporativo.
+
+O que ja esta seguro neste kit:
+- URLs publicas.
+- Caminhos locais.
+- Comandos.
+- Lista de contas necessarias.
+- Instrucoes de continuidade.
+- Campos para preencher no cofre.
+
+O que falta preencher:
+- Conta/e-mail final do GPT Business.
+- Login do GitHub.
+- Login do Supabase.
+- Login do Google/planilha.
+- Login do dominio/DNS.
+- Local do cofre onde estao tokens e senhas.

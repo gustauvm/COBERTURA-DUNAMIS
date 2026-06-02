@@ -1,0 +1,100 @@
+CHECKLIST PARA CHEGAR, LOGAR E CONTINUAR
+
+1. Entrar no GPT Business
+URL:
+https://chatgpt.com/
+
+Usar:
+EMAIL/SENHA/2FA do cofre corporativo.
+
+Depois de logar:
+Abrir o projeto Dunamis Pro e usar o prompt do arquivo:
+04_PROMPT_INICIAL_GPT_BUSINESS.txt
+
+2. Abrir a pasta no VS Code/Codex
+V5:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5
+
+Referencia v4.1:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\v4.1 (rebuild)
+
+3. Conferir GitHub
+No terminal dentro da V5:
+git status
+git remote -v
+
+Repositorio esperado:
+https://github.com/gustauvm/COBERTURA-DUNAMIS.git
+
+Se pedir login/token:
+Usar PAT do GitHub guardado no cofre.
+
+4. Conferir Supabase
+Abrir:
+https://supabase.com/dashboard/project/bvpcbviggbxnpqoprnxq
+
+Confirmar tabelas:
+colaboradores
+unidades
+avisos
+ft_launches
+ft_audit_trail
+change_history
+app_settings
+sheet_sync_runs
+
+Se precisar secrets:
+Usar valores do cofre, nunca do chat ou de TXT versionado.
+
+5. Conferir Google Sheets
+Abrir:
+https://docs.google.com/spreadsheets/d/1lg62TTeNf2D_czDus2yJeH17y3QsDZR-0xpcrhLmkgQ/edit
+
+Conferir abas:
+(COLABORADORES) BD
+(UNIDADES) BD
+
+Conferir Apps Script:
+Extensoes > Apps Script
+
+Conferir gatilho:
+aoEditarPlanilha
+
+6. Rodar validacao local da V5
+cd "C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5"
+npm install
+npm run check
+
+7. Abrir preview local
+cd "C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5"
+npm run preview
+
+URL:
+http://127.0.0.1:5173/
+
+8. Comparar com v4.1
+Abrir v4.1 ou producao:
+https://dunamispro.online/
+
+Comparar:
+- Gateway
+- Busca Rapida
+- Unidades
+- Avisos
+- Reciclagem
+- Lancamentos
+
+9. Antes de publicar
+Nao publicar V5 sem:
+- npm run check passando.
+- Gateway visualmente aprovado.
+- Busca Rapida aprovada.
+- Unidades aprovada.
+- Confirmar que v4.1 continua como backup.
+
+10. Se precisar preencher credenciais temporarias
+Usar:
+ACESSOS_TRANSFERENCIA_GPT_BUSINESS\COFRE_LOCAL_NAO_COMMITAR\
+
+Essa pasta e ignorada pelo Git.
+Mesmo assim, apagar depois que a transferencia terminar.

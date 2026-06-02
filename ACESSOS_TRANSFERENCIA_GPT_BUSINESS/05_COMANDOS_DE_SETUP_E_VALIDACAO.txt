@@ -1,0 +1,42 @@
+COMANDOS DE SETUP E VALIDACAO
+
+Abrir V5:
+cd "C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5"
+
+Instalar dependencias:
+npm install
+
+Validar tudo:
+npm run check
+
+Rodar local:
+npm run preview
+
+URL local:
+http://127.0.0.1:5173/
+
+Ver status do Git:
+git status
+
+Ver remote:
+git remote -v
+
+Commit exemplo:
+git add .
+git commit -m "Porta fluxo v4.1 para V5"
+git push
+
+Supabase login:
+npx supabase login
+
+Linkar projeto Supabase:
+npx supabase link --project-ref bvpcbviggbxnpqoprnxq
+
+Configurar segredo da Edge Function:
+npx supabase secrets set SHEET_SYNC_SHARED_SECRET=VALOR_DO_COFRE
+
+Deploy Edge Function:
+npx supabase functions deploy sheet-sync-colaboradores --project-ref bvpcbviggbxnpqoprnxq --no-verify-jwt --use-api
+
+Observacao:
+Substitua VALOR_DO_COFRE pelo segredo guardado no cofre corporativo, nao por valor salvo em TXT.

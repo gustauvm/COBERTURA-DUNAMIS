@@ -1,0 +1,131 @@
+MAPA DE CONTAS E LOGINS
+
+1. GPT BUSINESS / CHATGPT
+URL:
+https://chatgpt.com/
+
+Conta nova do trabalho:
+EMAIL: PREENCHER_NO_COFRE
+SENHA: GUARDAR_NO_COFRE
+2FA: GUARDAR_NO_COFRE
+
+Uso:
+- Continuar o desenvolvimento do Dunamis Pro.
+- Abrir a pasta V5.
+- Usar o prompt do arquivo 04_PROMPT_INICIAL_GPT_BUSINESS.txt.
+
+2. GITHUB
+URL:
+https://github.com/login
+
+Repositorio:
+https://github.com/gustauvm/COBERTURA-DUNAMIS.git
+
+Conta/organizacao:
+PREENCHER_NO_COFRE
+
+PAT / token:
+GUARDAR_NO_COFRE
+
+Uso:
+- Commit/push.
+- Deploy.
+- Historico da v4.1 e V5.
+
+3. SUPABASE
+Dashboard:
+https://supabase.com/dashboard
+
+Projeto:
+https://supabase.com/dashboard/project/bvpcbviggbxnpqoprnxq
+
+Project ref:
+bvpcbviggbxnpqoprnxq
+
+URL publica do projeto:
+https://bvpcbviggbxnpqoprnxq.supabase.co
+
+Conta/e-mail:
+PREENCHER_NO_COFRE
+
+Senha:
+GUARDAR_NO_COFRE
+
+Service role key:
+GUARDAR_NO_COFRE
+
+Database password:
+GUARDAR_NO_COFRE
+
+Anon key:
+Ja existe no config.js da v4.1 e na configuracao da V5.
+Nao precisa copiar aqui.
+
+Uso:
+- Conferir tabelas colaboradores e unidades.
+- Conferir sync da planilha.
+- Publicar/monitorar Edge Functions.
+- Configurar secrets.
+
+4. GOOGLE SHEETS / APPS SCRIPT
+Planilha principal:
+https://docs.google.com/spreadsheets/d/1lg62TTeNf2D_czDus2yJeH17y3QsDZR-0xpcrhLmkgQ/edit
+
+Apps Script:
+Abrir pela planilha em Extensoes > Apps Script.
+
+Abas principais:
+(COLABORADORES) BD
+(UNIDADES) BD
+
+Conta Google dona ou com acesso:
+PREENCHER_NO_COFRE
+
+Senha:
+GUARDAR_NO_COFRE
+
+2FA:
+GUARDAR_NO_COFRE
+
+Uso:
+- Editar base operacional.
+- Conferir gatilho aoEditarPlanilha.
+- Conferir script AUTOMATIZACAO SUPABASE.gs.
+- Rodar carga manual apenas quando necessario.
+
+5. DOMINIO / DNS
+Dominio:
+dunamispro.online
+
+URL em producao:
+https://dunamispro.online/
+
+Provedor DNS:
+PREENCHER_NO_COFRE
+
+Conta/e-mail:
+PREENCHER_NO_COFRE
+
+Senha:
+GUARDAR_NO_COFRE
+
+Uso:
+- Manter dominio apontado para a versao publicada.
+- Nao alterar DNS enquanto V5 nao estiver aprovada.
+
+6. E-MAILS CONHECIDOS NO PROJETO
+Bootstrap admin encontrado no config.js:
+nextibombeiros@gmail.com
+
+Observacao:
+O site esta sem login atualmente. Esse e-mail e apenas referencia historica/configuracao.
+
+7. AMBIENTE LOCAL
+v4.1:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\v4.1 (rebuild)
+
+V5:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5
+
+Porta local usual:
+http://127.0.0.1:5173/

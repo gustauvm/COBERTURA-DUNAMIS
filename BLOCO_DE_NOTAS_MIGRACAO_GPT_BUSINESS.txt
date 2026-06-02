@@ -1,0 +1,278 @@
+MIGRACAO PARA CONTA GPT BUSINESS - DUNAMIS PRO
+Atualizado em: 2026-06-01
+
+OBJETIVO
+Transferir o contexto de trabalho, instrucoes, caminhos, projeto, deploy e acessos necessarios para continuar o desenvolvimento pela conta GPT Business do trabalho.
+
+IMPORTANTE SOBRE SEGURANCA
+Nao consolidar senhas, tokens privados, service_role keys, Personal Access Tokens ou segredos de Edge Function em arquivo de texto puro.
+Use este arquivo como inventario. Preencha segredos reais em um gerenciador de senhas da empresa ou no cofre oficial usado pelo time.
+
+O QUE PODE FICAR AQUI
+- Caminhos de projeto.
+- URLs publicas.
+- Nome de repositorio.
+- Instrucoes de setup.
+- Lista de onde os segredos estao configurados.
+- Chaves publicas anonimas quando ja estao no frontend.
+
+O QUE NAO DEVE FICAR AQUI
+- Supabase service_role key.
+- GitHub Personal Access Token.
+- OpenAI/API keys privadas.
+- Senhas de e-mail.
+- Senhas de contas Google.
+- Segredo SHEET_SYNC_SHARED_SECRET.
+- Tokens de CLI.
+
+PASTAS PRINCIPAIS
+V4.1 em producao/reference:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\v4.1 (rebuild)
+
+V5 em desenvolvimento:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5
+
+SITE EM PRODUCAO
+Dominio:
+https://dunamispro.online/
+
+Arquivo CNAME:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\v4.1 (rebuild)\CNAME
+
+REPOSITORIO GITHUB
+Remote atual:
+https://github.com/gustauvm/COBERTURA-DUNAMIS.git
+
+Fluxo atual:
+1. Editar localmente no VS Code/Codex.
+2. Rodar testes/check/build.
+3. Commit e push para GitHub.
+4. Deploy do site conforme configuracao atual do repositorio.
+
+SUPABASE
+Project URL:
+https://bvpcbviggbxnpqoprnxq.supabase.co
+
+Project ref:
+bvpcbviggbxnpqoprnxq
+
+Anon key publica:
+Ja esta no arquivo config.js da v4.1 e no env/config da V5.
+Observacao: anon key nao e service_role. Ela pode existir no frontend, mas as politicas RLS precisam proteger o banco.
+
+Service role key:
+NAO colocar aqui.
+Guardar no cofre/senha corporativa.
+Local para obter: Supabase Dashboard > Project Settings > API.
+
+Edge Function / sync planilha:
+Segredo usado:
+SHEET_SYNC_SHARED_SECRET
+
+Valor real:
+NAO colocar aqui.
+Guardar no cofre/senha corporativa.
+
+Comando de exemplo para configurar novamente:
+npx supabase secrets set SHEET_SYNC_SHARED_SECRET=COLOQUE_O_SEGREDO_DO_COFRE
+
+TABELAS PRINCIPAIS DO SUPABASE
+Fluxo operacional atual:
+- colaboradores
+- unidades
+- avisos
+- ft_launches
+- ft_audit_trail
+- change_history
+- app_settings
+
+Sync Google Sheets -> Supabase:
+- sheet_sync_runs
+- possiveis tabelas auxiliares conforme SQL aplicado
+
+Tabelas antigas/legadas que ja foram discutidas para limpeza:
+- analytics_snapshots
+- force_map_snapshots
+- troca_launches
+- unit_capacity_models
+- vehicle_incidents
+
+GOOGLE SHEETS
+Planilha principal:
+https://docs.google.com/spreadsheets/d/1lg62TTeNf2D_czDus2yJeH17y3QsDZR-0xpcrhLmkgQ/edit
+
+Abas principais:
+- (COLABORADORES) BD
+- (UNIDADES) BD
+
+Identificador do colaborador:
+MATRICULA
+
+Identificador da unidade:
+posto
+
+Apps Script:
+O script de sincronizacao fica na planilha, em Extensoes > Apps Script.
+Nome usado/esperado:
+AUTOMATIZACAO SUPABASE.gs
+
+Funcao de gatilho On edit:
+aoEditarPlanilha
+
+Funcao de carga completa/manual:
+sincronizarBaseCompletaSupabaseAgora
+
+Observacao:
+O objetivo e editar a planilha e refletir no Supabase/site automaticamente.
+Nao rodar carga completa a cada edicao.
+
+REGRAS DE NEGOCIO IMPORTANTES
+Busca Rapida:
+- A ancora do colaborador e MATRICULA.
+- A ancora de unidade e posto.
+- Status operacional depende exclusivamente da coluna TURMA.
+- TURMA = 1: trabalha em dias impares e folga em dias pares.
+- TURMA = 2: trabalha em dias pares e folga em dias impares.
+- Turma vazia/invalida: status indefinido/sem turma.
+
+Site:
+- Sem login.
+- Acesso publico.
+- Remover mencoes visuais a login.
+- v4.1 continua como referencia/producao ate V5 ficar validada.
+
+Menus que foram removidos/pausados anteriormente:
+- Aviso
+- Reciclagem
+- Lancamentos
+
+Observacao atual:
+Na V5, o pedido mais recente foi portar a v4.1 igual no fluxo, mas com tecnologias novas e correcoes. Validar modulo por modulo antes de publicar.
+
+STACK DA V5
+Pasta:
+C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5
+
+Tecnologias:
+- React 19
+- Vite
+- TypeScript
+- Supabase JS 2
+- TanStack Query
+- Zustand
+- Zod
+- Tailwind CSS
+- Lucide React
+
+Comandos:
+npm install
+npm run dev
+npm run preview
+npm run lint
+npm run typecheck
+npm run build
+npm run check
+
+Validacao obrigatoria antes de publicar:
+npm run check
+
+ESTADO DE DESENVOLVIMENTO MAIS RECENTE
+V5 recebeu ajustes para ficar mais parecida com a v4.1:
+- Gateway estilo "Selecione a Unidade".
+- Cards de empresas.
+- Visualizacao Geral.
+- Supervisao e Gerencia como acessos do gateway.
+- Header simples.
+- Breadcrumb.
+- Abas compactas.
+- Busca Rapida densa.
+- Resultados em cards com status.
+
+Arquivos principais da V5:
+- src/app/App.tsx
+- src/app/store.ts
+- src/entities/operational/api.ts
+- src/entities/operational/hooks.ts
+- src/entities/operational/types.ts
+- src/features/gateway/GatewayPage.tsx
+- src/features/search/SearchPage.tsx
+- src/features/units/UnitsPage.tsx
+- src/index.css
+
+CREDENCIAIS E ACESSOS A TRANSFERIR PARA A CONTA BUSINESS
+Preencher no cofre corporativo, nao neste TXT:
+
+1. GitHub
+Conta/organizacao:
+Email de acesso:
+Repositorio:
+Token/PAT:
+Local seguro onde esta guardado:
+
+2. Supabase
+Conta/organizacao:
+Email de acesso:
+Project ref:
+bvpcbviggbxnpqoprnxq
+Anon key publica:
+Ver config.js/env do projeto.
+Service role key:
+Guardar no cofre.
+Database password:
+Guardar no cofre.
+
+3. Google
+Conta dona da planilha:
+Email:
+Planilha:
+https://docs.google.com/spreadsheets/d/1lg62TTeNf2D_czDus2yJeH17y3QsDZR-0xpcrhLmkgQ/edit
+Apps Script:
+AUTOMATIZACAO SUPABASE.gs
+Segredos do script:
+Guardar no cofre.
+
+4. Dominio/DNS
+Dominio:
+dunamispro.online
+Provedor:
+Conta/email:
+Acesso DNS:
+Guardar no cofre.
+
+5. OpenAI / GPT Business
+Workspace:
+Email da conta nova:
+Projetos/conversas a recriar:
+- Dunamis Pro v4.1
+- Dunamis Pro V5
+- Sync Google Sheets -> Supabase
+- Busca Rapida / Unidades / Formalizador / Cobertura de Postos
+
+PROMPT BASE PARA USAR NA CONTA GPT BUSINESS
+Use este contexto:
+
+"Estou trabalhando no projeto Dunamis Pro. A v4.1 esta em C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\v4.1 (rebuild) e e a referencia visual/funcional. A V5 esta em C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5 e deve ser igual no fluxo da v4.1, mas usando React, TypeScript, Vite, Supabase JS, TanStack Query, Zustand e Zod. O site e publico, sem login. A fonte dos dados e Supabase, alimentado pela planilha Google. A regra de plantao/folga depende apenas da coluna TURMA: 1 trabalha em dias impares, 2 trabalha em dias pares. Antes de alterar, compare com a v4.1 e preserve paridade de fluxo."
+
+CHECKLIST PARA TROCA DE CONTA
+1. Garantir acesso da conta Business ao GitHub/repositorio.
+2. Garantir acesso da conta Business ao Supabase.
+3. Garantir acesso da conta Business ao Google Sheets/Apps Script.
+4. Transferir ou compartilhar o cofre de senhas/tokens.
+5. Abrir a pasta V5 no Codex/VS Code pela conta Business.
+6. Rodar npm install se necessario.
+7. Rodar npm run check.
+8. Subir preview local.
+9. Comparar V5 contra v4.1 antes de qualquer deploy.
+
+COMANDO PARA ABRIR PREVIEW V5
+cd "C:\Users\gusta\OneDrive\Desktop\sites\COBERTURA DUNAMIS\V5"
+npm run preview
+
+URL local:
+http://127.0.0.1:5173/
+
+NOTAS FINAIS
+Nao publicar V5 em dunamispro.online ate aprovar visual e fluxo modulo por modulo.
+Nao apagar v4.1. Ela e referencia e backup funcional.
+Nao colocar service_role ou tokens privados no frontend.
+Nao consolidar credenciais reais neste TXT.

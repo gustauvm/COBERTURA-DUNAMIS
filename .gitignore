@@ -1,3 +1,9 @@
 node_modules/
 .env
 supabase/.temp/
+ACESSOS_TRANSFERENCIA_GPT_BUSINESS/COFRE_LOCAL_NAO_COMMITAR/
+*.env.local
+*.secret.*
+*TOKEN*.txt
+*SENHA*.txt
+*CREDENCIAL*.txt
