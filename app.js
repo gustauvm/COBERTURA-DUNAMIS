@@ -106,7 +106,7 @@ let supervisaoHistory = [];
 let supervisaoFavorites = new Set();
 let supervisaoUsage = {};
 let preRegisteredEmails = []; // [{email, role, groups}]
-let supervisaoFilter = 'internal';
+let supervisaoFilter = 'colab';
 let supervisaoSearchTerm = '';
 let supervisaoChannelPrefs = {};
 let supervisaoEditingId = null;
@@ -608,7 +608,7 @@ const APP_NAV_PARAMS = Object.freeze({
     tab: 'appTab'
 });
 const APP_NAV_STORAGE_KEY = 'dunamisNavStateV1';
-const DASHBOARD_TABS = new Set(['busca', 'busca-beta', 'formalizador', 'unidades', 'avisos', 'reciclagem', 'lancamentos', 'config', 'collab-detail']);
+const DASHBOARD_TABS = new Set(['busca', 'busca-beta', 'formalizador', 'unidades', 'supervisao', 'avisos', 'reciclagem', 'lancamentos', 'config', 'collab-detail']);
 const DISABLED_DASHBOARD_TABS = new Set(['avisos', 'reciclagem', 'lancamentos']);
 let appNavBound = false;
 let appNavApplying = false;
@@ -627,14 +627,16 @@ function normalizeDashboardTab(tabName) {
 function normalizeAppNavState(raw = {}) {
     const next = raw && typeof raw === 'object' ? raw : {};
     const viewRaw = String(next.view || next.screen || '').trim().toLowerCase();
-    const view = (viewRaw === 'supervisao' || viewRaw === 'gerencia' || viewRaw === 'dashboard') ? viewRaw : 'gateway';
     const group = String(next.group || '').trim().toLowerCase();
+    if (viewRaw === 'supervisao') {
+        return { view: 'dashboard', group: group || 'todos', tab: 'supervisao' };
+    }
+    const view = (viewRaw === 'gerencia' || viewRaw === 'dashboard') ? viewRaw : 'gateway';
     const tab = normalizeDashboardTab(next.tab);
     return { view, group, tab };
 }
 
 function getCurrentAppNavState() {
-    if (currentTab === 'supervisao') return { view: 'supervisao', group: '', tab: 'busca' };
     if (currentTab === 'gerencia') return { view: 'gerencia', group: '', tab: 'busca' };
     if (appContainer.style.display === 'none') return { view: 'gateway', group: '', tab: 'busca' };
     return {
@@ -708,8 +710,9 @@ async function applyAppNavigationState(rawState, options = {}) {
             return;
         }
         if (state.view === 'supervisao') {
-            openSupervisaoPage({ skipRouteSync: true });
-            syncAppNavigation(state, { history: historyMode });
+            const group = state.group || currentGroup || 'todos';
+            await loadGroup(group, { restoreTab: 'supervisao', skipRouteSync: true, history: historyMode });
+            syncAppNavigation({ view: 'dashboard', group, tab: 'supervisao' }, { history: historyMode });
             return;
         }
         if (state.view === 'gerencia') {
@@ -1108,6 +1111,7 @@ function enablePublicAccessMode() {
     updateAuthUiState();
     updateMenuStatus();
     _setupRealtimeSubscriptions();
+    _loadAllAppSettings();
 }
 
 async function loadOrCreateProfile(user) {
@@ -1382,7 +1386,7 @@ const CONTEXT_HELP_CONTENT = {
         title: 'Página Inicial',
         lines: [
             'Selecione um grupo para abrir a operação.',
-            'Use Supervisão para links e mensagens rápidas.',
+            'Links da Supervisão fica dentro do grupo escolhido, ao lado de Unidades.',
             'Gerência está em placeholder até próxima evolução.'
         ]
     },
@@ -2893,6 +2897,7 @@ async function _loadAllAppSettings() {
             .select('key, value');
         if (error) throw error;
         if (!data || !data.length) return;
+        let supervisaoSettingsChanged = false;
         for (const row of data) {
             try {
                 switch (row.key) {
@@ -2942,10 +2947,15 @@ async function _loadAllAppSettings() {
                         }
                         break;
                     case 'supervisaoMenu':
-                        localStorage.setItem('supervisaoMenu', JSON.stringify(row.value || []));
+                        supervisaoMenu = row.value && typeof row.value === 'object' ? row.value : null;
+                        localStorage.setItem('supervisaoMenu', JSON.stringify(supervisaoMenu || {}));
+                        ensureSupervisaoMenu();
+                        supervisaoSettingsChanged = true;
                         break;
                     case 'supervisaoHistory':
-                        localStorage.setItem('supervisaoHistory', JSON.stringify(row.value || []));
+                        supervisaoHistory = Array.isArray(row.value) ? row.value : [];
+                        localStorage.setItem('supervisaoHistory', JSON.stringify(supervisaoHistory));
+                        supervisaoSettingsChanged = true;
                         break;
                     case 'localCollaborators':
                         localStorage.setItem('localCollaborators', JSON.stringify(row.value || []));
@@ -2956,6 +2966,13 @@ async function _loadAllAppSettings() {
                         break;
                 }
             } catch {}
+        }
+        if (supervisaoSettingsChanged && currentTab === 'supervisao') {
+            renderSupervisao();
+            renderSupervisaoAdminList();
+            renderSupervisaoHistory();
+            renderSupervisaoQuality();
+            updateSupervisaoAdminStatus();
         }
     } catch (err) {
         AppErrorHandler.capture(err, { scope: 'load-all-settings' }, { silent: true });
@@ -3451,6 +3468,7 @@ const SUPERVISAO_CATEGORIES = {
         description: 'Passo a passo e orientações rápidas.'
     }
 };
+const SUPERVISAO_CATEGORY_ORDER = ['colab', 'internal', 'guide'];
 
 const SUPERVISAO_DEFAULT_MENU = {
     meta: {
@@ -3761,7 +3779,7 @@ function getCommandPaletteCommands() {
     push('Abrir Formalizador', 'formalizador protocolo remanejamento desligamento troca posto beneficios cobertura', () => openTabFromCommand('formalizador'));
     push('Abrir Unidades', 'unidades postos', () => openTabFromCommand('unidades'));
     push('Abrir Configuração', 'configuracao settings', () => openTabFromCommand('config'));
-    push('Abrir Supervisão', 'supervisao menu links', () => openSupervisaoPage());
+    push('Abrir Links da Supervisão', 'supervisao menu links mensagens colaboradores', () => openTabFromCommand('supervisao'));
     push('Abrir Gerência', 'gerencia placeholder', () => openGerenciaPage());
     push('Voltar para Página Inicial', 'inicio home gateway', () => resetToGateway());
     push('Criar Snapshot Diário Agora', 'snapshot backup restore', () => runDailySafetySnapshot({ force: true }));
@@ -3960,36 +3978,21 @@ window.onscroll = function() {
     }
 };
 
-function openSupervisaoPage(options = {}) {
-    clearTabScopedTimers('supervisao');
-    appContainer.style.display = 'block';
-    gateway.classList.add('hidden');
-    document.body.classList.remove('on-gateway');
-    closeUtilityDrawer();
-    setAppState('currentTab', 'supervisao', { silent: true });
-    contentArea.innerHTML = `
-        <div class="breadcrumb-bar">
-            <div class="breadcrumb-main">
-                <span>Página inicial</span>
-                <span class="breadcrumb-sep">›</span>
-                <span>Supervisão</span>
-            </div>
-            <div class="breadcrumb-meta">
-                <span class="breadcrumb-updated">Acesso direto</span>
-            </div>
-        </div>
-        ${getSupervisaoShellHtml()}
-    `;
-    clearContextBar();
-    bindSupervisaoEvents();
-    renderSupervisao();
-    renderSupervisaoAdminList();
-    renderSupervisaoHistory();
-    updateSupervisaoEditorVisibility();
-    updateSupervisaoAdminStatus();
-    if (!options.skipRouteSync) {
-        syncAppNavigation({ view: 'supervisao', group: '', tab: 'busca' }, { history: options.history || 'push' });
+async function openSupervisaoPage(options = {}) {
+    const targetGroup = options.group || currentGroup || 'todos';
+    const needsDashboard = appContainer.style.display === 'none' || !document.getElementById('tab-content-supervisao');
+    if (needsDashboard) {
+        await loadGroup(targetGroup, {
+            restoreTab: 'supervisao',
+            history: options.history || 'push',
+            skipRouteSync: !!options.skipRouteSync
+        });
+        return;
     }
+    switchTab('supervisao', {
+        history: options.history || 'push',
+        skipRouteSync: !!options.skipRouteSync
+    });
 }
 
 async function openGerenciaPage(options = {}) {
@@ -4284,14 +4287,97 @@ function updateSupervisaoAdminStatus() {
     modeEl.className = `status-badge-menu ${SiteAuth.mode === 'edit' ? 'edit' : 'view'}`;
 }
 
+function getSupervisaoEditorModalHtml() {
+    return `
+        <div id="supervisao-editor-modal" class="modal hidden supervisao-editor-modal">
+            <div class="modal-content supervisao-editor-dialog">
+                <div class="modal-header sticky-modal-header">
+                    <h3 id="supervisao-editor-modal-title">Novo link/mensagem</h3>
+                    <button class="close-modal" onclick="closeSupervisaoEditorModal()" aria-label="Fechar">${ICONS.close}</button>
+                </div>
+                <div class="supervisao-admin-card tone-primary supervisao-editor-card">
+                    <div class="hint">Edite o conteúdo publicado para todos que acessam o site.</div>
+                    <input type="hidden" id="supervisao-editor-id">
+                    <div class="field-row">
+                        <label>Seção</label>
+                        <select id="supervisao-editor-category">
+                            <option value="colab">Colaboradores</option>
+                            <option value="internal">Supervisão (interno)</option>
+                            <option value="guide">Guias e tutoriais</option>
+                        </select>
+                    </div>
+                    <div class="field-row">
+                        <label>Tipo</label>
+                        <select id="supervisao-editor-type" onchange="updateSupervisaoEditorVisibility()">
+                            <option value="message">Mensagem</option>
+                            <option value="link">Link</option>
+                        </select>
+                    </div>
+                    <div class="field-row">
+                        <label>Título</label>
+                        <input type="text" id="supervisao-editor-title" placeholder="Ex: Programação de férias">
+                    </div>
+                    <div class="field-row">
+                        <label>Descrição</label>
+                        <input type="text" id="supervisao-editor-description" placeholder="Resumo curto do item">
+                    </div>
+                    <div class="field-row">
+                        <label>Link principal (opcional)</label>
+                        <input type="text" id="supervisao-editor-link" placeholder="https://...">
+                    </div>
+                    <div class="field-row">
+                        <label>Links extras (um por linha: Rótulo | URL)</label>
+                        <textarea id="supervisao-editor-links" rows="3" placeholder="Exemplo | https://..."></textarea>
+                    </div>
+                    <div id="supervisao-editor-message-group">
+                        <div class="field-row">
+                            <label>Mensagem (WhatsApp)</label>
+                            <textarea id="supervisao-editor-message-whatsapp" rows="4" placeholder="Digite a mensagem"></textarea>
+                        </div>
+                        <div class="field-row">
+                            <label>Mensagem (E-mail)</label>
+                            <textarea id="supervisao-editor-message-email" rows="4" placeholder="Opcional"></textarea>
+                        </div>
+                        <div class="field-row">
+                            <label>E-mail destino</label>
+                            <input type="text" id="supervisao-editor-email-to" placeholder="exemplo@dominio.com">
+                        </div>
+                        <div class="field-row">
+                            <label>Cc (opcional)</label>
+                            <input type="text" id="supervisao-editor-email-cc" placeholder="copiar@dominio.com">
+                        </div>
+                        <div class="field-row">
+                            <label>Assunto do e-mail</label>
+                            <input type="text" id="supervisao-editor-email-subject" placeholder="Assunto">
+                        </div>
+                    </div>
+                    <div class="field-row">
+                        <label>Imagens (uma por linha)</label>
+                        <textarea id="supervisao-editor-images" rows="3" placeholder="images/exemplo.jpg"></textarea>
+                    </div>
+                    <div class="field-row">
+                        <label>Validade (opcional)</label>
+                        <input type="date" id="supervisao-editor-expires">
+                    </div>
+                    <div class="actions supervisao-editor-actions">
+                        <button class="btn" onclick="saveSupervisaoItem()">Salvar item</button>
+                        <button class="btn btn-secondary" onclick="resetSupervisaoEditor()">Limpar</button>
+                        <button class="btn btn-secondary" onclick="closeSupervisaoEditorModal()">Cancelar</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function getSupervisaoAdminHtml() {
     const logged = SiteAuth.logged;
-    const isAdmin = isAdminRole();
     const canEdit = canEditSupervisao();
     const publicMode = isPublicAccessMode();
     return `
+        ${getSupervisaoEditorModalHtml()}
         <details class="supervisao-admin-panel">
-            <summary>Menu de edição</summary>
+            <summary>Confiabilidade e histórico</summary>
             <div class="supervisao-admin-body">
                 ${!logged ? `
                     <div class="supervisao-admin-login">
@@ -4311,7 +4397,7 @@ function getSupervisaoAdminHtml() {
                             <button class="btn btn-secondary btn-small" onclick="signupSite({ source: 'supervisao' })">Criar conta</button>
                             <button class="btn btn-secondary btn-small" onclick="requestPasswordReset({ source: 'supervisao' })">Esqueci senha</button>
                         </div>
-                        <div class="hint">Somente perfis autorizados podem editar.</div>
+                        <div class="hint">Entre para administrar o conteúdo compartilhado.</div>
                     </div>
                 ` : `
                     <div class="supervisao-admin-status">
@@ -4320,96 +4406,30 @@ function getSupervisaoAdminHtml() {
                         <div><span>Modo</span><strong id="supervisao-admin-mode" class="status-badge-menu view">VISUALIZAÇÃO</strong></div>
                     </div>
                     <div class="supervisao-admin-actions">
-                        <button class="btn btn-secondary btn-small" onclick="toggleEditModeFromSupervisao()">Alternar modo</button>
+                        ${publicMode ? '' : `<button class="btn btn-secondary btn-small" onclick="toggleEditModeFromSupervisao()">Alternar modo</button>`}
                         ${publicMode ? '' : `<button class="btn btn-secondary btn-small" onclick="logoutSite({ target: 'supervisao' })">Sair</button>`}
+                        ${canEdit ? `<button class="btn btn-secondary btn-small" onclick="openSupervisaoNewItem()">${ICONS.edit} Novo link/mensagem</button>` : ''}
                     </div>
-                    ${!canEdit ? `<div class="hint">Para editar, ative o modo edição.</div>` : ''}
-                    ${logged && !isAdmin ? `<div class="hint">Seu perfil não permite editar o menu de Supervisão.</div>` : ''}
+                    ${!canEdit ? `<div class="hint">Seu acesso atual permite visualizar, mas não editar este menu.</div>` : ''}
                 `}
 
-                ${logged && isAdmin ? `
+                ${logged ? `
                     <div class="supervisao-admin-grid">
-                        <div class="supervisao-admin-section-title">Conteúdo do menu</div>
-                        <div class="supervisao-admin-card tone-primary">
-                            <div class="supervisao-admin-card-header">
-                                <strong>Editor principal</strong>
-                            </div>
-                            <div class="hint">Crie ou atualize links e mensagens principais.</div>
-                            <input type="hidden" id="supervisao-editor-id">
-                            <div class="field-row">
-                                <label>Seção</label>
-                                <select id="supervisao-editor-category">
-                                    <option value="internal">Supervisão (interno)</option>
-                                    <option value="colab">Colaboradores</option>
-                                    <option value="guide">Guias e tutoriais</option>
-                                </select>
-                            </div>
-                            <div class="field-row">
-                                <label>Tipo</label>
-                                <select id="supervisao-editor-type" onchange="updateSupervisaoEditorVisibility()">
-                                    <option value="message">Mensagem</option>
-                                    <option value="link">Link</option>
-                                </select>
-                            </div>
-                            <div class="field-row">
-                                <label>Título</label>
-                                <input type="text" id="supervisao-editor-title" placeholder="Ex: Programação de férias">
-                            </div>
-                            <div class="field-row">
-                                <label>Descrição</label>
-                                <input type="text" id="supervisao-editor-description" placeholder="Resumo curto do item">
-                            </div>
-                            <div class="field-row">
-                                <label>Link principal (opcional)</label>
-                                <input type="text" id="supervisao-editor-link" placeholder="https://...">
-                            </div>
-                            <div class="field-row">
-                                <label>Links extras (um por linha: Rótulo | URL)</label>
-                                <textarea id="supervisao-editor-links" rows="3" placeholder="Exemplo | https://..."></textarea>
-                            </div>
-                            <div id="supervisao-editor-message-group">
-                                <div class="field-row">
-                                    <label>Mensagem (WhatsApp)</label>
-                                    <textarea id="supervisao-editor-message-whatsapp" rows="4" placeholder="Digite a mensagem"></textarea>
-                                </div>
-                                <div class="field-row">
-                                    <label>Mensagem (E-mail)</label>
-                                    <textarea id="supervisao-editor-message-email" rows="4" placeholder="Opcional"></textarea>
-                                </div>
-                                <div class="field-row">
-                                    <label>E-mail destino</label>
-                                    <input type="text" id="supervisao-editor-email-to" placeholder="exemplo@dominio.com">
-                                </div>
-                                <div class="field-row">
-                                    <label>Cc (opcional)</label>
-                                    <input type="text" id="supervisao-editor-email-cc" placeholder="copiar@dominio.com">
-                                </div>
-                                <div class="field-row">
-                                    <label>Assunto do e-mail</label>
-                                    <input type="text" id="supervisao-editor-email-subject" placeholder="Assunto">
-                                </div>
-                            </div>
-                            <div class="field-row">
-                                <label>Imagens (uma por linha)</label>
-                                <textarea id="supervisao-editor-images" rows="3" placeholder="images/exemplo.jpg"></textarea>
-                            </div>
-                            <div class="field-row">
-                                <label>Validade (opcional)</label>
-                                <input type="date" id="supervisao-editor-expires">
-                            </div>
-                            <div class="actions">
-                                <button class="btn" onclick="saveSupervisaoItem()">Salvar item</button>
-                                <button class="btn btn-secondary" onclick="resetSupervisaoEditor()">Limpar</button>
-                            </div>
-                        </div>
-
+                        <div class="supervisao-admin-section-title">Controle do conteúdo</div>
                         <div class="supervisao-admin-card tone-blue">
                             <div class="supervisao-admin-card-header">
                                 <strong>Itens cadastrados</strong>
-                                <button class="btn btn-secondary btn-small" onclick="resetSupervisaoEditor()">Novo item</button>
+                                ${canEdit ? `<button class="btn btn-secondary btn-small" onclick="openSupervisaoNewItem()">Novo item</button>` : ''}
                             </div>
                             <div class="hint">Organize rapidamente tudo que está publicado.</div>
                             <div id="supervisao-admin-list" class="supervisao-admin-list"></div>
+                        </div>
+
+                        <div class="supervisao-admin-card tone-sky">
+                            <div class="supervisao-admin-card-header">
+                                <strong>Auditoria rápida</strong>
+                            </div>
+                            <div id="supervisao-quality-list" class="supervisao-quality-list"></div>
                         </div>
 
                         <div class="supervisao-admin-section-title">Operação e histórico</div>
@@ -4446,26 +4466,29 @@ function getSupervisaoShellHtml() {
         <div class="supervisao-shell">
             <div class="supervisao-header">
                 <div>
-                    <h3>Supervisão</h3>
-                    <p>Links internos e mensagens prontas para enviar aos colaboradores.</p>
+                    <h3>Links da Supervisão</h3>
+                    <p>Mensagens prontas, links úteis e atalhos rápidos para uso em campo.</p>
                 </div>
-                <div id="supervisao-updated" class="supervisao-meta"></div>
+                <div class="supervisao-header-actions">
+                    <div id="supervisao-updated" class="supervisao-meta"></div>
+                    ${canEditSupervisao() ? `<button class="btn btn-secondary btn-small" onclick="openSupervisaoNewItem()">${ICONS.edit} Novo link/mensagem</button>` : ''}
+                </div>
             </div>
             <div class="supervisao-toolbar">
                 <input type="text" id="supervisao-search" class="search-input" placeholder="Buscar link ou mensagem...">
                 <div class="supervisao-switch">
                     <div class="supervisao-switch-label">Público principal</div>
                     <div class="supervisao-switch-group">
-                        <button class="switch-btn" data-supervisao-filter="internal">Supervisão</button>
                         <button class="switch-btn" data-supervisao-filter="colab">Colaboradores</button>
+                        <button class="switch-btn" data-supervisao-filter="internal">Supervisão</button>
                     </div>
                 </div>
-                <div class="supervisao-switch-hint">Selecione quem verá o conteúdo principal antes dos filtros extras.</div>
+                <div class="supervisao-switch-hint">Colaboradores abre primeiro para agilizar mensagens de campo.</div>
                 <div class="supervisao-filters">
                     <button class="filter-chip" data-supervisao-filter="guide">Guias</button>
                     <button class="filter-chip" data-supervisao-filter="favorites">Favoritos</button>
                     <button class="filter-chip" data-supervisao-filter="used">Mais usados</button>
-                    ${isAdminRole() ? `<button class="filter-chip" data-supervisao-filter="expired">Expirados</button>` : ''}
+                    ${canEditSupervisao() ? `<button class="filter-chip" data-supervisao-filter="expired">Expirados</button>` : ''}
                 </div>
             </div>
             <div id="supervisao-top-used" class="supervisao-top-used hidden"></div>
@@ -4515,13 +4538,6 @@ function renderGateway() {
             </div>` : ''}
         </div>
         <div class="gateway-access-grid">
-            <div class="gateway-card gateway-card-access" onclick="openSupervisaoPage()">
-                <div class="gateway-icon">
-                    ${ICONS.shield}
-                </div>
-                <h3>Supervisão</h3>
-                <p>Links e mensagens para supervisores.</p>
-            </div>
             <div class="gateway-card gateway-card-access" onclick="openGerenciaPage()">
                 <div class="gateway-icon">
                     ${ICONS.settings}
@@ -5538,6 +5554,7 @@ function renderDashboard() {
             <button class="tab-btn" onclick="switchTab('busca-beta')">${ICONS.search} Busca Rápida Beta</button>
             <button class="tab-btn" onclick="switchTab('formalizador')">${ICONS.clipboard || ICONS.edit} Formalizador</button>
             <button class="tab-btn" onclick="switchTab('unidades')">${ICONS.building} Unidades</button>
+            <button class="tab-btn" onclick="switchTab('supervisao')">${ICONS.shield} Links da Supervisão</button>
             <button class="tab-btn" onclick="switchTab('config')">${ICONS.settings} Configuração</button>
         </div>
 
@@ -5720,6 +5737,10 @@ function renderDashboard() {
                 </div>
             </div>
             <div id="units-list"></div>
+        </div>
+
+        <div id="tab-content-supervisao" class="tab-content hidden">
+            ${getSupervisaoShellHtml()}
         </div>
 
         ${avisosEnabled ? `
@@ -6746,8 +6767,8 @@ function renderDashboard() {
                             <div class="help-section">
                                 <h4>2. Navegação principal</h4>
                                 <ol>
-                                    <li>Use as abas superiores para trocar entre Busca Rápida, Unidades e Configuração.</li>
-                                    <li>O menu de Supervisão fica na página inicial (tela de seleção), sem precisar escolher unidade.</li>
+                                    <li>Use as abas superiores para trocar entre Busca Rápida, Unidades, Links da Supervisão e Configuração.</li>
+                                    <li>O menu Links da Supervisão aparece depois que você escolhe um grupo ou a visualização geral.</li>
                                     <li>O breadcrumb no topo mostra o grupo atual e a aba ativa.</li>
                                     <li>Os botões utilitários (Imprimir, Ajuda, Prompts e Guia) ficam no canto superior.</li>
                                 </ol>
@@ -6758,7 +6779,7 @@ function renderDashboard() {
                                     <div class="help-section">
                                         <h4>v3.8 (06/02/2026)</h4>
                                         <ul>
-                                            <li>Menu de Supervisão disponível na página inicial, sem selecionar unidade.</li>
+                                            <li>Menu Links da Supervisão disponível dentro dos grupos, ao lado de Unidades.</li>
                                             <li>Envio por WhatsApp otimizado: abre o app no celular e a tela de escolha (Web/App) no PC.</li>
                                             <li>Seletor rápido entre itens de Supervisão e Colaboradores.</li>
                                         </ul>
@@ -6786,10 +6807,10 @@ function renderDashboard() {
                                 </ol>
                             </div>
                             <div class="help-section">
-                                <h4>5. Supervisão (menu inicial)</h4>
+                                <h4>5. Links da Supervisão</h4>
                                 <ol>
-                                    <li>O menu de Supervisão fica na página inicial e pode ser acessado sem escolher unidade.</li>
-                                    <li>Use o seletor "Supervisão" ou "Colaboradores" para alternar os itens exibidos.</li>
+                                    <li>O menu fica dentro da operação selecionada, na aba Links da Supervisão.</li>
+                                    <li>Use o seletor "Colaboradores" ou "Supervisão" para alternar os itens exibidos.</li>
                                     <li>Favoritos, Guias e "Mais usados" ajudam a encontrar mensagens rapidamente.</li>
                                     <li>Os botões de WhatsApp abrem o app no celular e a tela de escolha no PC.</li>
                                 </ol>
@@ -7126,6 +7147,15 @@ function switchTab(tabName, options = {}) {
     }
     if (nextTab === 'unidades') {
         renderizarUnidades();
+    }
+    if (nextTab === 'supervisao') {
+        bindSupervisaoEvents();
+        renderSupervisao();
+        renderSupervisaoAdminList();
+        renderSupervisaoHistory();
+        renderSupervisaoQuality();
+        updateSupervisaoEditorVisibility();
+        updateSupervisaoAdminStatus();
     }
     if (nextTab === 'avisos') {
         renderAvisos();
@@ -14246,6 +14276,23 @@ function renderSupervisaoTopUsed() {
     `;
 }
 
+function renderSupervisaoQuality() {
+    const container = document.getElementById('supervisao-quality-list');
+    if (!container) return;
+    const items = getSupervisaoItems();
+    const expired = items.filter(item => isSupervisaoItemExpired(item));
+    const due = items.filter(item => getSupervisaoExpiryInfo(item)?.status === 'due');
+    const invalid = items.filter(item => getSupervisaoInvalidLinks(item).length > 0);
+    const latest = supervisaoHistory[0];
+    container.innerHTML = `
+        <div class="supervisao-quality-row"><span>Total publicado</span><strong>${items.length}</strong></div>
+        <div class="supervisao-quality-row ${expired.length ? 'warn' : ''}"><span>Expirados</span><strong>${expired.length}</strong></div>
+        <div class="supervisao-quality-row ${due.length ? 'warn' : ''}"><span>Vencem em breve</span><strong>${due.length}</strong></div>
+        <div class="supervisao-quality-row ${invalid.length ? 'danger' : ''}"><span>Links inválidos</span><strong>${invalid.length}</strong></div>
+        <div class="supervisao-quality-note">${latest ? `Última alteração: ${escapeHtml(latest.acao || 'Atualização')} em ${escapeHtml(latest.data || '')}` : 'Nenhuma alteração registrada.'}</div>
+    `;
+}
+
 function renderSupervisaoCard(item) {
     const links = getSupervisaoLinks(item);
     const hasLinks = links.length > 0;
@@ -14263,6 +14310,9 @@ function renderSupervisaoCard(item) {
     const copyLabel = channelOptions
         ? `Copiar ${channel === 'email' ? 'E-mail' : 'WhatsApp'}`
         : 'Copiar mensagem';
+    const editButton = canEditSupervisao()
+        ? `<button class="supervisao-icon-btn" onclick="openSupervisaoEditor('${item.id}')" title="Editar item" aria-label="Editar ${escapeHtml(item.title || 'item')}">${ICONS.edit}</button>`
+        : '';
 
     const usage = getSupervisaoUsageInfo(item.id);
     const usageLine = isAdminRole()
@@ -14305,9 +14355,12 @@ function renderSupervisaoCard(item) {
                     <div class="supervisao-card-title">${escapeHtml(item.title || 'Sem título')}</div>
                     ${item.description ? `<div class="supervisao-card-desc">${escapeHtml(item.description)}</div>` : ''}
                 </div>
-                <button class="supervisao-fav ${favoriteActive ? 'active' : ''}" onclick="toggleSupervisaoFavorite('${item.id}')" title="Favoritar" aria-label="Favoritar">
-                    ${favoriteActive ? ICONS.starFilled : ICONS.star}
-                </button>
+                <div class="supervisao-card-tools">
+                    ${editButton}
+                    <button class="supervisao-fav ${favoriteActive ? 'active' : ''}" onclick="toggleSupervisaoFavorite('${item.id}')" title="Favoritar" aria-label="Favoritar">
+                        ${favoriteActive ? ICONS.starFilled : ICONS.star}
+                    </button>
+                </div>
             </div>
             <div class="supervisao-badges">
                 <span class="supervisao-badge ${item.category}">${escapeHtml(badge)}</span>
@@ -14333,12 +14386,13 @@ function renderSupervisao() {
     if (!container) return;
     syncSupervisaoOpenStatesFromDom();
     ensureSupervisaoMenu();
-    if (!isAdminRole() && supervisaoFilter === 'expired') {
-        supervisaoFilter = 'internal';
+    if (!canEditSupervisao() && supervisaoFilter === 'expired') {
+        supervisaoFilter = 'colab';
     }
     updateSupervisaoFiltersUI();
     renderSupervisaoMeta();
     renderSupervisaoTopUsed();
+    renderSupervisaoQuality();
 
     const input = document.getElementById('supervisao-search');
     if (input && supervisaoSearchTerm && !input.value) {
@@ -14347,7 +14401,7 @@ function renderSupervisao() {
     const term = input ? input.value.trim() : supervisaoSearchTerm;
     supervisaoSearchTerm = term;
     const filtered = applySupervisaoFilters(getSupervisaoItems(), term);
-    const sections = Object.keys(SUPERVISAO_CATEGORIES).map(key => {
+    const sections = SUPERVISAO_CATEGORY_ORDER.map(key => {
         const items = filtered.filter(item => item.category === key);
         if (!items.length) return '';
         return `
@@ -14480,7 +14534,8 @@ function focusSupervisaoItem(id) {
 }
 
 function canEditSupervisao() {
-    return SiteAuth.logged && SiteAuth.mode === 'edit' && isAdminRole();
+    if (isPublicAccessMode()) return true;
+    return SiteAuth.logged && SiteAuth.mode === 'edit' && getRolePerms(SiteAuth.role).canEdit;
 }
 
 function recordSupervisaoHistory(action, beforeItem, afterItem) {
@@ -14507,7 +14562,7 @@ function renderSupervisaoAdminList() {
         return;
     }
 
-    list.innerHTML = Object.keys(SUPERVISAO_CATEGORIES).map(key => {
+    list.innerHTML = SUPERVISAO_CATEGORY_ORDER.map(key => {
         const sectionItems = items.filter(item => item.category === key);
         if (!sectionItems.length) return '';
         return `
@@ -14559,6 +14614,28 @@ function renderSupervisaoHistory() {
     }).join('');
 }
 
+function openSupervisaoEditorModal(title = 'Editar link/mensagem') {
+    const modal = document.getElementById('supervisao-editor-modal');
+    if (!modal) return;
+    const titleEl = document.getElementById('supervisao-editor-modal-title');
+    if (titleEl) titleEl.textContent = title;
+    modal.classList.remove('hidden');
+    setTimeout(() => document.getElementById('supervisao-editor-title')?.focus(), 0);
+}
+
+function closeSupervisaoEditorModal() {
+    document.getElementById('supervisao-editor-modal')?.classList.add('hidden');
+}
+
+function openSupervisaoNewItem() {
+    if (!canEditSupervisao()) {
+        showToast("Seu acesso atual não permite editar este menu.", "error");
+        return;
+    }
+    resetSupervisaoEditor();
+    openSupervisaoEditorModal('Novo link/mensagem');
+}
+
 function openSupervisaoEditor(id) {
     const item = getSupervisaoItemById(id);
     if (!item) return;
@@ -14580,6 +14657,7 @@ function openSupervisaoEditor(id) {
     document.getElementById('supervisao-editor-images').value = (item.images || []).join('\n');
     document.getElementById('supervisao-editor-expires').value = item.expiresAt || '';
     updateSupervisaoEditorVisibility();
+    openSupervisaoEditorModal('Editar link/mensagem');
 }
 
 function resetSupervisaoEditor() {
@@ -14712,7 +14790,9 @@ function saveSupervisaoItem() {
     renderSupervisao();
     renderSupervisaoAdminList();
     renderSupervisaoHistory();
+    renderSupervisaoQuality();
     showToast("Item salvo com sucesso.", "success");
+    closeSupervisaoEditorModal();
     resetSupervisaoEditor();
 }
 
@@ -14732,6 +14812,7 @@ function removeSupervisaoItem(id) {
     renderSupervisao();
     renderSupervisaoAdminList();
     renderSupervisaoHistory();
+    renderSupervisaoQuality();
     showToast("Item removido.", "success");
 }
 
@@ -14756,6 +14837,7 @@ function restoreSupervisaoHistory(index) {
     renderSupervisao();
     renderSupervisaoAdminList();
     renderSupervisaoHistory();
+    renderSupervisaoQuality();
     showToast("Versão restaurada.", "success");
 }
 

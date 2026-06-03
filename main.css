@@ -2268,8 +2268,9 @@ body.mode-edit .edit-btn-icon {
 
 .supervisao-header {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .supervisao-header h3 {
@@ -2286,6 +2287,20 @@ body.mode-edit .edit-btn-icon {
 .supervisao-meta {
     font-size: var(--font-sm);
     color: #6b7280;
+}
+
+.supervisao-header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    width: auto;
+    margin-left: auto;
+}
+
+.supervisao-header-actions .btn {
+    margin-bottom: 0;
 }
 
 .supervisao-toolbar {
@@ -2437,7 +2452,11 @@ body.mode-edit .edit-btn-icon {
 .supervisao-admin-panel input[type="text"],
 .supervisao-admin-panel input[type="password"],
 .supervisao-admin-panel select,
-.supervisao-admin-panel textarea {
+.supervisao-admin-panel textarea,
+.supervisao-editor-modal input[type="text"],
+.supervisao-editor-modal input[type="date"],
+.supervisao-editor-modal select,
+.supervisao-editor-modal textarea {
     width: 100%;
     padding: 10px 12px;
     border-radius: 10px;
@@ -2447,7 +2466,8 @@ body.mode-edit .edit-btn-icon {
     transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.supervisao-admin-panel .field-row label {
+.supervisao-admin-panel .field-row label,
+.supervisao-editor-modal .field-row label {
     font-size: var(--font-xs);
     font-weight: 800;
     letter-spacing: 0.08em;
@@ -2455,14 +2475,18 @@ body.mode-edit .edit-btn-icon {
     color: #475569;
 }
 
-.supervisao-admin-panel textarea {
+.supervisao-admin-panel textarea,
+.supervisao-editor-modal textarea {
     min-height: 90px;
     resize: vertical;
 }
 
 .supervisao-admin-panel input:focus,
 .supervisao-admin-panel select:focus,
-.supervisao-admin-panel textarea:focus {
+.supervisao-admin-panel textarea:focus,
+.supervisao-editor-modal input:focus,
+.supervisao-editor-modal select:focus,
+.supervisao-editor-modal textarea:focus {
     outline: none;
     border-color: #0b4fb3;
     box-shadow: 0 0 0 3px rgba(11, 79, 179, 0.15);
@@ -2567,6 +2591,18 @@ body.mode-edit .edit-btn-icon {
     margin-top: 8px;
 }
 
+.supervisao-editor-dialog {
+    max-width: 720px;
+}
+
+.supervisao-editor-card {
+    box-shadow: none;
+}
+
+.supervisao-editor-actions .btn {
+    min-height: 44px;
+}
+
 .supervisao-admin-section-title {
     grid-column: 1 / -1;
     display: flex;
@@ -2659,6 +2695,35 @@ body.mode-edit .edit-btn-icon {
     display: flex;
     justify-content: space-between;
     gap: 10px;
+}
+
+.supervisao-card-tools {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+}
+
+.supervisao-icon-btn {
+    width: 36px;
+    height: 36px;
+    border: 1px solid #d6deea;
+    border-radius: 10px;
+    background: #fff;
+    color: #0b4fb3;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.supervisao-icon-btn:hover {
+    background: #eff6ff;
+}
+
+.supervisao-icon-btn svg {
+    width: 16px;
+    height: 16px;
 }
 
 .supervisao-card-title {
@@ -2852,12 +2917,86 @@ body.mode-edit .edit-btn-icon {
     color: #6b7280;
 }
 
+.supervisao-quality-list {
+    display: grid;
+    gap: 8px;
+}
+
+.supervisao-quality-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px dashed #e5e7eb;
+    font-size: var(--font-sm);
+}
+
+.supervisao-quality-row strong {
+    color: #0f172a;
+}
+
+.supervisao-quality-row.warn strong {
+    color: #92400e;
+}
+
+.supervisao-quality-row.danger strong {
+    color: #b91c1c;
+}
+
+.supervisao-quality-note {
+    font-size: var(--font-xs);
+    color: #64748b;
+    line-height: 1.4;
+}
+
 @media (max-width: 600px) {
+    .supervisao-header {
+        flex-direction: column;
+    }
+    .supervisao-header-actions {
+        width: 100%;
+        margin-left: 0;
+        justify-content: stretch;
+    }
+    .supervisao-header-actions .btn {
+        width: 100%;
+    }
     .supervisao-actions {
         grid-template-columns: 1fr;
     }
     .supervisao-link-list .btn {
         width: 100%;
+    }
+    .supervisao-card-header {
+        align-items: flex-start;
+    }
+    .supervisao-card-tools {
+        gap: 4px;
+    }
+    .supervisao-icon-btn,
+    .supervisao-fav {
+        min-width: 44px;
+        min-height: 44px;
+    }
+    .supervisao-editor-modal {
+        align-items: flex-end;
+        padding: 0;
+    }
+    .supervisao-editor-dialog {
+        width: 100%;
+        max-width: 100%;
+        max-height: calc(100vh - 44px);
+        border-radius: 18px 18px 0 0;
+        padding: 14px;
+    }
+    .supervisao-editor-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+    .supervisao-editor-actions .btn {
+        width: 100%;
+        margin-bottom: 0;
     }
 }
 

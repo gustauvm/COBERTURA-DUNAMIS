@@ -343,16 +343,28 @@ alter table public.app_settings enable row level security;
 
 drop policy if exists "app_settings read" on public.app_settings;
 create policy "app_settings read" on public.app_settings
-  for select using (auth.role() = 'authenticated');
+  for select using (
+    auth.role() = 'authenticated'
+    or (auth.role() = 'anon' and key in ('supervisaoMenu', 'supervisaoHistory'))
+  );
 
 drop policy if exists "app_settings write" on public.app_settings;
 create policy "app_settings write" on public.app_settings
-  for insert with check (public.has_edit_role());
+  for insert with check (
+    public.has_edit_role()
+    or (auth.role() = 'anon' and key in ('supervisaoMenu', 'supervisaoHistory'))
+  );
 
 drop policy if exists "app_settings update" on public.app_settings;
 create policy "app_settings update" on public.app_settings
-  for update using (public.has_edit_role())
-  with check (public.has_edit_role());
+  for update using (
+    public.has_edit_role()
+    or (auth.role() = 'anon' and key in ('supervisaoMenu', 'supervisaoHistory'))
+  )
+  with check (
+    public.has_edit_role()
+    or (auth.role() = 'anon' and key in ('supervisaoMenu', 'supervisaoHistory'))
+  );
 
 drop policy if exists "app_settings delete" on public.app_settings;
 create policy "app_settings delete" on public.app_settings
