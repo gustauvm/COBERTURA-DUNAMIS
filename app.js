@@ -3760,7 +3760,7 @@ function registerPwaSupport() {
         refreshing = true;
         window.location.reload();
     });
-    navigator.serviceWorker.register('./sw.js?v=4.0.4')
+    navigator.serviceWorker.register('./sw.js?v=4.0.5')
         .then((registration) => registration.update().catch(() => {}))
         .catch(() => {});
 }
@@ -4329,39 +4329,15 @@ function getSupervisaoEditorModalHtml() {
                         <label>Descrição</label>
                         <input type="text" id="supervisao-editor-description" placeholder="Resumo curto do item">
                     </div>
-                    <div class="field-row">
-                        <label>Link principal (opcional)</label>
+                    <div class="field-row" id="supervisao-editor-link-group">
+                        <label>Link/atalho</label>
                         <input type="text" id="supervisao-editor-link" placeholder="https://...">
-                    </div>
-                    <div class="field-row">
-                        <label>Links extras (um por linha: Rótulo | URL)</label>
-                        <textarea id="supervisao-editor-links" rows="3" placeholder="Exemplo | https://..."></textarea>
                     </div>
                     <div id="supervisao-editor-message-group">
                         <div class="field-row">
                             <label>Mensagem (WhatsApp)</label>
                             <textarea id="supervisao-editor-message-whatsapp" rows="4" placeholder="Digite a mensagem"></textarea>
                         </div>
-                        <div class="field-row">
-                            <label>Mensagem (E-mail)</label>
-                            <textarea id="supervisao-editor-message-email" rows="4" placeholder="Opcional"></textarea>
-                        </div>
-                        <div class="field-row">
-                            <label>E-mail destino</label>
-                            <input type="text" id="supervisao-editor-email-to" placeholder="exemplo@dominio.com">
-                        </div>
-                        <div class="field-row">
-                            <label>Cc (opcional)</label>
-                            <input type="text" id="supervisao-editor-email-cc" placeholder="copiar@dominio.com">
-                        </div>
-                        <div class="field-row">
-                            <label>Assunto do e-mail</label>
-                            <input type="text" id="supervisao-editor-email-subject" placeholder="Assunto">
-                        </div>
-                    </div>
-                    <div class="field-row">
-                        <label>Imagens (uma por linha)</label>
-                        <textarea id="supervisao-editor-images" rows="3" placeholder="images/exemplo.jpg"></textarea>
                     </div>
                     <div class="field-row">
                         <label>Validade (opcional)</label>
@@ -14635,6 +14611,11 @@ function closeSupervisaoEditorModal() {
     document.getElementById('supervisao-editor-modal')?.classList.add('hidden');
 }
 
+function setSupervisaoEditorValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value || '';
+}
+
 function openSupervisaoNewItem() {
     if (!canEditSupervisao()) {
         showToast("Seu acesso atual não permite editar este menu.", "error");
@@ -14648,42 +14629,28 @@ function openSupervisaoEditor(id) {
     const item = getSupervisaoItemById(id);
     if (!item) return;
     supervisaoEditingId = item.id;
-    document.getElementById('supervisao-editor-id').value = item.id;
-    document.getElementById('supervisao-editor-category').value = item.category || 'colab';
-    document.getElementById('supervisao-editor-type').value = item.type || 'message';
-    document.getElementById('supervisao-editor-title').value = item.title || '';
-    document.getElementById('supervisao-editor-description').value = item.description || '';
-    document.getElementById('supervisao-editor-link').value = item.link || '';
-    document.getElementById('supervisao-editor-links').value = (item.links || [])
-        .map(l => `${l.label ? `${l.label} | ` : ''}${l.url || ''}`.trim())
-        .join('\n');
-    document.getElementById('supervisao-editor-message-whatsapp').value = item.channels?.whatsapp || item.message || '';
-    document.getElementById('supervisao-editor-message-email').value = item.channels?.email || '';
-    document.getElementById('supervisao-editor-email-to').value = item.emailTo || '';
-    document.getElementById('supervisao-editor-email-cc').value = item.emailCc || '';
-    document.getElementById('supervisao-editor-email-subject').value = item.emailSubject || '';
-    document.getElementById('supervisao-editor-images').value = (item.images || []).join('\n');
-    document.getElementById('supervisao-editor-expires').value = item.expiresAt || '';
+    setSupervisaoEditorValue('supervisao-editor-id', item.id);
+    setSupervisaoEditorValue('supervisao-editor-category', item.category || 'colab');
+    setSupervisaoEditorValue('supervisao-editor-type', item.type || 'message');
+    setSupervisaoEditorValue('supervisao-editor-title', item.title || '');
+    setSupervisaoEditorValue('supervisao-editor-description', item.description || '');
+    setSupervisaoEditorValue('supervisao-editor-link', item.link || '');
+    setSupervisaoEditorValue('supervisao-editor-message-whatsapp', item.channels?.whatsapp || item.message || '');
+    setSupervisaoEditorValue('supervisao-editor-expires', item.expiresAt || '');
     updateSupervisaoEditorVisibility();
     openSupervisaoEditorModal('Editar link/mensagem');
 }
 
 function resetSupervisaoEditor() {
     supervisaoEditingId = null;
-    document.getElementById('supervisao-editor-id').value = '';
-    document.getElementById('supervisao-editor-category').value = 'colab';
-    document.getElementById('supervisao-editor-type').value = 'message';
-    document.getElementById('supervisao-editor-title').value = '';
-    document.getElementById('supervisao-editor-description').value = '';
-    document.getElementById('supervisao-editor-link').value = '';
-    document.getElementById('supervisao-editor-links').value = '';
-    document.getElementById('supervisao-editor-message-whatsapp').value = '';
-    document.getElementById('supervisao-editor-message-email').value = '';
-    document.getElementById('supervisao-editor-email-to').value = '';
-    document.getElementById('supervisao-editor-email-cc').value = '';
-    document.getElementById('supervisao-editor-email-subject').value = '';
-    document.getElementById('supervisao-editor-images').value = '';
-    document.getElementById('supervisao-editor-expires').value = '';
+    setSupervisaoEditorValue('supervisao-editor-id', '');
+    setSupervisaoEditorValue('supervisao-editor-category', 'colab');
+    setSupervisaoEditorValue('supervisao-editor-type', 'message');
+    setSupervisaoEditorValue('supervisao-editor-title', '');
+    setSupervisaoEditorValue('supervisao-editor-description', '');
+    setSupervisaoEditorValue('supervisao-editor-link', '');
+    setSupervisaoEditorValue('supervisao-editor-message-whatsapp', '');
+    setSupervisaoEditorValue('supervisao-editor-expires', '');
     updateSupervisaoEditorVisibility();
 }
 
@@ -14723,7 +14690,7 @@ function validateSupervisaoItem(data) {
     if (data.type === 'link' && !data.link && !(data.links || []).length) {
         errors.push('Informe ao menos um link.');
     }
-    if (data.type === 'message' && !data.messageWhatsapp && !data.messageEmail) {
+    if (data.type === 'message' && !data.messageWhatsapp) {
         errors.push('Informe ao menos uma mensagem.');
     }
     return errors;
@@ -14737,13 +14704,13 @@ function collectSupervisaoEditorData() {
         title: document.getElementById('supervisao-editor-title')?.value.trim() || '',
         description: document.getElementById('supervisao-editor-description')?.value.trim() || '',
         link: document.getElementById('supervisao-editor-link')?.value.trim() || '',
-        links: parseSupervisaoLinks(document.getElementById('supervisao-editor-links')?.value || ''),
+        links: [],
         messageWhatsapp: document.getElementById('supervisao-editor-message-whatsapp')?.value.trim() || '',
-        messageEmail: document.getElementById('supervisao-editor-message-email')?.value.trim() || '',
-        emailTo: document.getElementById('supervisao-editor-email-to')?.value.trim() || '',
-        emailCc: document.getElementById('supervisao-editor-email-cc')?.value.trim() || '',
-        emailSubject: document.getElementById('supervisao-editor-email-subject')?.value.trim() || '',
-        images: parseSupervisaoImages(document.getElementById('supervisao-editor-images')?.value || ''),
+        messageEmail: '',
+        emailTo: '',
+        emailCc: '',
+        emailSubject: '',
+        images: [],
         expiresAt: document.getElementById('supervisao-editor-expires')?.value || ''
     };
     return data;
@@ -14751,7 +14718,7 @@ function collectSupervisaoEditorData() {
 
 function saveSupervisaoItem() {
     if (!canEditSupervisao()) {
-        showToast("Apenas admins em modo edição podem salvar.", "error");
+        showToast("Seu acesso atual não permite editar este menu.", "error");
         return;
     }
     ensureSupervisaoMenu();
@@ -14806,7 +14773,7 @@ function saveSupervisaoItem() {
 
 function removeSupervisaoItem(id) {
     if (!canEditSupervisao()) {
-        showToast("Apenas admins em modo edição podem excluir.", "error");
+        showToast("Seu acesso atual não permite editar este menu.", "error");
         return;
     }
     if (!confirm('Remover este item?')) return;
@@ -14826,7 +14793,7 @@ function removeSupervisaoItem(id) {
 
 function restoreSupervisaoHistory(index) {
     if (!canEditSupervisao()) {
-        showToast("Apenas admins em modo edição podem restaurar.", "error");
+        showToast("Seu acesso atual não permite editar este menu.", "error");
         return;
     }
     const entry = supervisaoHistory[index];

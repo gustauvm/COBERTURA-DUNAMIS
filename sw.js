@@ -1,12 +1,12 @@
-const SHELL_CACHE = 'dunamis-shell-v4-0-4';
+const SHELL_CACHE = 'dunamis-shell-v4-0-5';
 const SHELL_ASSETS = [
   './',
   './index.html',
-  './main.css?v=4.0.4',
-  './app.js?v=4.0.4',
-  './config.js?v=4.0.4',
-  './core/data-layer.js?v=4.0.4',
-  './manifest.webmanifest?v=4.0.4'
+  './main.css?v=4.0.5',
+  './app.js?v=4.0.5',
+  './config.js?v=4.0.5',
+  './core/data-layer.js?v=4.0.5',
+  './manifest.webmanifest?v=4.0.5'
 ];
 
 self.addEventListener('install', (event) => {
