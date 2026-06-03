@@ -3754,7 +3754,15 @@ function registerPwaSupport() {
     if (!('serviceWorker' in navigator)) return;
     const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
     if (!isSecure) return;
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    let refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (refreshing) return;
+        refreshing = true;
+        window.location.reload();
+    });
+    navigator.serviceWorker.register('./sw.js?v=4.0.4')
+        .then((registration) => registration.update().catch(() => {}))
+        .catch(() => {});
 }
 
 function openTabFromCommand(tabName, afterOpen) {
