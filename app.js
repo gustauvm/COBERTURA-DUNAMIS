@@ -608,7 +608,7 @@ const APP_NAV_PARAMS = Object.freeze({
     tab: 'appTab'
 });
 const APP_NAV_STORAGE_KEY = 'dunamisNavStateV1';
-const DASHBOARD_TABS = new Set(['busca', 'busca-beta', 'formalizador', 'unidades', 'supervisao', 'avisos', 'reciclagem', 'lancamentos', 'config', 'collab-detail']);
+const DASHBOARD_TABS = new Set(['busca', 'unidades', 'supervisao', 'avisos', 'reciclagem', 'lancamentos', 'config', 'collab-detail']);
 const DISABLED_DASHBOARD_TABS = new Set(['avisos', 'reciclagem', 'lancamentos']);
 let appNavBound = false;
 let appNavApplying = false;
@@ -1398,22 +1398,6 @@ const CONTEXT_HELP_CONTENT = {
             'Botão de mapa vermelho indica endereço não cadastrado.'
         ]
     },
-    'busca-beta': {
-        title: 'Busca Rápida Beta',
-        lines: [
-            'Consulta profissional read-only com vínculo entre colaboradores e unidades.',
-            'Plantão e folga seguem somente a coluna TURMA da planilha.',
-            'Abra o painel lateral para ver todos os dados disponíveis.'
-        ]
-    },
-    formalizador: {
-        title: 'Formalizador',
-        lines: [
-            'Formalize remanejamentos, desligamentos, experiência, benefícios e coberturas.',
-            'Gera protocolo, histórico, texto de e-mail e WhatsApp sem alterar a base operacional.',
-            'Use no celular para registrar a solicitação no momento da decisão.'
-        ]
-    },
     unidades: {
         title: 'Unidades',
         lines: [
@@ -1534,8 +1518,6 @@ function updateBreadcrumb() {
     const groupLabelMap = getGroupLabelMap();
     const tabLabelMap = {
         busca: 'Busca Rápida',
-        'busca-beta': 'Busca Rápida Beta',
-        formalizador: 'Formalizador',
         unidades: 'Unidades',
         gerencia: 'Gerência',
         supervisao: 'Supervisão',
@@ -3783,8 +3765,6 @@ function getCommandPaletteCommands() {
     const commands = [];
     const push = (label, keywords, action) => commands.push({ label, keywords, action });
     push('Abrir Busca Rápida', 'busca pesquisar colaborador', () => openTabFromCommand('busca'));
-    push('Abrir Busca Rápida Beta', 'busca beta disponibilidade plantao folga colaborador', () => openTabFromCommand('busca-beta'));
-    push('Abrir Formalizador', 'formalizador protocolo remanejamento desligamento troca posto beneficios cobertura', () => openTabFromCommand('formalizador'));
     push('Abrir Unidades', 'unidades postos', () => openTabFromCommand('unidades'));
     push('Abrir Configuração', 'configuracao settings', () => openTabFromCommand('config'));
     push('Abrir Links da Supervisão', 'supervisao menu links mensagens colaboradores', () => openTabFromCommand('supervisao'));
@@ -5585,8 +5565,6 @@ function renderDashboard() {
         <!-- Navegação de Abas -->
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('busca')">${ICONS.search} Busca Rápida</button>
-            <button class="tab-btn" onclick="switchTab('busca-beta')">${ICONS.search} Busca Rápida Beta</button>
-            <button class="tab-btn" onclick="switchTab('formalizador')">${ICONS.clipboard || ICONS.edit} Formalizador</button>
             <button class="tab-btn" onclick="switchTab('unidades')">${ICONS.building} Unidades</button>
             <button class="tab-btn" onclick="switchTab('supervisao')">${ICONS.shield} Links da Supervisão</button>
             <button class="tab-btn" onclick="switchTab('config')">${ICONS.settings} Configuração</button>
