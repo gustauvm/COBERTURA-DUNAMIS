@@ -38,6 +38,7 @@ create table public.colaboradores (
     numeracao_cnv text,
     cnv_vigilante text,
     uniforme text,
+    epi text,
     aso text,
     reciclagem_bombeiro text,
     nr10 text,

@@ -93,6 +93,7 @@ const HEADER_MAP = new Map<string, string>([
   ["numeracao_cnv", "numeracao_cnv"],
   ["cnv_vigilante", "cnv_vigilante"],
   ["uniforme", "uniforme"],
+  ["epi", "epi"],
   ["aso", "aso"],
   ["reciclagem_bombeiro", "reciclagem_bombeiro"],
   ["nr10", "nr10"],
@@ -142,6 +143,17 @@ function jsonResponse(status: number, body: JsonRecord) {
       "Content-Type": "application/json; charset=utf-8",
     },
   });
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+
+  try {
+    return JSON.stringify(error);
+  } catch (_) {
+    return String(error);
+  }
 }
 
 function normalizeHeader(value: string) {
@@ -561,7 +573,7 @@ serve(async (request) => {
 
       return jsonResponse(200, { ok: true, sheetName: body.sheetName, reconcile: result });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       await logSyncRun(client, {
         mode: "reconcile",
         spreadsheetId: body.spreadsheetId,
@@ -595,7 +607,7 @@ serve(async (request) => {
       dryRun: body.dryRun === true,
     }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     errors.push(message);
     results.push({
       action: "skipped",
