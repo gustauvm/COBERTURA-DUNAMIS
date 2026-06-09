@@ -2,7 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const XLSX = require('xlsx');
 
-const DEFAULT_FILE = path.join(process.env.USERPROFILE || '', 'Downloads', 'EFETIVOS GOOGLE (3).xlsx');
+const DEFAULT_DOWNLOADS_DIR = path.join(process.env.USERPROFILE || '', 'Downloads');
+const DEFAULT_FILE = path.join(DEFAULT_DOWNLOADS_DIR, 'EFETIVOS GOOGLE 09-06-2026.xlsx');
 const TARGET_SHEETS = [
   {
     name: '(COLABORADORES) BD',
@@ -60,6 +61,22 @@ function parseArgs(argv) {
     }
   }
   return result;
+}
+
+function resolveDefaultFile() {
+  if (fs.existsSync(DEFAULT_FILE)) return DEFAULT_FILE;
+  if (!fs.existsSync(DEFAULT_DOWNLOADS_DIR)) return DEFAULT_FILE;
+
+  const candidates = fs.readdirSync(DEFAULT_DOWNLOADS_DIR)
+    .filter((name) => /^EFETIVOS GOOGLE.*\.xlsx$/i.test(name) && !name.startsWith('~$'))
+    .map((name) => {
+      const filePath = path.join(DEFAULT_DOWNLOADS_DIR, name);
+      const stat = fs.statSync(filePath);
+      return { filePath, mtimeMs: stat.mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  return candidates[0]?.filePath || DEFAULT_FILE;
 }
 
 function getTargetSheetConfig(sheetName) {
@@ -231,7 +248,7 @@ async function syncSheet(workbook, config, spreadsheetId, url, secret) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const filePath = path.resolve(args.file || DEFAULT_FILE);
+  const filePath = path.resolve(args.file || resolveDefaultFile());
   const secret = args.secret || process.env.SHEET_SYNC_SHARED_SECRET;
   const url = args.url || process.env.SUPABASE_SYNC_URL || 'https://bvpcbviggbxnpqoprnxq.supabase.co/functions/v1/sheet-sync-colaboradores';
 

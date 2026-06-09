@@ -12458,6 +12458,115 @@ html, body {
     }
 }
 
+/* Busca Rapida: adaptacao exclusiva dos cards em celulares */
+@media (max-width: 600px) {
+    #tab-content-busca,
+    #tab-content-busca .search-container,
+    #tab-content-busca #search-results,
+    #tab-content-busca .results-grid {
+        min-width: 0;
+        max-width: 100%;
+        overflow-x: hidden;
+    }
+
+    #tab-content-busca .result-card {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        padding: 12px 10px;
+        overflow: hidden;
+    }
+
+    #tab-content-busca .card-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 10px;
+        align-items: stretch;
+    }
+
+    #tab-content-busca .card-header .header-left {
+        display: grid;
+        grid-template-columns: auto auto minmax(0, 1fr);
+        align-items: start;
+        width: 100%;
+        min-width: 0;
+        padding-right: 0;
+    }
+
+    #tab-content-busca .card-name-block,
+    #tab-content-busca .card-name-row,
+    #tab-content-busca .card-meta-row {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    #tab-content-busca .card-name-row {
+        align-items: flex-start;
+    }
+
+    #tab-content-busca .colaborador-nome {
+        flex: 1 1 100%;
+        max-width: 100%;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    #tab-content-busca .status-badge,
+    #tab-content-busca .label-badge,
+    #tab-content-busca .return-date,
+    #tab-content-busca .escala-badge,
+    #tab-content-busca .unit-link,
+    #tab-content-busca .card-meta-row span {
+        max-width: 100%;
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    #tab-content-busca .meta-sep {
+        display: none;
+    }
+
+    #tab-content-busca .card-meta-row {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 3px;
+        line-height: 1.25;
+    }
+
+    #tab-content-busca .card-actions-bar {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(38px, 1fr));
+        width: 100%;
+        gap: 6px !important;
+        justify-content: stretch;
+    }
+
+    #tab-content-busca .card-actions-bar .edit-btn-icon {
+        width: 100%;
+        min-width: 0;
+        height: 38px;
+    }
+
+    #tab-content-busca .ft-week-track {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 380px) {
+    #tab-content-busca .card-header .header-left {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    #tab-content-busca .avatar-wrap {
+        display: none;
+    }
+
+    #tab-content-busca .card-actions-bar {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
 /* BUSCA RAPIDA BETA */
 .qbeta-shell {
     --qbeta-ink: #102033;

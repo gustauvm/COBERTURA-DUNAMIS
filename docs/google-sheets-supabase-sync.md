@@ -23,7 +23,9 @@ As tabelas `public.colaboradores` e `public.unidades` passam a espelhar diretame
 3. Publicar a função `supabase/functions/sheet-sync-colaboradores/index.ts`.
 4. Colar `docs/AUTOMATIZAÇÃO SUPABASE.gs` no Apps Script da planilha.
 5. Confirmar que `SUPABASE_SYNC_URL` e `SUPABASE_SYNC_SECRET` estão corretos.
-6. Criar trigger instalável `On edit` para `aoEditarPlanilha`.
+6. No menu `SUPABASE` da planilha, rodar `Instalar gatilhos automaticos` para recriar:
+   - trigger instalável `On edit` para `aoEditarPlanilha`
+   - trigger instalável `On change` para `aoMudarEstruturaSupabase`
 7. Manter a carga completa pelo importador local `npm run sync:sheet` quando precisar reconciliar a base inteira.
 
 ## Comandos de deploy
@@ -48,7 +50,10 @@ https://bvpcbviggbxnpqoprnxq.supabase.co/functions/v1/sheet-sync-colaboradores
 - A Edge Function faz `upsert` direto em `public.colaboradores` ou `public.unidades`.
 - O site continua lendo essas tabelas no `Supabase`.
 - O sync é baseado nos nomes dos cabeçalhos da linha 1, então a ordem das colunas pode mudar sem quebrar a integração.
-- A chave usada no Supabase é baseada no nome da aba e no número da linha, no formato `aba|row:numero`.
+- A chave usada no Supabase é estável por registro:
+  - colaboradores: `colaborador|matricula:<MATRICULA>`
+  - unidades: `unidade|posto:<posto>`
+- A coluna `TURMA` aceita o legado `1`/`2` e também `PLANTAO`/`PLANTÃO`/`FOLGA`. Quando vier `PLANTÃO` ou `FOLGA`, o site usa esse texto como status oficial imediato.
 - A carga completa inicial e reconciliações grandes devem ser feitas pelo PC, não pelo Apps Script.
 
 ## Observações importantes

@@ -1925,8 +1925,8 @@ function computeSearchFilterCounts(term = '') {
     base.forEach(item => {
         const statusInfo = getStatusInfoForFilter(item);
         const text = String(statusInfo?.text || '');
-        const isPlantao = text.includes('PLANTÃO') || text.includes('FT');
-        const isFolga = text === 'FOLGA';
+        const isPlantao = isPlantaoStatusInfo(statusInfo);
+        const isFolga = isFolgaStatusInfo(statusInfo);
         if (isPlantao) counts.plantao += 1;
         if (isFolga) counts.folga += 1;
         if (text.includes('FT')) counts.ft += 1;
@@ -4151,12 +4151,10 @@ function renderGerenciaDashboard() {
     const ftStats = buildFtDashboardStats(ftItems);
     const total = workforce.length;
     const plantao = workforce.filter(d => {
-        const status = getStatusInfo(d).text;
-        return status.includes('PLANTÃO') || status.includes('FT');
+        return isPlantaoStatusInfo(getStatusInfo(d));
     }).length;
     const folga = workforce.filter(d => {
-        const status = getStatusInfo(d).text;
-        return !status.includes('PLANTÃO') && !status.includes('FT');
+        return !isPlantaoStatusInfo(getStatusInfo(d));
     }).length;
     const groupRows = getGerenciaGroupRows(allData).slice(0, 6);
     const byUnit = {};
@@ -4755,6 +4753,58 @@ function normalizePhoneValue(value) {
     return String(value || '').replace(/\D/g, '');
 }
 
+function normalizeTurmaToken(value) {
+    return String(value ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\u00a0/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toUpperCase();
+}
+
+function normalizeTurmaValue(value) {
+    const raw = String(value ?? '').replace(/\u00a0/g, ' ').trim();
+    if (!raw) return '';
+
+    const token = normalizeTurmaToken(raw);
+    if (token === '1' || token === 'TURMA 1') return '1';
+    if (token === '2' || token === 'TURMA 2') return '2';
+    if (token === 'PLANTAO' || token === 'EM PLANTAO') return 'PLANTÃO';
+    if (token === 'FOLGA' || token === 'DE FOLGA') return 'FOLGA';
+
+    return raw;
+}
+
+function getTurmaFilterCode(value) {
+    const turma = normalizeTurmaValue(value);
+    const token = normalizeTurmaToken(turma);
+    if (token === '1') return '1';
+    if (token === '2') return '2';
+    if (token === 'PLANTAO') return 'plantao';
+    if (token === 'FOLGA') return 'folga';
+    return turma ? 'outro' : 'sem_turma';
+}
+
+function getTurmaDisplayLabel(value) {
+    const turma = normalizeTurmaValue(value);
+    if (turma === '1') return 'Turma 1';
+    if (turma === '2') return 'Turma 2';
+    return turma || 'Sem turma';
+}
+
+function isPlantaoStatusInfo(statusInfo) {
+    const code = String(statusInfo?.code || '').toLowerCase();
+    if (code === 'plantao' || code === 'ft') return true;
+    return normalizeTurmaToken(statusInfo?.text).includes('PLANTAO') || normalizeTurmaToken(statusInfo?.text).includes('FT');
+}
+
+function isFolgaStatusInfo(statusInfo) {
+    const code = String(statusInfo?.code || '').toLowerCase();
+    if (code === 'folga') return true;
+    return normalizeTurmaToken(statusInfo?.text) === 'FOLGA';
+}
+
 let _collabReColumnDetected = false;
 function mapSupabaseCollaboratorRow(row) {
     if (!_collabReColumnDetected && row && typeof row === 'object' && !('re_padrao' in row) && ('re_padrap' in row)) {
@@ -4768,7 +4818,7 @@ function mapSupabaseCollaboratorRow(row) {
     const posto = String(row?.posto || '').trim().toUpperCase();
     const escalaRaw = String(row?.escala || '').trim();
     const tipoEscala = extrairTipoEscala(escalaRaw);
-    const turma = parseInt(row?.turma, 10);
+    const turma = normalizeTurmaValue(row?.turma);
     const unidadeNegocio = String(row?.unidade_de_negocio || '').trim();
     const grupo = inferGroupKeyFromRow(row);
     const dataAdmissao = pickFirstDefined(row?.data_admissao, row?.admissao);
@@ -4802,7 +4852,7 @@ function mapSupabaseCollaboratorRow(row) {
         admissao: dataAdmissao || '',
         empresa: row?.empresa || '',
         cliente: row?.cliente || '',
-        turma: Number.isFinite(turma) ? turma : '',
+        turma,
         ferias: row?.ferias || '',
         aso: row?.aso || '',
         "reciclagem bombeiro": reciclagemBombeiro || '',
@@ -5361,7 +5411,7 @@ function mapRowsToObjects(rows, groupTag, keepChanges, phoneMap, addressMap) {
             grupoLabel: grupoLabel,
             escala: rawEscala.replace("PRE-ASSINALADO", "").replace("12x36", "").replace("5x2", "").replace("6x1", "").trim(),
             tipoEscala: tipoEscala,
-            turma: parseInt(cols[3]) || '',
+            turma: normalizeTurmaValue(cols[3]),
             rotulo: '', // Campo para afastamentos/rótulos
             rotuloInicio: '',
             rotuloFim: '',
@@ -5640,6 +5690,8 @@ function renderDashboard() {
                         <select id="qbeta-turno-filter" onchange="setQuickBetaFilter('turno', this.value)"></select>
                         <select id="qbeta-turma-filter" onchange="setQuickBetaFilter('turma', this.value)">
                             <option value="all">Todas as turmas</option>
+                            <option value="plantao">PLANTÃO</option>
+                            <option value="folga">FOLGA</option>
                             <option value="1">Turma 1 · ímpar</option>
                             <option value="2">Turma 2 · par</option>
                             <option value="invalid">Sem turma</option>
@@ -5653,7 +5705,7 @@ function renderDashboard() {
                     <div class="qbeta-results-pane">
                         <div class="qbeta-results-head">
                             <strong id="qbeta-result-count">0 colaboradores</strong>
-                            <span id="qbeta-duty-rule">Turma 1: ímpar · Turma 2: par</span>
+                            <span id="qbeta-duty-rule">Aceita PLANTÃO/FOLGA; legado 1/2 continua compatível</span>
                         </div>
                         <div id="qbeta-results-list" class="qbeta-results-list"></div>
                     </div>
@@ -6274,7 +6326,7 @@ function renderDashboard() {
                                             </div>
                                         </div>
                                         <div class="config-note">A busca usa exclusivamente a coluna TURMA da planilha.</div>
-                                        <div class="config-note">Turma 1 → plantão em dias ímpares e folga em dias pares. Turma 2 → plantão em dias pares e folga em dias ímpares.</div>
+                                        <div class="config-note">A coluna TURMA aceita PLANTÃO/FOLGA diretamente. O legado 1/2 continua disponível para escalas alternadas por dia.</div>
                                     </div>
                                 </div>
                             </div>
@@ -6399,8 +6451,10 @@ function renderDashboard() {
                     <div class="form-group">
                         <label>Regra de Plantão</label>
                         <select id="edit-turma">
-                            <option value="1">Plantão ÍMPAR</option>
-                            <option value="2">Plantão PAR</option>
+                            <option value="PLANTÃO">PLANTÃO</option>
+                            <option value="FOLGA">FOLGA</option>
+                            <option value="1">Turma 1 · plantão ímpar</option>
+                            <option value="2">Turma 2 · plantão par</option>
                         </select>
                     </div>
                 </div>
@@ -6503,8 +6557,10 @@ function renderDashboard() {
                         </div>
                         <div class="form-group">
                             <select id="new-colab-turma">
-                                <option value="1">Plantão ÍMPAR</option>
-                                <option value="2">Plantão PAR</option>
+                                <option value="PLANTÃO">PLANTÃO</option>
+                                <option value="FOLGA">FOLGA</option>
+                                <option value="1">Turma 1 · plantão ímpar</option>
+                                <option value="2">Turma 2 · plantão par</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -7283,7 +7339,7 @@ function scoreSearchMatch(item, termos, termosNorm) {
         { val: item.telefone, weight: 2 },
         { val: item.grupoLabel, weight: 2 },
         { val: item.cpf, weight: 2 },
-        { val: item.turma != null ? String(item.turma) : '', weight: 1 }
+        { val: getTurmaDisplayLabel(item.turma), weight: 1 }
     ];
     let totalScore = 0;
     for (let t = 0; t < termos.length; t++) {
@@ -7373,8 +7429,8 @@ function runStandardSearch(termo, resultsContainer, filterStatus, hideAbsence) {
     if (filterStatus !== 'all') {
         resultados = resultados.filter(({ item }) => {
             const statusInfo = getStatusInfo(item);
-            const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
-            const isFolga = statusInfo.text === 'FOLGA';
+            const isPlantao = isPlantaoStatusInfo(statusInfo);
+            const isFolga = isFolgaStatusInfo(statusInfo);
             if (filterStatus === 'plantao') return isPlantao;
             if (filterStatus === 'folga') return isFolga;
             if (filterStatus === 'ft') return statusInfo.text.includes('FT');
@@ -7590,8 +7646,8 @@ function renderSearchCard(item, termsForHl, termsNormForHl) {
     const mapBtnClass = canOpenMap ? (hasAddress ? '' : 'map-icon-missing') : 'disabled-icon';
     const mapTitle = !canOpenMap ? 'Colaborador indisponível' : (hasAddress ? 'Ver endereço do colaborador' : 'Endereço não cadastrado');
     const favoriteActive = isCollaboratorFavorite(item.re);
-    const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
-    const isFolga = statusInfo.text === 'FOLGA';
+    const isPlantao = isPlantaoStatusInfo(statusInfo);
+    const isFolga = isFolgaStatusInfo(statusInfo);
     const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
     const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : (isFolga ? 'bg-folga' : 'bg-indefinido'));
     const homenageado = isHomenageado(item);
@@ -7665,8 +7721,8 @@ function renderSearchCard(item, termsForHl, termsNormForHl) {
 
 function renderSearchTableRow(item, termsForHl, termsNormForHl) {
     const statusInfo = getStatusInfo(item);
-    const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
-    const isFolga = statusInfo.text === 'FOLGA';
+    const isPlantao = isPlantaoStatusInfo(statusInfo);
+    const isFolga = isFolgaStatusInfo(statusInfo);
     const bgClass = isPlantao ? 'bg-plantao' : (item.rotulo ? 'bg-afastado' : (isFolga ? 'bg-folga' : 'bg-indefinido'));
     const detailKey = item.id != null ? item.id : (item.re || '');
     const detailJsAttr = escapeHtml(JSON.stringify(detailKey));
@@ -7685,7 +7741,7 @@ function renderSearchTableRow(item, termsForHl, termsNormForHl) {
         <div class="st-cell st-turno">${escapeHtml(item.turno || 'N/I')}</div>
         <div class="st-cell st-empresa">${escapeHtml(item.empresa || 'N/I')}</div>
         <div class="st-cell st-telefone">${escapeHtml(item.telefone || '-')}</div>
-        <div class="st-cell st-turma">${escapeHtml(item.turma || '-')}</div>
+        <div class="st-cell st-turma">${escapeHtml(getTurmaDisplayLabel(item.turma))}</div>
         <div class="st-cell st-admissao">${item.data_admissao ? formatDate(item.data_admissao) : '-'}</div>
         <div class="st-cell st-status"><span class="status-badge" style="background-color:${statusInfo.color}">${statusInfo.text}</span></div>
         <div class="st-cell st-afastamento">${escapeHtml(item.rotulo || '-')}</div>
@@ -7926,22 +7982,25 @@ function filterQuickBetaRows(rows) {
     return (rows || []).filter(row => {
         const item = row.item || {};
         const dutyCode = row.baseDuty?.code || 'sem_turma';
+        const turmaCode = getTurmaFilterCode(item.turma);
 
         if (queryTerms.length && !queryTerms.every(term => row.searchText.includes(term))) return false;
-        if (quickBetaState.status === 'plantao' && row.duty.text !== 'PLANTÃO') return false;
-        if (quickBetaState.status === 'folga' && row.duty.text !== 'FOLGA') return false;
+        if (quickBetaState.status === 'plantao' && row.duty.code !== 'plantao') return false;
+        if (quickBetaState.status === 'folga' && row.duty.code !== 'folga') return false;
         if (quickBetaState.group !== 'all' && String(item.grupo || '') !== quickBetaState.group) return false;
         if (quickBetaState.posto !== 'all' && normalizeQuickBetaValue(item.posto) !== quickBetaState.posto) return false;
         if (quickBetaState.cargo !== 'all' && normalizeQuickBetaValue(item.cargo) !== quickBetaState.cargo) return false;
         if (quickBetaState.escala !== 'all' && normalizeQuickBetaValue(item.escala) !== quickBetaState.escala) return false;
         if (quickBetaState.turno !== 'all' && normalizeQuickBetaValue(item.turno) !== quickBetaState.turno) return false;
-        if (quickBetaState.turma === '1' && String(item.turma || '') !== '1') return false;
-        if (quickBetaState.turma === '2' && String(item.turma || '') !== '2') return false;
+        if (quickBetaState.turma === 'plantao' && turmaCode !== 'plantao') return false;
+        if (quickBetaState.turma === 'folga' && turmaCode !== 'folga') return false;
+        if (quickBetaState.turma === '1' && turmaCode !== '1') return false;
+        if (quickBetaState.turma === '2' && turmaCode !== '2') return false;
         if (quickBetaState.turma === 'invalid' && dutyCode !== 'sem_turma') return false;
         return true;
     }).sort((a, b) => {
-        const aDuty = a.duty.text === 'FOLGA' ? 0 : a.duty.text === 'PLANTÃO' ? 1 : 2;
-        const bDuty = b.duty.text === 'FOLGA' ? 0 : b.duty.text === 'PLANTÃO' ? 1 : 2;
+        const aDuty = a.duty.code === 'folga' ? 0 : a.duty.code === 'plantao' ? 1 : 2;
+        const bDuty = b.duty.code === 'folga' ? 0 : b.duty.code === 'plantao' ? 1 : 2;
         if (aDuty !== bDuty) return aDuty - bDuty;
         return String(a.item?.nome || '').localeCompare(String(b.item?.nome || ''), 'pt-BR');
     });
@@ -8042,8 +8101,8 @@ function renderQuickBetaKpis(rows, filtered) {
     if (!el) return;
     const source = filtered || [];
     const total = source.length;
-    const plantao = source.filter(row => row.duty.text === 'PLANTÃO').length;
-    const folga = source.filter(row => row.duty.text === 'FOLGA').length;
+    const plantao = source.filter(row => row.duty.code === 'plantao').length;
+    const folga = source.filter(row => row.duty.code === 'folga').length;
     const semTurma = source.filter(row => row.baseDuty?.code === 'sem_turma').length;
     const semUnidade = source.filter(row => !row.unit).length;
     el.innerHTML = [
@@ -8066,7 +8125,7 @@ function renderQuickBetaCard(row) {
     const duty = row.duty || { text: 'N/I', color: '#64748b' };
     const keyAttr = escapeHtml(JSON.stringify(row.key));
     const name = item.nome || item.colaborador || 'Sem nome';
-    const statusClass = duty.text === 'PLANTÃO' ? 'plantao' : duty.text === 'FOLGA' ? 'folga' : 'indefinido';
+    const statusClass = duty.code === 'plantao' ? 'plantao' : duty.code === 'folga' ? 'folga' : 'indefinido';
     const selected = row.key === quickBetaState.selectedKey ? 'selected' : '';
     const phoneJs = escapeHtml(JSON.stringify(item.telefone || ''));
     const nameJs = escapeHtml(JSON.stringify(name));
@@ -8090,7 +8149,7 @@ function renderQuickBetaCard(row) {
                 <span><b>Cargo</b>${escapeHtml(item.cargo || 'N/I')}</span>
                 <span><b>Escala</b>${escapeHtml(item.escala || 'N/I')}</span>
                 <span><b>Turno</b>${escapeHtml(item.turno || 'N/I')}</span>
-                <span><b>Turma</b>${escapeHtml(item.turma || 'Sem turma')}</span>
+                <span><b>Turma</b>${escapeHtml(getTurmaDisplayLabel(item.turma))}</span>
                 <span><b>Telefone</b>${escapeHtml(item.telefone || 'N/I')}</span>
             </div>
             <div class="qbeta-card-actions" onclick="event.stopPropagation()">
@@ -8182,7 +8241,7 @@ function renderQuickBetaDetail(row) {
     const raw = row.rawCollaborator || {};
     const rawUnit = row.rawUnit || {};
     const name = item.nome || item.colaborador || 'Sem nome';
-    const statusClass = row.duty.text === 'PLANTÃO' ? 'plantao' : row.duty.text === 'FOLGA' ? 'folga' : 'indefinido';
+    const statusClass = row.duty.code === 'plantao' ? 'plantao' : row.duty.code === 'folga' ? 'folga' : 'indefinido';
     const nameJs = escapeHtml(JSON.stringify(name));
     const phoneJs = escapeHtml(JSON.stringify(item.telefone || ''));
     const reJs = escapeHtml(JSON.stringify(item.re || item.matricula || ''));
@@ -8210,7 +8269,7 @@ function renderQuickBetaDetail(row) {
             ['Posto', item.posto || raw.posto],
             ['Escala', item.escala || raw.escala],
             ['Turno', item.turno || raw.turno],
-            ['Turma', item.turma || raw.turma],
+            ['Turma', getTurmaDisplayLabel(item.turma || raw.turma)],
             ['Admissão', item.admissao || raw.admissao]
         ])}
         ${renderQuickBetaSection('Contato', [
@@ -8276,7 +8335,7 @@ function copyQuickBetaSummary(key) {
         `Cargo: ${item.cargo || ''}`,
         `Escala: ${item.escala || ''}`,
         `Turno: ${item.turno || ''}`,
-        `Turma: ${item.turma || ''}`,
+        `Turma: ${getTurmaDisplayLabel(item.turma)}`,
         `Status: ${row.duty?.text || ''}`,
         `Telefone: ${item.telefone || ''}`,
         `Endereço unidade: ${unit.endereco_formatado || formatUnitAddress(unit) || ''}`
@@ -8530,7 +8589,7 @@ function renderFormalizadorUnitResults() {
 
 function renderFormalizadorSelectedPerson(row, label = 'Colaborador') {
     const item = row?.item || {}; const duty = getDutyStatusByTurma(item.turma); const statusClass = duty.code === 'plantao' ? 'plantao' : duty.code === 'folga' ? 'folga' : 'indefinido';
-    return `<article class="formalizador-person-card ${statusClass}"><div><span>${escapeHtml(label)}</span><strong>${escapeHtml(getFormalizadorCollabName(item))}</strong><small>${escapeHtml([item.matricula, item.re, item.cargo].filter(Boolean).join(' • '))}</small><small>${escapeHtml([item.posto, item.escala, item.turno, item.turma ? `Turma ${item.turma}` : ''].filter(Boolean).join(' • '))}</small></div><em>${escapeHtml(duty.text || '')}</em></article>`;
+    return `<article class="formalizador-person-card ${statusClass}"><div><span>${escapeHtml(label)}</span><strong>${escapeHtml(getFormalizadorCollabName(item))}</strong><small>${escapeHtml([item.matricula, item.re, item.cargo].filter(Boolean).join(' • '))}</small><small>${escapeHtml([item.posto, item.escala, item.turno, item.turma ? getTurmaDisplayLabel(item.turma) : ''].filter(Boolean).join(' • '))}</small></div><em>${escapeHtml(duty.text || '')}</em></article>`;
 }
 
 function renderFormalizadorUnitCard(unit = {}, label = 'Unidade') {
@@ -8687,12 +8746,12 @@ function renderizarUnidades() {
         // Separar times
         const timePlantao = efetivo.filter(p => {
             const s = getStatusInfo(p);
-            const isPlantao = s.text.includes('PLANTÃO') || s.text.includes('FT');
+            const isPlantao = isPlantaoStatusInfo(s);
             return (statusFilter === 'all' || statusFilter === 'plantao') && isPlantao;
         });
         const timeFolga = efetivo.filter(p => {
             const s = getStatusInfo(p);
-            const isFolga = s.text === 'FOLGA';
+            const isFolga = isFolgaStatusInfo(s);
             return (statusFilter === 'all' || statusFilter === 'folga') && isFolga;
         });
 
@@ -8799,8 +8858,8 @@ function atualizarEstatisticas(dados, groupFilter) {
     }
 
     const total = dadosFiltrados.length;
-    const plantao = dadosFiltrados.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT')).length;
-    const folga = dadosFiltrados.filter(d => getStatusInfo(d).text === 'FOLGA').length;
+    const plantao = dadosFiltrados.filter(d => isPlantaoStatusInfo(getStatusInfo(d))).length;
+    const folga = dadosFiltrados.filter(d => isFolgaStatusInfo(getStatusInfo(d))).length;
 
     statsContainer.innerHTML = `
         <div class="stat-card total">
@@ -10950,25 +11009,48 @@ function getStatusInfo(item) {
             .filter(Boolean);
         const absence = labels.find(l => l === 'FÉRIAS' || l === 'ATESTADO' || l === 'AFASTADO');
         if (absence) {
-            return { text: absence, color: '#0f766e' }; // Verde azulado (afastamento)
+            return { code: 'afastamento', text: absence, color: '#0f766e' }; // Verde azulado (afastamento)
         }
         if (labels.includes('FT')) {
-            return { text: 'PLANTÃO EXTRA (FT)', color: '#002D72' }; // Azul Dunamis
+            return { code: 'ft', text: 'PLANTÃO EXTRA (FT)', color: '#002D72' }; // Azul Dunamis
         }
     }
 
     // 2. Verifica escala oficial pela coluna TURMA da planilha.
     const duty = getDutyStatusByTurma(item.turma);
-    return { text: duty.text, color: duty.color };
+    return { code: duty.code, text: duty.text, color: duty.color };
 }
 
 function getDutyStatusByTurma(turma, date = new Date()) {
-    const turmaText = String(turma ?? '').trim();
-    const turmaNumber = /^[12]$/.test(turmaText) ? Number(turmaText) : NaN;
+    const turmaValue = normalizeTurmaValue(turma);
+    const turmaToken = normalizeTurmaToken(turmaValue);
     const dateObj = date instanceof Date
         ? date
         : new Date(`${normalizeFtDateKey(date) || getTodayKey()}T00:00:00`);
 
+    if (turmaToken === 'PLANTAO') {
+        return {
+            code: 'plantao',
+            text: 'PLANTÃO',
+            label: 'Plantão informado na planilha',
+            color: '#dc3545',
+            onDuty: true,
+            turma: 'PLANTÃO'
+        };
+    }
+
+    if (turmaToken === 'FOLGA') {
+        return {
+            code: 'folga',
+            text: 'FOLGA',
+            label: 'Folga informada na planilha',
+            color: '#28a745',
+            onDuty: false,
+            turma: 'FOLGA'
+        };
+    }
+
+    const turmaNumber = /^[12]$/.test(turmaToken) ? Number(turmaToken) : NaN;
     if (!Number.isFinite(turmaNumber) || (turmaNumber !== 1 && turmaNumber !== 2) || Number.isNaN(dateObj.getTime())) {
         return {
             code: 'sem_turma',
@@ -11488,9 +11570,9 @@ async function handleCoverageProximityAsync(target, container) {
 }
 
 function buildUnitCoverageReason(candidate, unitName) {
-    const status = getStatusInfo(candidate).text;
+    const statusInfo = getStatusInfo(candidate);
     const parts = [];
-    if (status.includes('FOLGA')) parts.push('está de folga hoje');
+    if (isFolgaStatusInfo(statusInfo)) parts.push('está de folga hoje');
     if (candidate.posto && unitName && normalizeUnitKey(candidate.posto) === normalizeUnitKey(unitName)) {
         parts.push(`atua na mesma unidade (${candidate.posto})`);
     }
@@ -11593,12 +11675,9 @@ function getStatusInfoForFilter(item) {
 function applyAiFilters(list, filterStatus, hideAbsence) {
     let filtered = list;
     if (filterStatus === 'plantao') {
-        filtered = filtered.filter(d => {
-            const status = getStatusInfoForFilter(d).text;
-            return status.includes('PLANTÃO') || status.includes('FT');
-        });
+        filtered = filtered.filter(d => isPlantaoStatusInfo(getStatusInfoForFilter(d)));
     } else if (filterStatus === 'folga') {
-        filtered = filtered.filter(d => getStatusInfoForFilter(d).text.includes('FOLGA'));
+        filtered = filtered.filter(d => isFolgaStatusInfo(getStatusInfoForFilter(d)));
     } else if (filterStatus === 'ft') {
         filtered = filtered.filter(d => getStatusInfoForFilter(d).text.includes('FT'));
     } else if (filterStatus === 'afastado') {
@@ -11613,15 +11692,13 @@ function applyAiFilters(list, filterStatus, hideAbsence) {
 }
 
 function isDisponivelParaCobrir(item) {
-    const status = getStatusInfo(item).text;
-    if (status.includes('FOLGA')) return true;
-    return false;
+    return isFolgaStatusInfo(getStatusInfo(item));
 }
 
 function buildAiReason(candidate, target) {
-    const status = getStatusInfo(candidate).text;
+    const statusInfo = getStatusInfo(candidate);
     const parts = [];
-    if (status.includes('FOLGA')) parts.push('está de folga hoje');
+    if (isFolgaStatusInfo(statusInfo)) parts.push('está de folga hoje');
     if (candidate.posto === target.posto) parts.push(`atua na mesma unidade (${candidate.posto})`);
     const dist = formatDistanceKm(candidate._distanceKm);
     if (dist) parts.push(`está a ~${dist} km da unidade do colaborador RE ${target.re}`);
@@ -12171,8 +12248,8 @@ function renderAiResultCard(item, target, options = {}) {
             return `<span class="label-badge">${map[r] || display}</span>`;
         }).join('');
     }
-    const isPlantao = statusInfo.text.includes('PLANTÃO') || statusInfo.text.includes('FT');
-    const isFolga = statusInfo.text === 'FOLGA';
+    const isPlantao = isPlantaoStatusInfo(statusInfo);
+    const isFolga = isFolgaStatusInfo(statusInfo);
     const isAfastado = ['FÉRIAS', 'ATESTADO', 'AFASTADO'].includes(statusInfo.text);
     const bgClass = isPlantao ? 'bg-plantao' : (isAfastado ? 'bg-afastado' : (isFolga ? 'bg-folga' : 'bg-indefinido'));
     const reason = options.reasonOverride || buildAiReason(item, target);
@@ -12249,7 +12326,7 @@ function openEditModal(id) {
     document.getElementById('edit-nome').value = item.nome;
     document.getElementById('edit-re').value = item.re;
     document.getElementById('edit-telefone').value = item.telefone || '';
-    document.getElementById('edit-turma').value = item.turma;
+    document.getElementById('edit-turma').value = normalizeTurmaValue(item.turma);
     document.getElementById('edit-inicio').value = item.rotuloInicio || '';
     document.getElementById('edit-fim').value = item.rotuloFim || '';
     document.getElementById('edit-rotulo-desc').value = item.rotuloDetalhe || '';
@@ -12416,7 +12493,12 @@ const COLLAB_DETAIL_SECTIONS = [
             { key: 'cliente', label: 'Cliente', type: 'select-dynamic', source: 'clientes' },
             { key: 'unidade_de_negocio', label: 'Unidade de Negocio', type: 'select-dynamic', source: 'unidades_negocio' },
             { key: 'data_admissao', label: 'Data de Admissao', type: 'date' },
-            { key: 'turma', label: 'Turma', type: 'select', options: [{ v: '1', l: 'Impar' }, { v: '2', l: 'Par' }] }
+            { key: 'turma', label: 'Turma', type: 'select', options: [
+                { v: 'PLANTÃO', l: 'PLANTÃO' },
+                { v: 'FOLGA', l: 'FOLGA' },
+                { v: '1', l: 'Turma 1' },
+                { v: '2', l: 'Turma 2' }
+            ] }
         ]
     },
     {
@@ -12957,7 +13039,7 @@ function buildCollaboratorDbUpdate(item) {
         telefone: item.telefone || '',
         posto: item.posto || '',
         escala: item.escala || '',
-        turma: item.turma || null,
+        turma: normalizeTurmaValue(item.turma) || null,
         rotulo: item.rotulo || '',
         rotulo_inicio: item.rotuloInicio || item.rotulo_inicio || '',
         rotulo_fim: item.rotuloFim || item.rotulo_fim || '',
@@ -13040,7 +13122,7 @@ async function insertCollaboratorInSupabase(item) {
         escala: item.escala || '',
         turno: item.turno || '',
         telefone: item.telefone || '',
-        turma: item.turma || null,
+        turma: normalizeTurmaValue(item.turma) || null,
         unidade_de_negocio: item.unidade_de_negocio || '',
         endereco: item.endereco || item.endereco_colaborador || ''
     };
@@ -13117,7 +13199,7 @@ async function salvarEdicao() {
         item.telefone = document.getElementById('edit-telefone').value.replace(/\D/g, ''); // Salva apenas números
         item.posto = document.getElementById('edit-posto').value.toUpperCase();
         item.escala = document.getElementById('edit-escala').value;
-        item.turma = parseInt(document.getElementById('edit-turma').value);
+        item.turma = normalizeTurmaValue(document.getElementById('edit-turma').value);
 
         item.rotulo = getCheckboxValues('edit-rotulo-container');
         item.rotuloInicio = document.getElementById('edit-inicio').value;
@@ -13446,7 +13528,7 @@ async function adicionarColaboradorNaUnidade() {
     const re = document.getElementById('new-colab-re').value.trim();
     const telefone = document.getElementById('new-colab-telefone').value.replace(/\D/g, '');
     const horario = document.getElementById('new-colab-horario').value.trim();
-    const turma = parseInt(document.getElementById('new-colab-turma')?.value || '1');
+    const turma = normalizeTurmaValue(document.getElementById('new-colab-turma')?.value || 'PLANTÃO');
     const postoInput = document.getElementById('new-colab-unidade').value.toUpperCase().trim();
     const posto = postoInput || document.getElementById('edit-unit-old-name').value;
 
@@ -13474,7 +13556,7 @@ async function adicionarColaboradorNaUnidade() {
         posto: posto,
         escala: horario,
         tipoEscala: tipoEscala,
-        turma: Number.isFinite(turma) ? turma : 1,
+        turma: turma || 'PLANTÃO',
         rotulo: '',
         rotuloInicio: '',
         rotuloFim: '',
@@ -13494,7 +13576,7 @@ async function adicionarColaboradorNaUnidade() {
     document.getElementById('new-colab-re').value = '';
     document.getElementById('new-colab-telefone').value = '';
     document.getElementById('new-colab-horario').value = '';
-    document.getElementById('new-colab-turma').value = '1';
+    document.getElementById('new-colab-turma').value = 'PLANTÃO';
     document.getElementById('new-colab-unidade').value = '';
     
     // Atualiza a lista no modal e no fundo
@@ -13633,7 +13715,7 @@ function exportarDadosExcel() {
             "RE": item.re,
             "Unidade": item.posto,
             "Escala": item.escala,
-            "Turma": item.turma === 1 ? "Ímpar" : "Par",
+            "Turma": getTurmaDisplayLabel(item.turma),
             "Status": status.text,
             "Rótulo": item.rotulo || "",
             "Detalhe Rótulo": item.rotuloDetalhe || "",
@@ -13670,7 +13752,7 @@ function exportarDadosCSV() {
         `"${item.re}"`,
         `"${item.posto}"`,
         `"${item.escala}"`,
-        item.turma,
+        getTurmaDisplayLabel(item.turma),
         getStatusInfo(item).text,
         item.rotulo || ""
     ]);
@@ -18645,7 +18727,7 @@ function buildExportRows() {
             "RE": item.re,
             "Unidade": item.posto,
             "Escala": item.escala,
-            "Turma": item.turma === 1 ? "Ímpar" : "Par",
+            "Turma": getTurmaDisplayLabel(item.turma),
             "Status": status.text,
             "Rótulo": item.rotulo || "",
             "Detalhe Rótulo": item.rotuloDetalhe || "",
@@ -18663,7 +18745,7 @@ function buildExportRowsFor(items) {
             "RE": item.re,
             "Unidade": item.posto,
             "Escala": item.escala,
-            "Turma": item.turma === 1 ? "Ímpar" : "Par",
+            "Turma": getTurmaDisplayLabel(item.turma),
             "Status": status.text,
             "Rótulo": item.rotulo || "",
             "Detalhe Rótulo": item.rotuloDetalhe || "",
@@ -18678,7 +18760,7 @@ function buildResumoRows() {
     const byRotulo = {};
 
     currentData.forEach(item => {
-        const status = getStatusInfo(item).text.includes('PLANTÃO') || getStatusInfo(item).text.includes('FT') ? 'PLANTÃO' : 'FOLGA';
+        const status = isPlantaoStatusInfo(getStatusInfo(item)) ? 'PLANTÃO' : 'FOLGA';
         const unidade = item.posto || 'N/I';
 
         byUnit[unidade] = byUnit[unidade] || { unidade, total: 0, plantao: 0, folga: 0 };
@@ -18707,8 +18789,7 @@ function buildResumoRows() {
 }
 
 function isPlantaoStatus(item) {
-    const text = getStatusInfo(item).text || '';
-    return text.includes('PLANTÃO') || text.includes('FT');
+    return isPlantaoStatusInfo(getStatusInfo(item));
 }
 
 function buildStatusRows(items) {
@@ -18883,7 +18964,7 @@ function exportUnitData(posto, format = 'xlsx') {
             `"${item.re}"`,
             `"${item.posto}"`,
             `"${item.escala}"`,
-            item.turma,
+            getTurmaDisplayLabel(item.turma),
             getStatusInfo(item).text,
             item.rotulo || ""
         ]);
@@ -18916,7 +18997,7 @@ function exportarCSVAtualizado() {
         `"${item.re}"`,
         `"${item.posto}"`,
         `"${item.escala}"`,
-        item.turma,
+        getTurmaDisplayLabel(item.turma),
         getStatusInfo(item).text,
         item.rotulo || ""
     ]);
@@ -18937,8 +19018,8 @@ function exportarGraficos() {
     }
     const { unitRows, rotuloRows } = buildResumoRows();
     const statusRows = [
-        { "Status": "PLANTÃO", "Quantidade": currentData.filter(d => getStatusInfo(d).text.includes('PLANTÃO') || getStatusInfo(d).text.includes('FT')).length },
-        { "Status": "FOLGA", "Quantidade": currentData.filter(d => !getStatusInfo(d).text.includes('PLANTÃO') && !getStatusInfo(d).text.includes('FT')).length }
+        { "Status": "PLANTÃO", "Quantidade": currentData.filter(d => isPlantaoStatusInfo(getStatusInfo(d))).length },
+        { "Status": "FOLGA", "Quantidade": currentData.filter(d => !isPlantaoStatusInfo(getStatusInfo(d))).length }
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(statusRows), "Status");

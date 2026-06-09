@@ -64,6 +64,36 @@ function sincronizarBaseCompletaSupabaseAgora() {
   });
 }
 
+function instalarGatilhosSupabase() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const handlers = {
+    aoEditarPlanilha: true,
+    aoMudarEstruturaSupabase: true,
+  };
+
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (handlers[trigger.getHandlerFunction()]) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp.newTrigger('aoEditarPlanilha')
+    .forSpreadsheet(spreadsheet)
+    .onEdit()
+    .create();
+
+  ScriptApp.newTrigger('aoMudarEstruturaSupabase')
+    .forSpreadsheet(spreadsheet)
+    .onChange()
+    .create();
+
+  SpreadsheetApp.getActive().toast(
+    'Gatilhos Supabase reinstalados: edição e mudança estrutural.',
+    'Supabase',
+    8
+  );
+}
+
 function reconciliarAbaSupabase_(sheet, config) {
   const scan = coletarChavesAtivasSupabase_(sheet, config);
 
